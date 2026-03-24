@@ -1,0 +1,186 @@
+/* ============ 新建实例 Modal ============ */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(var(--blur-radius, 8px));
+  opacity: 1;
+  transition: opacity 0.3s;
+}
+
+.modal-overlay.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.modal {
+  background: linear-gradient(135deg, var(--pink-100) 0%, var(--pink-100) 40%, var(--pink-200) 100%);
+  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  border-radius: 20px;
+  width: 420px;
+  max-width: 90%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent), 0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+  overflow: hidden;
+  transform: translateY(0);
+  transition: transform 0.3s;
+}
+
+.modal-overlay.hidden .modal {
+  transform: translateY(20px);
+}
+
+.modal-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid color-mix(in srgb, var(--pink-400) calc(0.25 * 100%), transparent);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent), color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent));
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: #d63384;
+  font-weight: 700;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: #e8799a;
+  font-size: 1.5rem;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: 0.2s;
+}
+
+.modal-close:hover {
+  opacity: 1;
+  color: #d63384;
+}
+
+.modal-body {
+  padding: 22px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+  color: var(--pink-600);
+  font-weight: 600;
+}
+
+.form-group input[type="text"],
+.custom-select {
+  width: 100%;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.35 * 100%), transparent);
+  border-radius: 10px;
+  color: var(--pink-700);
+  transition: 0.2s;
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+.form-group input[type="text"]:focus,
+.custom-select:focus {
+  border-color: var(--pink-500);
+  outline: none;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent);
+}
+
+.readonly-input {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.loader-radios { display: flex; gap: 6px; }
+
+.loader-radio-btn {
+  flex: 1; text-align: center; padding: 6px 2px;
+  background: rgba(255,255,255,0.6); border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
+  border-radius: 8px; cursor: pointer; transition: 0.2s;
+  font-size: 0.75rem; color: var(--pink-600);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  box-sizing: border-box;
+}
+.loader-radio-btn input { display: none; }
+.loader-icon { width: 20px; height: 20px; object-fit: contain; display: block; margin: 0 auto; }
+
+.loader-radio-btn:hover {
+  background: color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+}
+
+.loader-radio-btn.active {
+  background: var(--rose-gradient);
+  border-color: var(--pink-500);
+  color: #fff;
+  font-weight: bold;
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
+}
+
+.modal-footer {
+  padding: 16px 22px;
+  border-top: 1px solid color-mix(in srgb, var(--pink-400) calc(0.2 * 100%), transparent);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  background: color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+}
+
+.btn {
+  padding: 9px 18px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: bold;
+  transition: 0.2s;
+  font-family: inherit;
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--pink-600);
+  border: 1px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.btn-primary {
+  background: var(--rose-gradient);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.4 * 100%), transparent);
+  transform: translateY(-1px);
+}
+
+.loading-spinner {
+  font-size: 0.8rem;
+  color: #d63384;
+  margin-left: 10px;
+}

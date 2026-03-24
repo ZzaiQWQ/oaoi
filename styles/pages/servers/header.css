@@ -1,0 +1,29 @@
+/* ============ 服务器列表 - Header ============ */
+
+.servers-header {
+  margin-bottom: 10px;
+}
+
+.servers-main-title {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--pink-700);
+  letter-spacing: 2px;
+  line-height: 1.2;
+}
+
+.servers-sub-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--pink-400);
+  display: block;
+  margin-top: 2px;
+}
+
+.servers-desc {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-mid);
+  max-width: 400px;
+  line-height: 1.4;
+}

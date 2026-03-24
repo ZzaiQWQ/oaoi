@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>oaoi - Minecraft 启动器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <!-- 模块化 CSS -->
+  <link rel="stylesheet" href="styles/global.css">
+  <link rel="stylesheet" href="styles/titlebar.css">
+  <link rel="stylesheet" href="styles/sidebar.css">
+  <link rel="stylesheet" href="styles/pages/home.css">
+  <link rel="stylesheet" href="styles/pages/servers.css">
+  <link rel="stylesheet" href="styles/pages/download.css">
+  <link rel="stylesheet" href="styles/pages/settings.css">
+  <link rel="stylesheet" href="styles/pages/about.css">
+  <link rel="stylesheet" href="styles/pages/diy.css">
+  <link rel="stylesheet" href="styles/pages/instance-detail.css">
+  <link rel="stylesheet" href="styles/components/drop-pill.css">
+  <link rel="stylesheet" href="styles/components/crash-modal.css">
+</head>
+
+<body>
+
+  <!-- 全屏缩放容器 -->
+  <div id="app-wrapper" style="width: 100vw; height: 100vh; overflow: hidden; position: fixed; top: 0; left: 0;">
+    <div id="app-scale-container" style="width: 800px; height: 480px; position: relative; transform-origin: top left;">
+
+
+      <!-- 飘落的樱花花瓣 -->
+      <div class="sakura-container" id="sakuraContainer"></div>
+
+      <!-- 主容器 -->
+      <div class="launcher">
+        <!-- 真正贴合边框的背景图层 -->
+        <div class="global-bg" id="globalBg" style="position: absolute; inset: 0; z-index: -1; pointer-events: none;">
+          <img src="assets/bg.png" alt="bg" id="globalBgImg" style="width: 100%; height: 100%; object-fit: cover;">
+        </div>
+        <!-- 自定义标题栏 -->
+        <div class="custom-titlebar" data-tauri-drag-region>
+          <div class="window-controls" data-no-drag>
+            <button class="win-btn win-minimize" id="winMinimize" title="最小化">
+              <svg width="12" height="12" viewBox="0 0 12 12">
+                <rect y="5" width="12" height="2" rx="1" fill="currentColor" />
+              </svg>
+            </button>
+            <button class="win-btn win-maximize" id="winMaximize" title="最大化">
+              <svg width="12" height="12" viewBox="0 0 12 12">
+                <rect x="1" y="1" width="10" height="10" rx="2" stroke="currentColor" stroke-width="1.5" fill="none" />
+              </svg>
+            </button>
+            <button class="win-btn win-close" id="winClose" title="关闭">
+              <svg width="12" height="12" viewBox="0 0 12 12">
+                <path d="M2 2L10 10M10 2L2 10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 左侧导航栏 -->
+        <nav class="sidebar">
+          <a href="#" class="nav-item active" data-page="home">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" />
+              </svg>
+            </div>
+            <span>主页</span>
+          </a>
+          <a href="#" class="nav-item" data-page="servers">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M20 13H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1v-6c0-.55-.45-1-1-1zM7 19c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM20 3H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1V4c0-.55-.45-1-1-1zM7 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
+              </svg>
+            </div>
+            <span>服务器列表</span>
+          </a>
+          <a href="#" class="nav-item" data-page="download">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+              </svg>
+            </div>
+            <span>下载</span>
+          </a>
+          <a href="#" class="nav-item" data-page="settings">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+              </svg>
+            </div>
+            <span>设置</span>
+          </a>
+          <a href="#" class="nav-item" data-page="about">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z" />
+              </svg>
+            </div>
+            <span>关于</span>
+          </a>
+          <a href="#" class="nav-item" data-page="diy">
+            <div class="nav-icon">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path
+                  d="M12 22C6.49 22 2 17.51 2 12S6.49 2 12 2s10 4.04 10 9c0 3.31-2.69 6-6 6h-1.77c-.28 0-.5.22-.5.5 0 .12.05.23.13.33.41.47.64 1.06.64 1.67A2.5 2.5 0 0 1 12 22zm0-18c-4.41 0-8 3.59-8 8s3.59 8 8 8c.28 0 .5-.22.5-.5a.54.54 0 0 0-.14-.35c-.41-.46-.63-1.05-.63-1.65a2.5 2.5 0 0 1 2.5-2.5H16c2.21 0 4-1.79 4-4 0-3.86-3.59-7-8-7z" />
+                <circle cx="6.5" cy="11.5" r="1.5" />
+                <circle cx="9.5" cy="7.5" r="1.5" />
+                <circle cx="14.5" cy="7.5" r="1.5" />
+                <circle cx="17.5" cy="11.5" r="1.5" />
+              </svg>
+            </div>
+            <span>DIY</span>
+          </a>
+
+          <!-- 底部玩家信息 -->
+          <div class="sidebar-player" data-no-drag>
+            <img class="player-avatar" id="playerAvatar" src="https://mc-heads.net/avatar/MHF_Steve/40" alt="avatar">
+            <div class="player-info">
+              <span class="player-name-display" id="sidebarPlayerName">未登录</span>
+              <div class="login-mode-switch">
+                <button class="mode-btn active" id="modeOffline" data-mode="offline">离线</button>
+                <button class="mode-btn" id="modeOnline" data-mode="online">正版</button>
+              </div>
+            </div>
+          </div>
+        </nav>
+
+        <!-- 主内容区 -->
+        <main class="content">
+
+          <!-- ========== 主页 ========== -->
+          <div class="page page-home active" id="pageHome">
+            <!-- 顶部大图区域 -->
+            <div class="hero">
+              <img src="assets/bg.png" alt="樱花背景" class="hero-bg">
+              <div class="hero-overlay"></div>
+              <div class="server-title">
+                <span class="title-deco left">✿</span>
+                <h1>oaoi</h1>
+                <span class="title-deco right">✿</span>
+              </div>
+              <div class="hero-actions" data-no-drag>
+                <div class="launch-row">
+                  <select id="versionSelector" style="display:none;"></select>
+                  <div class="vd" id="versionDropdown">
+                    <button type="button" class="vd-btn" id="versionDropdownBtn">
+                      <span id="versionDropdownText">-- 选择实例 --</span>
+                    </button>
+                    <div class="vd-list hidden" id="versionDropdownList"></div>
+                  </div>
+                  <button class="launch-btn" id="launchBtn">
+                    <span>启动游戏</span>
+                  </button>
+                </div>
+
+              </div>
+            </div>
+            <!-- 最新资讯 -->
+            <div class="news-section">
+              <h2 class="news-title"><span class="news-icon">🌸</span> 最新资讯</h2>
+              <div class="news-cards" data-no-drag id="newsCards">
+                <div class="news-loading">加载中...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ========== 服务器列表页 ========== -->
+          <div class="page page-servers" id="pageServers">
+            <div class="servers-header">
+              <h1 class="servers-main-title">oaoi</h1>
+              <span class="servers-sub-title">服务器列表</span>
+              <p class="servers-desc">探索樱花盛开的每一个角落，与数千名玩家共同开启属于你的史诗冒险。</p>
+            </div>
+            <div class="servers-grid" data-no-drag>
+              <div class="srv-card srv-card-featured">
+                <img class="srv-card-bg" src="assets/bg.png" alt="">
+                <div class="srv-card-bg-overlay"></div>
+                <div class="srv-card-body">
+                  <div class="srv-card-top">
+                    <span class="srv-badge srv-badge-hot">热门</span>
+                    <span class="srv-ping">12ms</span>
+                  </div>
+                  <div class="srv-card-bottom">
+                    <h3 class="srv-name-lg">甜心之城 (Heart City)</h3>
+                    <p class="srv-desc">本服核心经济系统全面升级！超高自由度的领地贸易与梦幻的建筑社区等候你的加入。</p>
+                    <div class="srv-stats">
+                      <div class="srv-stat"><span class="srv-stat-label">Players</span><span class="srv-stat-value">428
+                          /
+                          500</span></div>
+                      <div class="srv-stat-divider"></div>
+                      <div class="srv-stat"><span class="srv-stat-label">Version</span><span
+                          class="srv-stat-value">1.20.1</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="srv-card srv-card-standard">
+
+                <span class="srv-badge srv-badge-classic">Classic</span>
+                <h3 class="srv-name">生存一服</h3>
+                <p class="srv-desc-sm">硬核生存，保持原汁原味的方块世界，没有任何复杂插件干扰。</p>
+                <div class="srv-footer">
+                  <div class="srv-online"><span class="srv-online-dot"></span><span>142 / 200</span></div><span
+                    class="srv-ping-sm">Ping: 24ms</span>
+                </div>
+              </div>
+              <div class="srv-card srv-card-standard">
+
+                <span class="srv-badge srv-badge-new">新服</span>
+                <h3 class="srv-name">空岛战争</h3>
+                <p class="srv-desc-sm">全新的PVP空岛地图，丰厚的开服大礼包限时领取中。</p>
+                <div class="srv-footer">
+                  <div class="srv-online"><span class="srv-online-dot"></span><span>89 / 150</span></div><span
+                    class="srv-ping-sm">Ping: 31ms</span>
+                </div>
+              </div>
+              <div class="srv-card srv-card-standard">
+
+                <span class="srv-badge srv-badge-rpg">RPG</span>
+                <h3 class="srv-name">月下幻境</h3>
+                <p class="srv-desc-sm">深度的角色扮演系统，史诗级的关卡与BOSS战系统。</p>
+                <div class="srv-footer">
+                  <div class="srv-online"><span class="srv-online-dot"></span><span>64 / 100</span></div><span
+                    class="srv-ping-sm">Ping: 45ms</span>
+                </div>
+              </div>
+              <div class="srv-card srv-card-more">
+                <h3>正在寻找更多？</h3>
+                <p>访问官方Wiki查看所有服务器特性与玩家指南。</p>
+                <button class="srv-more-btn">查看完整列表</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ========== 下载页 ========== -->
+          <div class="page page-download" id="pageDownload">
+            <div class="dl-header">
+              <h1 class="dl-title">下载中心</h1>
+              <p class="dl-subtitle">Download Center · 管理游戏版本与 Mod 加载器</p>
+            </div>
+            <div class="dl-two-col" data-no-drag>
+              <div class="dl-left">
+                <!-- Tab 按钮 -->
+                <div class="dl-top-tabs">
+                  <button class="dl-top-tab active" data-dl-tab="versions">📦 官方版本</button>
+                  <button class="dl-top-tab" data-dl-tab="modpacks">🎮 整合包</button>
+                </div>
+
+                <!-- Tab 1: 官方版本 -->
+                <div class="dl-tab-content active" id="dlTabVersions">
+                  <div class="dl-versions-section">
+                    <div class="dl-versions-header">
+                      <div class="dl-toolbar">
+                        <div class="dl-filters">
+                          <button class="dl-filter-btn active" data-filter="release">正式版</button>
+                          <button class="dl-filter-btn" data-filter="snapshot">快照</button>
+                          <button class="dl-filter-btn" data-filter="all">全部</button>
+                        </div>
+                        <div class="dl-filters" id="dlSourceFilters">
+                          <button class="dl-filter-btn active" data-source="official">官方</button>
+                          <button class="dl-filter-btn" data-source="bmcl">镜像</button>
+                        </div>
+                        <input type="text" class="dl-search" id="dlSearch" placeholder="搜索...">
+                      </div>
+                    </div>
+                    <div class="dl-list" id="dlList">
+                      <div class="dl-loading">正在加载版本列表...</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Tab 2: 整合包搜索 -->
+                <div class="dl-tab-content" id="dlTabModpacks">
+                  <div class="dl-versions-section">
+                    <div class="dl-versions-header">
+                      <div class="dl-toolbar">
+                        <input type="text" class="dl-search" id="modpackSearch" placeholder="搜索整合包..." style="flex:1">
+                        <button class="dl-filter-btn active" id="modpackSearchBtn" style="white-space:nowrap">🔍
+                          搜索</button>
+                      </div>
+                    </div>
+                    <div class="dl-list" id="modpackList">
+                      <div class="dl-loading">点击搜索或直接浏览热门整合包...</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="dl-right">
+                <div class="installed-section" id="installedSection">
+                  <div class="installed-header">
+                    <h2 class="installed-title">已安装版本</h2>
+                    <span class="installed-count" id="installedCount">0</span>
+                  </div>
+                  <p style="font-size:10px;color:var(--text-light);margin:-4px 0 8px 2px;">点击实例可管理配置、Mod、材质包与资源包</p>
+                  <div class="installed-list" id="installedList"></div>
+                </div>
+                <div class="dl-active-section">
+                  <div class="dl-active-list" id="dlActiveList">
+                    <h2 class="dl-section-title">活跃下载</h2>
+                    <div class="dl-active-empty">暂无下载任务</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ========== 设置页 ========== -->
+          <div class="page page-settings" id="pageSettings">
+            <div class="settings-header">
+              <h1 class="settings-main-title">设置中心</h1>
+              <span class="settings-sub-title">Settings Center • Global Configuration</span>
+            </div>
+            <div class="settings-grid" data-no-drag>
+              <div class="set-card set-card-perf">
+                <!-- Tab 切换 -->
+                <div class="dl-top-tabs" style="margin-bottom:6px;">
+                  <button type="button" class="dl-top-tab set-left-tab active" data-set-tab="perf">⚙️ 性能分配</button>
+                  <button type="button" class="dl-top-tab set-left-tab" data-set-tab="ai">🤖 AI 崩溃分析</button>
+                </div>
+                <!-- 性能分配内容 -->
+                <div class="set-tab-content" id="setTabPerf">
+                  <div class="set-field">
+                    <label>游戏目录 (Game Directory)</label>
+                    <div class="set-path-row">
+                      <div class="set-path-input" id="gameDirDisplay">未选择目录</div>
+                      <button class="set-browse-btn" id="gameDirBtn">📁 选择目录</button>
+                    </div>
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="set-field">
+                    <div class="set-field-row">
+                      <label>最大内存分配 (Memory Allocation)</label>
+                      <span class="set-field-value"><input type="number" id="memValue" value="4096" min="512" step="512" class="set-mem-input">
+                        MB</span>
+                    </div>
+                    <input type="range" class="set-slider" id="memSlider" min="1024" max="16384" value="4096"
+                      step="512">
+                    <div class="set-slider-labels"><span>1024MB</span><span>8192MB</span><span>16384MB</span></div>
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="set-field">
+                    <label>自定义 JVM 参数 (Custom JVM Arguments)</label>
+                    <input type="text" class="set-text-input" id="customJvmArgs"
+                      placeholder="例如: -XX:+AlwaysPreTouch -Dfml.readTimeout=120">
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="set-field">
+                    <label>Java 运行环境 (Java Executable Path)</label>
+                    <div class="java-mode-toggle">
+                      <button type="button" class="java-mode-btn active" id="javaModeAuto" data-mode="auto">🔄
+                        自动选择</button>
+                      <button type="button" class="java-mode-btn" id="javaModeManual" data-mode="manual">📂
+                        手动选择</button>
+                    </div>
+                    <div class="java-auto-desc" id="javaAutoDesc">
+                      <p>如未安装对应 Java 将自动下载，安装到 <code>runtime/</code> 目录</p>
+                    </div>
+                    <div class="java-manual-controls" id="javaManualControls" style="display:none;">
+                      <div class="set-path-row">
+                        <div class="set-path-input" id="javaPathDisplay">未检测到 Java</div>
+                        <button class="set-browse-btn" id="javaBrowseBtn">浏览...</button>
+                        <button class="set-browse-btn set-auto-btn" id="javaAutoBtn">🔍 自动查找</button>
+                      </div>
+                      <div class="java-results" id="javaResults">
+                        <div class="java-results-header" id="javaResultsToggle">
+                          <span>📋 搜索到的 Java 版本 (<span id="javaCount">0</span>)</span>
+                          <span class="java-results-arrow" id="javaArrow">▶</span>
+                        </div>
+                        <div class="java-results-list" id="javaResultsList"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- AI 崩溃分析内容 -->
+                <div class="set-tab-content" id="setTabAi" style="display:none;">
+                  <div class="set-field">
+                    <label>API Key</label>
+                    <input type="password" class="set-text-input" id="aiApiKey" placeholder="填写 API Key 启用 AI 分析...">
+                    <p class="ai-hint">未填写则不启用 AI 分析，崩溃时仅使用本地规则匹配</p>
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="set-field">
+                    <label>API 地址 (兼容 OpenAI 格式)</label>
+                    <input type="text" class="set-text-input" id="aiApiUrl" placeholder="例如: https://api.deepseek.com">
+                    <p class="ai-hint">支持 DeepSeek / OpenAI / 任何兼容 OpenAI 格式的 API</p>
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="set-field">
+                    <label>模型名称</label>
+                    <input type="text" class="set-text-input" id="aiModel" placeholder="例如: deepseek-chat">
+                  </div>
+                  <div class="set-divider"></div>
+                  <div class="ai-actions">
+                    <button class="set-browse-btn" id="aiTestBtn" style="flex:0 0 auto;">🧪 测试连接</button>
+                    <span class="ai-test-result" id="aiTestResult"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="set-card set-card-display">
+                <h2 class="set-card-title">🔑 账户管理</h2>
+                <div class="set-field">
+                  <label>正版账号列表 (Microsoft Accounts)</label>
+                  <div class="account-list" id="accountList">
+                    <!-- 动态生成账号卡片 -->
+                  </div>
+                  <button class="set-browse-btn" id="msLoginBtn" style="margin-top:8px;width:100%">➕ 添加微软账号</button>
+                  <div id="msLoginStatus" style="font-size:11px;color:var(--text-light);margin-top:4px;display:none">
+                  </div>
+                </div>
+                <div class="set-divider"></div>
+                <div class="set-field">
+                  <label>离线模式 (Offline Mode)</label>
+                  <div class="set-path-row">
+                    <input type="text" class="set-player-input" id="playerNameInput" placeholder="输入玩家名..."
+                      maxlength="16" style="flex:1">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ========== 关于页 ========== -->
+          <div class="page page-about" id="pageAbout">
+            <div class="about-scroll">
+              <div class="about-hero-row">
+                <div class="about-hero-img">
+                  <img src="assets/bg.png" alt="Sakura Town">
+                  <div class="about-hero-overlay"></div>
+                  <div class="about-hero-text">
+                    <h1>关于 oaoi</h1>
+                    <p>轻量、美观、开源的 Minecraft 启动器</p>
+                  </div>
+                </div>
+                <div class="about-version-card">
+                  <span class="about-release-badge">v1.0.0</span>
+                  <h2>oaoi 启动器</h2>
+                  <p>支持 Fabric / Forge / NeoForge / Quilt 加载器，一键导入 CurseForge 与 Modrinth 整合包。</p>
+                  <div class="about-status"><span class="about-status-dot"></span><span>开源项目</span></div>
+                </div>
+              </div>
+              <div class="about-mid-row">
+                <div class="about-team-card">
+                  <h3>核心开发团队</h3>
+                  <div class="about-team-grid">
+                    <div class="about-member">
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/Gy_ZZ/48" alt="Zzai"></div><span
+                        class="about-member-name">Zzai</span><span class="about-member-role">主开发</span>
+                    </div>
+                    <div class="about-member">
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/_Moon_ovo/48" alt="oaoi"></div>
+                      <span class="about-member-name">oaoi</span><span class="about-member-role">设计</span>
+                    </div>
+                    <div class="about-member">
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/MuMu_SAIGAO/48" alt="mumu"></div>
+                      <span class="about-member-name">mumu</span><span class="about-member-role">美术总监</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="about-links-card">
+                  <a class="about-link-item" href="#"><span class="about-link-icon">💬</span><span>加入
+                      Discord</span><span class="about-link-arrow">→</span></a>
+                  <a class="about-link-item" href="#"><span class="about-link-icon">💬</span><span>QQ
+                      群：592810</span><span class="about-link-arrow">→</span></a>
+                  <a class="about-link-item" href="#"><span class="about-link-icon">🌐</span><span>官方网站</span><span
+                      class="about-link-arrow">→</span></a>
+                </div>
+              </div>
+              <div class="about-changelog">
+                <div class="about-changelog-header">
+                  <h3>📋 更新日志</h3><span>最近更新</span>
+                </div>
+                <div class="about-changelog-list">
+                  <div class="about-log-item"><span class="about-log-dot"></span>
+                    <div>
+                      <p class="about-log-title">玻璃拟态界面框架</p>
+                      <p class="about-log-desc">全面采用萌樱玻璃拟态设计系统。</p>
+                    </div>
+                  </div>
+                  <div class="about-log-item"><span class="about-log-dot"></span>
+                    <div>
+                      <p class="about-log-title">动画引擎增强</p>
+                      <p class="about-log-desc">全新樱花粒子系统与流畅页面过渡。</p>
+                    </div>
+                  </div>
+                  <div class="about-log-item"><span class="about-log-dot"></span>
+                    <div>
+                      <p class="about-log-title">性能优化</p>
+                      <p class="about-log-desc">启动速度提升 40%，内存占用更低。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="about-footer">Designed with ❤️ by Sakura Town Team © 2026</div>
+            </div>
+          </div>
+
+          <!-- ========== DIY 个性化 ========== -->
+          <div class="page" data-page="diy" id="pageDiy">
+            <div class="diy-scroll" data-no-drag>
+
+              <!-- 背景图片 -->
+              <div class="diy-section">
+                <div class="diy-section-title"><span>🖼️</span> 背景图片</div>
+                <div class="diy-bg-grid">
+                  <div class="diy-bg-item active" data-bg="assets/bg.png">
+                    <img src="assets/bg.png" alt="默认背景">
+                    <div class="diy-bg-label">默认</div>
+                  </div>
+                  <div class="diy-bg-item" data-bg="assets/news1.png">
+                    <img src="assets/news1.png" alt="樱花祭典">
+                    <div class="diy-bg-label">樱花祭典</div>
+                  </div>
+                  <div class="diy-bg-item" data-bg="assets/news2.png">
+                    <img src="assets/news2.png" alt="甜心之城">
+                    <div class="diy-bg-label">甜心之城</div>
+                  </div>
+                  <div class="diy-bg-item diy-bg-custom" id="diyCustomBg">
+                    <span>📁</span>
+                    <span>自定义</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 樱花动画 -->
+              <div class="diy-section">
+                <div class="diy-section-title"><span>🌸</span> 樱花动画</div>
+                <div class="diy-row">
+                  <div>
+                    <div class="diy-row-label">飘落花瓣</div>
+                    <div class="diy-row-desc">开启/关闭樱花飘落效果</div>
+                  </div>
+                  <button class="diy-toggle on" id="diySakuraToggle"></button>
+                </div>
+                <div class="diy-row">
+                  <div>
+                    <div class="diy-row-label">失焦暂停</div>
+                    <div class="diy-row-desc">窗口不在前台时暂停花瓣动画，节省性能</div>
+                  </div>
+                  <button class="diy-toggle on" id="diyBlurPauseToggle"></button>
+                </div>
+                <div class="diy-slider-row">
+                  <label>花瓣数量</label>
+                  <input type="range" id="diyPetalCount" min="5" max="35" value="15">
+                  <span class="diy-slider-val" id="diyPetalCountVal">15</span>
+                </div>
+                <div class="diy-color-row">
+                  <label>花瓣颜色</label>
+                  <input type="color" id="diyPetalColor" value="#ffb3c6">
+                </div>
+                <div class="diy-row">
+                  <div>
+                    <div class="diy-row-label">花瓣样式</div>
+                    <div class="diy-row-desc">切换飘落粒子的样式</div>
+                  </div>
+                </div>
+                <div class="diy-style-grid">
+                  <button class="diy-style-btn active" data-style="sakura">🌸 樱花</button>
+                  <button class="diy-style-btn" data-style="leaf">🍃 落叶</button>
+                  <button class="diy-style-btn" data-style="snow">❄️ 雪花</button>
+                  <button class="diy-style-btn" data-style="star">⭐ 星光</button>
+                </div>
+              </div>
+
+              <!-- 主题色 -->
+              <div class="diy-section">
+                <div class="diy-section-title"><span>🎨</span> 主题色</div>
+                <div class="diy-theme-grid">
+                  <button class="diy-theme-btn active" data-theme="pink" style="--tc:#ff6b8a;">
+                    <span class="diy-theme-dot"></span> 樱花粉
+                  </button>
+                  <button class="diy-theme-btn" data-theme="blue" style="--tc:#6ba3ff;">
+                    <span class="diy-theme-dot"></span> 天空蓝
+                  </button>
+                  <button class="diy-theme-btn" data-theme="purple" style="--tc:#a06bff;">
+                    <span class="diy-theme-dot"></span> 梦幻紫
+                  </button>
+                  <button class="diy-theme-btn" data-theme="green" style="--tc:#6bcf7f;">
+                    <span class="diy-theme-dot"></span> 清新绿
+                  </button>
+                  <button class="diy-theme-btn" data-theme="orange" style="--tc:#ffA06b;">
+                    <span class="diy-theme-dot"></span> 暖阳橙
+                  </button>
+                </div>
+              </div>
+
+              <!-- 界面调整 -->
+              <div class="diy-section">
+                <div class="diy-section-title"><span>⚙️</span> 界面调整</div>
+                <div class="diy-slider-row">
+                  <label>背景模糊 <small style="color:var(--text-light);font-weight:400">(降低可减少GPU占用)</small></label>
+                  <input type="range" id="diyBlurRadius" min="0" max="30" value="1">
+                  <span class="diy-slider-val" id="diyBlurRadiusVal">1px</span>
+                </div>
+
+                <div class="diy-slider-row">
+                  <label>窗口透明度</label>
+                  <input type="range" id="diyOpacity" min="60" max="100" value="68">
+                  <span class="diy-slider-val" id="diyOpacityVal">68%</span>
+                </div>
+                <div class="diy-slider-row">
+                  <label>窗口圆角</label>
+                  <input type="range" id="diyRadius" min="0" max="30" value="16">
+                  <span class="diy-slider-val" id="diyRadiusVal">16px</span>
+                </div>
+              </div>
+
+              <!-- 窗口大小 -->
+              <div class="diy-section">
+                <div class="diy-section-title"><span>📐</span> 窗口大小</div>
+                <div class="diy-row">
+                  <div>
+                    <div class="diy-row-label">当前窗口大小</div>
+                    <div class="diy-row-desc" id="diyWindowSizeDisplay">800 × 480</div>
+                  </div>
+                  <button class="diy-reset-btn" id="diyResetWindowSize"
+                    style="margin:0;padding:6px 16px;font-size:12px;">↩ 恢复默认 (800×480)</button>
+                </div>
+              </div>
+
+              <!-- 重置 -->
+              <button class="diy-reset-btn" id="diyResetBtn">🔄 恢复默认设置</button>
+
+            </div>
+          </div>
+
+
+          <!-- ========== 实例详情页 ========== -->
+          <div class="page page-instance-detail" id="pageInstanceDetail">
+            <div class="instance-detail-header" data-no-drag>
+              <button class="instance-back-btn" id="instanceBackBtn">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
+                </svg>
+                返回
+              </button>
+              <h2 class="instance-detail-title">
+                <span id="instanceDetailName">实例名称</span>
+              </h2>
+            </div>
+
+            <div class="instance-detail-info">
+              <div class="instance-info-card">
+                <span class="info-label">游戏版本</span>
+                <span class="info-value" id="instanceDetailMcVer">-</span>
+              </div>
+              <div class="instance-info-card">
+                <span class="info-label">运行环境</span>
+                <span class="info-value" id="instanceDetailLoader">-</span>
+              </div>
+              <div class="instance-info-card">
+                <span class="info-label">Loader 版本</span>
+                <span class="info-value" id="instanceDetailLoaderVer">-</span>
+              </div>
+              <div class="instance-info-actions" data-no-drag>
+                <button class="instance-action-btn instance-action-launch" id="instanceLaunchBtn">启动</button>
+                <button class="instance-action-btn instance-action-delete" id="instanceDeleteBtn">删除</button>
+              </div>
+            </div>
+
+            <h3 class="instance-section-title">快速访问</h3>
+            <div class="instance-folder-row" data-no-drag>
+              <button class="instance-folder-btn" data-sub="" id="folderRoot">根目录</button>
+              <button class="instance-folder-btn" data-sub="mods" id="folderMods">Mod</button>
+              <button class="instance-folder-btn" data-sub="saves" id="folderSaves">存档</button>
+              <button class="instance-folder-btn" data-sub="resourcepacks" id="folderResourcePacks">材质包</button>
+              <button class="instance-folder-btn" data-sub="shaderpacks" id="folderShaders">光影包</button>
+              <button class="instance-folder-btn" data-sub="config" id="folderConfig">配置</button>
+            </div>
+
+            <div class="mod-manager-section" data-no-drag>
+              <div class="mod-manager-header">
+                <div class="mod-tabs">
+                  <button class="mod-tab active" data-tab="installed" id="modTabInstalled">已安装 <span class="mod-count"
+                      id="modCount">0</span></button>
+                  <button class="mod-tab" data-tab="online" id="modTabOnline">在线搜索</button>
+                </div>
+                <div class="online-category-tabs" id="onlineCategoryTabs">
+                  <button class="online-cat-btn active" data-type="mod">Mod</button>
+                  <button class="online-cat-btn" data-type="resourcepack">材质包</button>
+                  <button class="online-cat-btn" data-type="shader">光影包</button>
+                </div>
+              </div>
+
+              <!-- 已安装 Tab -->
+              <div class="mod-tab-content active" id="modTabInstalledContent">
+                <div class="mod-search-bar">
+                  <input type="text" id="modSearchInput" placeholder="搜索已安装 Mod..." class="mod-search-input">
+                  <button class="mod-refresh-btn" id="modRefreshBtn" title="刷新列表">↻</button>
+                </div>
+                <div class="mod-list" id="modList">
+                  <div class="mod-list-empty">加载中...</div>
+                </div>
+              </div>
+
+              <!-- 在线搜索 Tab -->
+              <div class="mod-tab-content" id="modTabOnlineContent">
+                <div class="mod-search-bar">
+                  <input type="text" id="onlineModSearch" placeholder="搜索 Mod..." class="mod-search-input">
+                  <button class="mod-search-go" id="onlineModSearchBtn">搜索</button>
+                </div>
+                <div class="mod-online-list" id="onlineModList">
+                  <div class="mod-list-empty">输入关键词搜索 Modrinth + CurseForge 上的 Mod</div>
+                </div>
+              </div>
+            </div>
+
+
+          </div>
+
+        </main>
+      </div>
+
+      <!-- 新建实例 Modal -->
+      <div id="newInstanceModal" class="modal-overlay hidden">
+        <div class="modal" data-no-drag style="width: 500px;">
+          <div class="modal-header">
+            <h3>新建实例</h3>
+            <button id="closeModalBtn" class="modal-close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group" style="display:none;" id="instMetaUrlGroup">
+              <input type="hidden" id="instMetaUrl">
+            </div>
+            <div class="form-group">
+              <label>实例名称</label>
+              <input type="text" id="instNameInput" placeholder="例如：我的世界 1.20">
+            </div>
+            <div class="form-group">
+              <label>游戏版本</label>
+              <input type="text" id="instMcVersion" readonly class="readonly-input">
+            </div>
+            <div class="form-group">
+              <label>运行环境 (Loader)</label>
+              <div class="loader-radios">
+                <label class="loader-radio-btn active">
+                  <input type="radio" name="loader" value="vanilla" checked>
+                  <img src="assets/loaders/vanilla.png" alt="Vanilla" class="loader-icon" /><span>原版</span>
+                </label>
+                <label class="loader-radio-btn">
+                  <input type="radio" name="loader" value="fabric">
+                  <img src="assets/loaders/fabric.png" alt="Fabric" class="loader-icon" /><span>Fabric</span>
+                </label>
+                <label class="loader-radio-btn">
+                  <input type="radio" name="loader" value="quilt">
+                  <img src="assets/loaders/quilt.svg" alt="Quilt" class="loader-icon" /><span>Quilt</span>
+                </label>
+                <label class="loader-radio-btn">
+                  <input type="radio" name="loader" value="forge">
+                  <img src="assets/loaders/forge.png" alt="Forge" class="loader-icon" /><span>Forge</span>
+                </label>
+                <label class="loader-radio-btn">
+                  <input type="radio" name="loader" value="neoforge">
+                  <img src="assets/loaders/neoforge.png" alt="NeoForge" class="loader-icon" /><span>NeoForge</span>
+                </label>
+              </div>
+            </div>
+            <div class="form-group" id="loaderVersionGroup" style="display: none;">
+              <label>加载器版本 <span id="loaderTargetVersion" class="loading-spinner"></span></label>
+              <select id="instLoaderVersion" class="custom-select"></select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button id="cancelInstBtn" class="btn btn-secondary">取消</button>
+            <button id="createInstBtn" class="btn btn-primary">确认创建</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 首次启动选择目录弹窗 -->
+      <div class="modal-overlay hidden" id="firstLaunchModal" style="z-index: 9999;">
+        <div class="modal-content" data-no-drag style="max-width: 460px;">
+          <div class="modal-header">
+            <h2>🌸 欢迎使用 oaoi 启动器</h2>
+          </div>
+          <div class="modal-body" style="text-align: center;">
+            <p style="margin-bottom: 16px; color: #c94a6a; font-size: 15px;">
+              请选择一个文件夹作为游戏安装目录<br>
+              <small style="color: #999;">所有版本文件将存放在此目录下</small>
+            </p>
+            <div id="firstLaunchDirDisplay"
+              style="background: rgba(255,182,193,0.15); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; word-break: break-all; color: #999; min-height: 20px;">
+              未选择
+            </div>
+            <button id="firstLaunchDirBtn" class="btn btn-secondary" style="margin-bottom: 8px;">📂 选择文件夹</button>
+          </div>
+          <div class="modal-footer">
+            <button id="firstLaunchConfirmBtn" class="btn btn-primary" disabled>确认</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 整合包版本选择弹窗 -->
+      <div class="modal-overlay hidden" id="modpackVersionModal">
+        <div class="modal-content" data-no-drag style="max-width: 520px;">
+          <div class="modal-header">
+            <h2 id="modpackVersionTitle">选择版本</h2>
+          </div>
+          <div class="modal-body">
+            <div id="modpackVersionList" class="modpack-version-list">
+              <div class="dl-loading">加载中...</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button id="modpackVersionCancel" class="btn btn-secondary">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 整合包拖拽蒙层 -->
+      <div id="modpackDropOverlay">
+        <div class="drop-icon">📦</div>
+        <div class="drop-title">松开以导入整合包</div>
+        <div class="drop-desc">支持 CurseForge (.zip) 和 Modrinth (.mrpack)</div>
+      </div>
+      <div id="modpackDropPill" class="drop-pill" style="display:none;"></div>
+
+      <!-- 模块化 JS -->
+      <script src="js/tauri.js"></script>
+      <script src="js/utils.js"></script>
+      <script src="js/navigation.js"></script>
+      <script src="js/sakura.js"></script>
+      <script src="js/pages/home.js"></script>
+      <script src="js/pages/settings.js"></script>
+      <script src="js/pages/download.js"></script>
+      <script src="js/pages/modpack.js"></script>
+      <script src="js/pages/modpack_drop.js"></script>
+      <script src="js/pages/diy.js"></script>
+      <script src="js/pages/instance-detail.js"></script>
+      <script src="js/main.js"></script>
+      <script>document.addEventListener('DOMContentLoaded', () => { initModpackDrop(); });</script>
+
+
+
+      <!-- AI 崩溃分析弹窗 -->
+      <div class="crash-modal-overlay" id="crashModal" style="display:none;">
+        <div class="crash-modal">
+          <div class="crash-modal-header">
+            <span class="crash-modal-icon">🤖</span>
+            <div>
+              <h3 class="crash-modal-title">AI 崩溃分析</h3>
+              <p class="crash-modal-subtitle" id="crashModalVersion"></p>
+            </div>
+          </div>
+          <div class="crash-modal-body" id="crashModalBody"></div>
+          <div class="crash-modal-footer">
+            <button class="crash-modal-btn" id="crashModalClose">我知道了</button>
+          </div>
+        </div>
+      </div>
+
+
+
+    </div>
+  </div>
+</body>
+
+</html>

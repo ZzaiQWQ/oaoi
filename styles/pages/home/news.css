@@ -1,0 +1,69 @@
+/* ============ 主页 - 最新资讯 ============ */
+
+.news-section {
+  padding: 16px 22px 18px;
+  flex: 1;
+  min-height: 0;
+  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  overflow-y: auto;
+}
+
+.news-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-dark);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.news-icon { font-size: 18px; }
+
+.news-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.news-card {
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-soft);
+  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.news-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-pink);
+  border-color: color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+}
+
+.news-card-img { height: 110px; overflow: hidden; }
+
+.news-card-img img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  transition: transform 0.4s ease;
+}
+
+.news-card:hover .news-card-img img { transform: scale(1.05); }
+
+.news-card-content { padding: 10px 14px 12px; }
+.news-card-content h3 { font-size: 14px; font-weight: 700; color: var(--pink-600); margin-bottom: 3px; }
+.news-card-content p { font-size: 12px; color: var(--text-mid); line-height: 1.4; }
+
+.news-empty, .news-loading {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 28px 16px;
+  color: var(--pink-600);
+  font-size: 13px;
+  opacity: 0.8;
+}
+.news-empty p { margin: 0; }

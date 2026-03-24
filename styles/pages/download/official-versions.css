@@ -1,0 +1,204 @@
+/* ============ 下载页 - 官方版本列表 ============ */
+
+.dl-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.dl-filters {
+  display: flex;
+  gap: 4px;
+  background: color-mix(in srgb, var(--pink-200) calc(0.15 * 100%), transparent);
+  border-radius: 10px;
+  padding: 3px;
+}
+.dl-filter-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  background: transparent;
+  color: var(--text-mid);
+  transition: all 0.25s ease;
+}
+.dl-filter-btn:hover {
+  color: var(--pink-600);
+}
+.dl-filter-btn.active {
+  background: var(--rose-gradient);
+  color: white;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
+}
+.dl-search {
+  flex: 1;
+  min-width: 160px;
+  padding: 8px 14px;
+  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-dark);
+  outline: none;
+  transition: border-color 0.3s;
+}
+.dl-search:focus {
+  border-color: var(--pink-400);
+}
+
+/* Mod 加载器选择器 */
+.dl-loader-selector {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dl-loader-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-mid);
+  white-space: nowrap;
+}
+.dl-loader-btns {
+  display: flex;
+  gap: 6px;
+}
+.dl-loader-btn {
+  padding: 6px 16px;
+  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+.dl-loader-btn:hover:not(:disabled) {
+  border-color: var(--pink-400);
+  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
+  color: var(--pink-600);
+}
+.dl-loader-btn.active {
+  background: var(--rose-gradient);
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
+}
+.dl-loader-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.dl-loader-btn[data-loader="fabric"].active {
+  background: linear-gradient(135deg, #c4a35a 0%, #dbb978 100%);
+  box-shadow: 0 2px 10px rgba(196, 163, 90, 0.3);
+}
+.dl-loader-btn[data-loader="forge"].active {
+  background: linear-gradient(135deg, #e67e22 0%, #f39c12 100%);
+  box-shadow: 0 2px 10px rgba(230, 126, 34, 0.3);
+}
+
+/* 版本区 */
+.dl-versions-section {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(var(--blur-radius, 20px));
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 20px;
+  padding: 16px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--pink-500) calc(0.08 * 100%), transparent);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dl-versions-header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px; margin-bottom: 10px;
+}
+.dl-versions-header .dl-toolbar {
+  display: flex; align-items: center; gap: 10px;
+}
+.dl-versions-header .dl-section-title { margin: 0; }
+
+.dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  padding-bottom: 4px;
+}
+.dl-list::-webkit-scrollbar { width: 5px; }
+.dl-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
+  border-radius: 4px;
+}
+
+.dl-loading {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-light);
+  font-size: 14px;
+}
+
+.dl-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.25 * 100%), transparent);
+  border-radius: 12px;
+  transition: all 0.25s ease;
+}
+.dl-item:hover {
+  background: color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent);
+  border-color: color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  transform: translateX(3px);
+}
+
+.dl-item-icon {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; flex-shrink: 0;
+}
+.dl-item-icon.release { background: linear-gradient(135deg, #a8e6cf, #88d4ab); }
+.dl-item-icon.snapshot { background: linear-gradient(135deg, #ffd3b6, #ffaaa5); }
+
+.dl-item-info { flex: 1; min-width: 0; }
+.dl-item-name { font-size: 14px; font-weight: 700; color: var(--text-dark); }
+.dl-item-meta { font-size: 10px; color: var(--text-light); margin-top: 2px; }
+.dl-item-type {
+  display: inline-block; padding: 1px 6px; border-radius: 4px;
+  font-size: 9px; font-weight: 600; margin-right: 6px;
+}
+.dl-item-type.release { background: rgba(76, 175, 80, 0.15); color: #2e7d32; }
+.dl-item-type.snapshot { background: rgba(255, 152, 0, 0.15); color: #e65100; }
+.dl-item-type.april-fools { background: rgba(156, 39, 176, 0.15); color: #7b1fa2; font-weight: 700; }
+.dl-item-type.old_alpha { background: rgba(120, 120, 120, 0.15); color: #555; }
+.dl-item-type.old_beta { background: rgba(120, 120, 120, 0.15); color: #555; }
+.dl-item-icon.april-fools { background: linear-gradient(135deg, #ce93d8, #ab47bc); }
+.dl-item-icon.old_alpha { background: linear-gradient(135deg, #bdbdbd, #9e9e9e); }
+.dl-item-icon.old_beta { background: linear-gradient(135deg, #bcaaa4, #8d6e63); }
+
+.dl-install-btn {
+  padding: 6px 16px; border: none; border-radius: 8px;
+  background: var(--rose-gradient); color: white;
+  font-size: 11px; font-weight: 600; font-family: inherit;
+  cursor: pointer; transition: all 0.25s ease; white-space: nowrap;
+}
+.dl-install-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--pink-500) calc(0.35 * 100%), transparent);
+}
+.dl-install-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }

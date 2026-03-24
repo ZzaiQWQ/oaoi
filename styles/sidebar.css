@@ -1,0 +1,153 @@
+/* ============ 左侧导航栏 ============ */
+.sidebar {
+  width: 90px;
+  background: var(--sidebar-bg);
+  backdrop-filter: blur(var(--blur-radius, 1px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 0;
+  gap: 2px;
+  border-right: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 6px;
+  border-radius: var(--radius-md);
+  color: var(--text-mid);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  width: 68px;
+  cursor: pointer;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent);
+  color: var(--pink-600);
+  transform: translateY(-1px);
+}
+
+.nav-item.active {
+  background: color-mix(in srgb, var(--pink-500) calc(0.18 * 100%), transparent);
+  color: var(--pink-600);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 24px;
+  background: var(--rose-gradient);
+  border-radius: 0 4px 4px 0;
+}
+
+.nav-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.nav-item.active .nav-icon {
+  background: var(--rose-gradient);
+  color: white;
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--pink-500) calc(0.35 * 100%), transparent);
+}
+
+.nav-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 侧栏底部玩家信息 */
+.sidebar-player {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-top: 1px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  width: 100%;
+}
+
+.player-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 2px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  image-rendering: pixelated;
+  background: color-mix(in srgb, var(--pink-200) calc(0.15 * 100%), transparent);
+  transition: transform 0.3s, border-color 0.3s;
+}
+
+.player-avatar:hover {
+  transform: scale(1.1);
+  border-color: var(--pink-500);
+}
+
+.player-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.player-name-display {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-mid);
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.login-mode-switch {
+  display: flex;
+  gap: 2px;
+  background: color-mix(in srgb, var(--pink-200) calc(0.2 * 100%), transparent);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.mode-btn {
+  font-size: 9px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-light);
+  font-weight: 500;
+  transition: all 0.25s ease;
+  font-family: inherit;
+}
+
+.mode-btn:hover {
+  color: var(--pink-600);
+}
+
+.mode-btn.active {
+  background: var(--rose-gradient);
+  color: white;
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
+}

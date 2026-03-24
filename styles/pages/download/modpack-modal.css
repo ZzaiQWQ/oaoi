@@ -1,0 +1,92 @@
+/* ============ 整合包版本选择弹窗 ============ */
+.modpack-version-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.modpack-ver-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  margin-bottom: 6px;
+  transition: all 0.2s;
+}
+
+.modpack-ver-row:hover {
+  background: rgba(255, 255, 255, 0.65);
+  transform: translateX(2px);
+}
+
+.modpack-ver-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.modpack-ver-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pink-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modpack-ver-meta {
+  font-size: 10px;
+  color: var(--pink-600);
+  margin-top: 2px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.modpack-ver-install {
+  padding: 5px 16px;
+  border: none;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--rose-gradient, linear-gradient(135deg, var(--pink-400), var(--pink-500), var(--pink-600)));
+  color: #fff;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--pink-500) calc(0.2 * 100%), transparent);
+  transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.modpack-ver-install:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.35 * 100%), transparent);
+}
+
+/* 整合包版本弹窗蒙层 */
+#modpackVersionModal {
+  background: color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  backdrop-filter: blur(var(--blur-radius, 8px));
+}
+
+#modpackVersionModal .modal-content {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(var(--blur-radius, 12px));
+  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  border-radius: 20px;
+  box-shadow: 0 12px 40px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent), 0 0 0 1px rgba(255,255,255,0.6) inset;
+  overflow: hidden;
+  max-width: 520px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+#modpackVersionModal .modal-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}

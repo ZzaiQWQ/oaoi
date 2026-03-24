@@ -1,0 +1,8 @@
+node_modules
+src-tauri
+.git
+.env
+*.bak
+*.zip
+ms-sample
+package-lock.json
