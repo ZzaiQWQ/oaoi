@@ -1,0 +1,37 @@
+/* ============ 关于页 - 更新日志 ============ */
+
+.about-changelog {
+  background: rgba(255,255,255,0.4);
+  border: 1.5px solid rgba(255,200,215,0.2);
+  border-radius: var(--radius-xl);
+  padding: 12px;
+}
+
+.about-changelog-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.about-changelog-header h3 { font-size: 12px; font-weight: 800; color: var(--pink-700); }
+.about-changelog-header span { font-size: 9px; font-weight: 700; color: var(--pink-400); text-transform: uppercase; letter-spacing: 1.5px; }
+
+.about-changelog-list { display: flex; flex-direction: column; gap: 8px; }
+
+.about-log-item { display: flex; align-items: flex-start; gap: 8px; }
+
+.about-log-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--pink-500);
+  margin-top: 4px; flex-shrink: 0;
+}
+
+.about-log-title { font-size: 11px; font-weight: 800; color: var(--pink-700); }
+.about-log-desc { font-size: 10px; color: var(--text-mid); }
+
+.about-footer {
+  text-align: center;
+  font-size: 9px;
+  color: var(--text-light);
+  letter-spacing: 1px;
+  padding: 6px 0;
+}

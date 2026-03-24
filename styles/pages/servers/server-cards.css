@@ -1,0 +1,129 @@
+/* ============ 服务器列表 - 卡片 ============ */
+
+/* 服务器卡片网格 */
+.servers-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 通用卡片 */
+.srv-card {
+  border-radius: var(--radius-xl);
+  border: 1.5px solid rgba(255, 200, 215, 0.3);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+.srv-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-pink);
+  border-color: rgba(255, 143, 171, 0.4);
+}
+
+/* 精选大卡片 */
+.srv-card-featured {
+  grid-column: span 2;
+  position: relative; overflow: hidden;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+}
+
+.srv-card-bg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: cover; opacity: 0.2;
+  transition: transform 0.6s ease;
+}
+.srv-card-featured:hover .srv-card-bg { transform: scale(1.08); }
+
+.srv-card-bg-overlay {
+  position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.4) 50%, transparent 100%);
+}
+
+.srv-card-body {
+  position: relative; z-index: 2;
+  padding: 12px 16px;
+  display: flex; flex-direction: column; height: 100%;
+}
+
+.srv-card-top {
+  display: flex; justify-content: space-between;
+  align-items: center; margin-bottom: 12px;
+}
+.srv-card-bottom { margin-top: auto; }
+
+/* 徽章 */
+.srv-badge {
+  display: inline-block; padding: 3px 10px;
+  border-radius: 20px; font-size: 10px;
+  font-weight: 700; letter-spacing: 1px;
+}
+.srv-badge-hot { background: var(--rose-gradient); color: white; box-shadow: 0 2px 8px rgba(232, 69, 116, 0.3); }
+.srv-badge-classic { background: rgba(184, 163, 255, 0.2); color: #6249b2; }
+.srv-badge-new { background: rgba(255, 114, 143, 0.15); color: var(--pink-600); }
+.srv-badge-rpg { background: rgba(155, 54, 103, 0.12); color: #9b3667; }
+
+.srv-ping {
+  background: rgba(255, 255, 255, 0.8); padding: 3px 10px;
+  border-radius: 20px; font-size: 11px;
+  font-weight: 700; color: var(--pink-600);
+}
+
+/* 大卡片内容 */
+.srv-name-lg { font-size: 17px; font-weight: 900; color: var(--text-dark); margin-bottom: 4px; }
+.srv-desc { font-size: 11px; color: var(--text-mid); margin-bottom: 8px; line-height: 1.4; }
+
+.srv-stats { display: flex; align-items: center; gap: 16px; }
+.srv-stat-label { display: block; font-size: 9px; font-weight: 700; color: var(--pink-400); text-transform: uppercase; letter-spacing: 1.5px; }
+.srv-stat-value { font-size: 15px; font-weight: 900; color: var(--pink-600); }
+.srv-stat-divider { width: 1px; height: 30px; background: var(--pink-200); }
+
+/* 标准卡片 */
+.srv-card-standard {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  padding: 12px 14px;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+
+.srv-card-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: rgba(255, 179, 198, 0.2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; margin-bottom: 6px;
+}
+
+.srv-name { font-size: 14px; font-weight: 800; color: var(--text-dark); margin: 4px 0 2px; }
+.srv-desc-sm { font-size: 11px; color: var(--text-mid); line-height: 1.4; flex: 1; }
+
+.srv-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid rgba(255, 200, 215, 0.3);
+}
+
+.srv-online { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--pink-600); }
+.srv-online-dot { width: 6px; height: 6px; border-radius: 50%; background: #4ade80; animation: pulse 2s ease-in-out infinite; box-shadow: 0 0 6px rgba(74, 222, 128, 0.5); }
+.srv-ping-sm { font-size: 11px; color: var(--text-light); }
+
+/* 更多卡片 */
+.srv-card-more {
+  background: var(--rose-gradient); color: white;
+  padding: 18px 20px;
+  display: flex; flex-direction: column;
+}
+.srv-card-more h3 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.srv-card-more p { font-size: 11px; opacity: 0.8; flex: 1; }
+.srv-more-btn {
+  margin-top: 12px; width: fit-content;
+  padding: 6px 16px; background: rgba(255, 255, 255, 0.2);
+  border: none; border-radius: 12px; color: white;
+  font-size: 10px; font-weight: 700; font-family: inherit;
+  cursor: pointer; letter-spacing: 1px;
+  transition: background 0.2s ease;
+}
+.srv-more-btn:hover { background: rgba(255, 255, 255, 0.35); }

@@ -1,0 +1,11 @@
+@import url('servers/header.css');
+@import url('servers/server-cards.css');
+/* ============ 服务器列表页 - 入口 ============ */
+
+/* 服务器页全局布局 */
+.page-servers {
+  padding: 14px 18px;
+  overflow: hidden;
+  background: rgba(255, 248, 250, 0.6);
+  height: 100%;
+}

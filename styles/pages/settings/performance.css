@@ -1,0 +1,236 @@
+/* ============ 设置页 - 性能分配 ============ */
+
+.set-card-perf {
+  grid-column: 1;
+}
+
+.set-field {
+  margin-bottom: 8px;
+}
+
+.set-field label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-mid);
+}
+
+.set-field-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 6px;
+}
+
+.set-field-value {
+  font-size: 11px;
+  color: var(--text-mid);
+}
+
+.set-field-value strong {
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--pink-600);
+}
+
+/* 滑块 */
+.set-slider {
+  width: 100%;
+  height: 4px;
+  border-radius: 4px;
+  appearance: none;
+  background: var(--pink-200);
+  outline: none;
+  cursor: pointer;
+}
+
+.set-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--pink-600);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(232, 69, 116, 0.3);
+}
+
+.set-slider-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--text-light);
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.set-divider {
+  height: 1px;
+  background: rgba(255, 200, 215, 0.3);
+  margin: 6px 0;
+}
+
+/* Java 路径 */
+.set-path-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.set-path-input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255, 240, 243, 0.5);
+  border: 1px solid rgba(255, 200, 215, 0.4);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--text-mid);
+  font-family: monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.set-browse-btn {
+  padding: 6px 14px;
+  background: rgba(255, 240, 243, 0.8);
+  border: 1px solid rgba(255, 200, 215, 0.4);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pink-600);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  white-space: nowrap;
+}
+
+.set-browse-btn:hover {
+  background: rgba(255, 200, 215, 0.4);
+}
+
+.set-auto-btn {
+  background: var(--rose-gradient);
+  color: white;
+  border-color: transparent;
+}
+
+.set-auto-btn:hover {
+  opacity: 0.85;
+}
+
+.set-auto-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+/* Java 搜索结果折叠列表 */
+.java-results {
+  margin-top: 6px;
+  display: none;
+  position: relative;
+}
+
+.java-results.has-results {
+  display: block;
+}
+
+.java-results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 10px;
+  background: rgba(255, 240, 243, 0.5);
+  border: 1px solid rgba(255, 200, 215, 0.3);
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: background 0.2s;
+  user-select: none;
+}
+
+.java-results-header:hover {
+  background: rgba(255, 200, 215, 0.3);
+}
+
+.java-results-arrow {
+  font-size: 9px;
+  transition: transform 0.2s;
+}
+
+.java-results.open .java-results-arrow {
+  transform: rotate(90deg);
+}
+
+.java-results-list {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 200, 215, 0.4);
+  box-shadow: 0 -4px 20px rgba(200, 150, 170, 0.2);
+}
+
+.java-results.open .java-results-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin-bottom: 4px;
+  padding: 4px;
+}
+
+.java-results-list::-webkit-scrollbar { width: 3px; }
+.java-results-list::-webkit-scrollbar-thumb { background: var(--pink-300); border-radius: 3px; }
+
+.java-result-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--text-mid);
+  transition: background 0.15s;
+}
+
+.java-result-item:hover {
+  background: rgba(255, 200, 215, 0.2);
+}
+
+.java-result-item.selected {
+  background: rgba(232, 69, 116, 0.1);
+  color: var(--pink-600);
+  font-weight: 700;
+}
+
+.java-result-item .java-ver-badge {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(255, 143, 171, 0.15);
+  color: var(--pink-600);
+  white-space: nowrap;
+}
+
+.java-result-item .java-ver-badge.recommended {
+  background: var(--rose-gradient);
+  color: white;
+}
+
+.java-result-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}

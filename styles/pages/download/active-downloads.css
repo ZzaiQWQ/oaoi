@@ -1,0 +1,76 @@
+/* ============ 下载页 - 活跃下载 ============ */
+
+.dl-active-section { margin-bottom: 20px; }
+.dl-active-list {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 20px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(255, 107, 138, 0.08);
+}
+.dl-active-empty {
+  text-align: center; padding: 20px;
+  color: #b0506e; font-size: 0.9rem; opacity: 0.7;
+}
+
+/* 下载进度卡片 */
+.dl-progress-card {
+  background: rgba(255, 230, 240, 0.4);
+  border: 1px solid rgba(255, 180, 200, 0.3);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 8px;
+}
+.dl-progress-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pink-700);
+  margin-bottom: 4px;
+}
+.dl-progress-detail {
+  font-size: 10px;
+  color: #b0506e;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dl-progress-bar-wrap {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 180, 200, 0.2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.dl-progress-bar {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(135deg, #a9294b, #ff728f);
+  transition: width 0.3s ease;
+}
+
+/* 单个下载任务 */
+.dl-active-task {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 0;
+}
+.dl-active-task + .dl-active-task { border-top: 1px solid rgba(255,182,193,0.2); }
+.dl-active-task-icon {
+  width: 48px; height: 48px; border-radius: 14px;
+  background: linear-gradient(135deg, #a9294b, #ff728f);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 22px; flex-shrink: 0;
+}
+.dl-active-task-info { flex: 1; min-width: 0; }
+.dl-active-task-name { font-weight: 700; color: #6b2040; font-size: 0.95rem; }
+.dl-active-task-status { font-size: 0.7rem; color: #a9294b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+.dl-active-task-bar {
+  height: 8px; background: rgba(255,182,193,0.3); border-radius: 99px;
+  overflow: hidden; margin-top: 6px;
+}
+.dl-active-task-bar-fill {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(135deg, #a9294b, #ff728f);
+  transition: width 0.4s ease;
+}

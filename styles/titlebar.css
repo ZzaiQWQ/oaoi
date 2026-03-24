@@ -1,0 +1,54 @@
+﻿/* ============ 自定义标题栏 ============ */
+.custom-titlebar {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+  z-index: 200;
+  user-select: none;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.win-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px);
+  color: var(--text-mid);
+}
+
+.win-btn:hover {
+  transform: scale(1.1);
+}
+
+.win-minimize:hover {
+  background: rgba(255, 200, 50, 0.8);
+  color: #7a5c00;
+}
+
+.win-maximize:hover {
+  background: rgba(74, 222, 128, 0.8);
+  color: #14532d;
+}
+
+.win-close:hover {
+  background: rgba(255, 100, 100, 0.85);
+  color: white;
+}

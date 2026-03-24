@@ -1,0 +1,56 @@
+@import url('settings/performance.css');
+@import url('settings/account.css');
+@import url('settings/visual.css');
+/* ============ 设置页 - 入口 ============ */
+
+/* 设置页全局布局 */
+.page-settings {
+  padding: 14px 18px;
+  overflow-y: auto;
+  background: rgba(255, 248, 250, 0.6);
+  height: 100%;
+}
+
+.settings-header {
+  margin-bottom: 10px;
+}
+
+.settings-main-title {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--pink-700);
+  letter-spacing: 2px;
+}
+
+.settings-sub-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-light);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+/* 设置网格 */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.set-card {
+  background: rgba(255, 255, 255, 0.8);
+  border-radius: var(--radius-xl);
+  border: 1.5px solid rgba(255, 200, 215, 0.3);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.set-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-dark);
+  margin-bottom: 10px;
+}

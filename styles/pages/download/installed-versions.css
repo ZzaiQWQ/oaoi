@@ -1,0 +1,98 @@
+/* ============ 下载页 - 已安装版本 ============ */
+
+.installed-section {
+  margin-bottom: 20px;
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 20px;
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(255, 107, 138, 0.08);
+}
+
+.installed-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.installed-title {
+  font-size: 16px;
+  color: var(--pink-700);
+  font-weight: 700;
+}
+
+.installed-count {
+  background: var(--rose-gradient);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  min-width: 24px;
+  text-align: center;
+}
+
+.installed-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.installed-list::-webkit-scrollbar { width: 4px; }
+.installed-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 143, 171, 0.3);
+  border-radius: 4px;
+}
+
+.installed-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 230, 240, 0.4);
+  border: 1px solid rgba(255, 180, 200, 0.3);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  min-width: 0;
+}
+
+.installed-card:hover {
+  background: rgba(255, 220, 235, 0.6);
+  border-color: rgba(232, 69, 116, 0.4);
+}
+
+.installed-card .ver-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pink-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.installed-card .ver-delete {
+  background: none;
+  border: none;
+  color: rgba(180, 80, 110, 0.5);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.installed-card .ver-delete:hover {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.15);
+}
+
+.installed-empty {
+  color: var(--text-mid);
+  font-size: 13px;
+  padding: 8px 0;
+  grid-column: 1 / -1;
+}

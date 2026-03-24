@@ -1,0 +1,148 @@
+﻿/* ============ 左侧导航栏 ============ */
+.sidebar {
+  width: 90px;
+  background: var(--sidebar-bg);
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+  gap: 6px;
+  border-right: 1.5px solid rgba(255, 200, 215, 0.4);
+  flex-shrink: 0;
+}
+
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border-radius: var(--radius-md);
+  color: var(--text-mid);
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  width: 72px;
+  cursor: pointer;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: rgba(255, 143, 171, 0.15);
+  color: var(--pink-600);
+  transform: translateY(-1px);
+}
+
+.nav-item.active {
+  background: rgba(255, 107, 138, 0.18);
+  color: var(--pink-600);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 24px;
+  background: var(--rose-gradient);
+  border-radius: 0 4px 4px 0;
+}
+
+.nav-icon {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 179, 198, 0.2);
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.nav-item.active .nav-icon {
+  background: var(--rose-gradient);
+  color: white;
+  box-shadow: 0 3px 10px rgba(255, 107, 138, 0.35);
+}
+
+.nav-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* 侧栏底部玩家信息 */
+.sidebar-player {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px;
+  border-top: 1px solid rgba(255, 200, 215, 0.3);
+  width: 100%;
+}
+
+.player-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 2px solid rgba(255, 143, 171, 0.4);
+  image-rendering: pixelated;
+  background: rgba(255, 200, 215, 0.15);
+  transition: transform 0.3s, border-color 0.3s;
+}
+.player-avatar:hover {
+  transform: scale(1.1);
+  border-color: var(--pink-500);
+}
+
+.player-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.player-name-display {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-mid);
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.login-mode-switch {
+  display: flex;
+  gap: 2px;
+  background: rgba(255, 200, 215, 0.2);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.mode-btn {
+  font-size: 9px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-light);
+  font-weight: 500;
+  transition: all 0.25s ease;
+  font-family: inherit;
+}
+.mode-btn:hover {
+  color: var(--pink-600);
+}
+.mode-btn.active {
+  background: var(--rose-gradient);
+  color: white;
+  box-shadow: 0 1px 4px rgba(255, 107, 138, 0.3);
+}

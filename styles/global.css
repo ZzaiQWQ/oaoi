@@ -1,0 +1,165 @@
+/* ============================================
+   oaoi - Minecraft 启动器样式
+   ============================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  background: transparent !important;
+}
+
+:root {
+  --pink-100: #fff0f3;
+  --pink-200: #ffd6e0;
+  --pink-300: #ffb3c6;
+  --pink-400: #ff8fab;
+  --pink-500: #ff6b8a;
+  --pink-600: #e84574;
+  --pink-700: #c9184a;
+  --rose-gradient: linear-gradient(135deg, #ff8fab 0%, #ff6b8a 50%, #e84574 100%);
+  --card-bg: rgba(255, 255, 255, 0.85);
+  --sidebar-bg: rgba(255, 240, 243, 0.92);
+  --text-dark: #4a2030;
+  --text-mid: #8a5070;
+  --text-light: #c4849e;
+  --shadow-pink: 0 4px 20px rgba(255, 107, 138, 0.25);
+  --shadow-soft: 0 2px 12px rgba(200, 150, 170, 0.15);
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+}
+
+body {
+  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: transparent;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ============ 樱花飘落动画 ============ */
+.sakura-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 100;
+  overflow: hidden;
+}
+
+.sakura-petal {
+  position: absolute;
+  top: -30px;
+  opacity: 0.7;
+  pointer-events: none;
+  animation: sakuraFall linear infinite;
+  color: #ffb3c6;
+  font-size: 16px;
+  filter: drop-shadow(0 0 2px rgba(255, 179, 198, 0.5));
+}
+
+@keyframes sakuraFall {
+  0% {
+    transform: translateY(-30px) rotate(0deg) translateX(0px);
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 0.8;
+  }
+
+  90% {
+    opacity: 0.6;
+  }
+
+  100% {
+    transform: translateY(100vh) rotate(720deg) translateX(80px);
+    opacity: 0;
+  }
+}
+
+/* ============ 主容器 ============ */
+.launcher {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  background: var(--card-bg);
+  border-radius: 16px;
+  box-shadow: none;
+  overflow: hidden;
+  position: relative;
+  z-index: 10;
+  backdrop-filter: blur(20px);
+  border: none;
+}
+
+/* ============ 主内容区 ============ */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ============ 页面切换系统 ============ */
+.page {
+  display: none;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.page.active {
+  display: flex;
+}
+
+.page-home {
+  overflow: hidden;
+}
+
+.page-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-mid);
+}
+
+.page-placeholder span {
+  font-size: 48px;
+}
+
+.page-placeholder h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+
+.page-placeholder p {
+  font-size: 13px;
+}
+
+/* ============ 响应式微调 ============ */
+
+@media (max-height: 550px) {
+  .server-title h1 {
+    font-size: 36px;
+  }
+
+  .news-card-img {
+    height: 80px;
+  }
+}

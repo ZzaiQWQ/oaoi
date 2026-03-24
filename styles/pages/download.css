@@ -1,0 +1,130 @@
+@import url('download/official-versions.css');
+@import url('download/installed-versions.css');
+@import url('download/active-downloads.css');
+@import url('download/install-modal.css');
+/* ============ 下载页 - 入口 ============ */
+
+/* 下载页全局布局 */
+.page-download {
+  position: relative;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+.page-download::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: url('assets/bg.png') center / cover no-repeat;
+  opacity: 0.15;
+  z-index: 0;
+  pointer-events: none;
+}
+.page-download > * {
+  position: relative;
+  z-index: 1;
+}
+
+.dl-header {
+  margin-bottom: 20px;
+}
+.dl-title {
+  font-size: 26px;
+  font-weight: 900;
+  background: var(--rose-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.dl-subtitle {
+  font-size: 12px;
+  color: var(--text-light);
+  margin-top: 4px;
+}
+
+.dl-section-title {
+  font-size: 16px;
+  color: var(--pink-200);
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* 两栏布局 */
+.dl-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 16px;
+}
+.dl-left { min-width: 0; }
+.dl-right { min-width: 0; }
+
+/* 右栏 Mod 加载器卡片 */
+.dl-right .dl-section-title { margin-bottom: 8px; font-size: 0.85rem; }
+
+.dl-loader-card {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+  box-shadow: 0 4px 16px rgba(255,107,138,0.06);
+  transition: transform 0.2s;
+}
+.dl-loader-card:hover { transform: translateY(-2px); }
+
+.dl-loader-forge { border-left: 4px solid #a9294b; }
+.dl-loader-fabric { border-left: 4px solid #ff8fab; }
+
+.dl-loader-card-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  margin-bottom: 8px;
+}
+.dl-loader-name { display: block; font-weight: 800; font-size: 0.85rem; color: #6b2040; }
+.dl-loader-desc { display: block; font-size: 0.6rem; color: #b0506e; margin-top: 1px; }
+.dl-loader-icon { font-size: 1.4rem; opacity: 0.6; }
+
+.dl-loader-card-body { }
+.dl-loader-ver-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: rgba(255,255,255,0.4);
+  padding: 5px 8px; border-radius: 8px;
+  font-size: 0.68rem; margin-bottom: 8px;
+}
+.dl-loader-ver-row span:first-child { color: #8b4060; font-weight: 500; }
+.dl-loader-ver { font-weight: 700; color: #a9294b; }
+
+.dl-loader-install-btn {
+  width: 100%;
+  padding: 7px 0;
+  border: none; border-radius: 10px;
+  font-weight: 700; font-size: 0.72rem;
+  cursor: pointer; transition: all 0.2s;
+  font-family: inherit; letter-spacing: 0.05em;
+}
+.dl-loader-forge .dl-loader-install-btn {
+  background: linear-gradient(135deg, #a9294b, #ff728f);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(255,107,138,0.3);
+}
+.dl-loader-forge .dl-loader-install-btn:hover {
+  box-shadow: 0 6px 20px rgba(255,107,138,0.45);
+  transform: translateY(-1px);
+}
+.dl-loader-fabric .dl-loader-install-btn {
+  background: rgba(255,182,193,0.3);
+  color: #6b2040;
+}
+.dl-loader-fabric .dl-loader-install-btn:hover {
+  background: rgba(255,182,193,0.5);
+}
+
+/* 小贴士 */
+.dl-protip {
+  background: linear-gradient(135deg, #6b2040, #a9294b);
+  border-radius: 14px; padding: 12px;
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(107,32,64,0.3);
+}
+.dl-protip strong { display: block; margin-bottom: 4px; font-size: 0.75rem; }
+.dl-protip p { font-size: 0.68rem; opacity: 0.85; margin: 0; line-height: 1.4; }
