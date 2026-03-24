@@ -1,0 +1,183 @@
+/* ============ 设置页 - 账户登录 ============ */
+
+.set-card-display {
+  grid-column: 2;
+}
+
+/* 多账号列表 */
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.account-list::-webkit-scrollbar { width: 3px; }
+.account-list::-webkit-scrollbar-thumb { background: var(--pink-300); border-radius: 2px; }
+
+.account-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  border: 2px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.account-card:hover {
+  border-color: var(--pink-400);
+}
+
+.account-card.active {
+  border-color: var(--pink-500);
+  background: color-mix(in srgb, var(--pink-200) calc(0.25 * 100%), transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--pink-500) calc(0.2 * 100%), transparent);
+}
+
+.account-card-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+
+.account-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-card-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dark);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card-uuid {
+  font-size: 9px;
+  color: var(--text-light);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card-badge {
+  font-size: 9px;
+  padding: 1px 6px;
+  background: var(--rose-gradient);
+  color: white;
+  border-radius: 8px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.account-card-del {
+  border: none;
+  background: none;
+  color: var(--text-light);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: color 0.2s;
+}
+
+.account-card-del:hover {
+  color: var(--pink-600);
+}
+
+.account-empty {
+  font-size: 11px;
+  color: var(--text-light);
+  text-align: center;
+  padding: 12px;
+}
+
+.set-player-input {
+  flex: 1;
+  min-width: 0;
+  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-dark);
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.set-player-input:focus {
+  border-color: var(--pink-400);
+  background: color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent);
+}
+
+.ms-login-info {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  font-size: 11px;
+  text-align: center;
+}
+.ms-login-info p { margin: 3px 0; }
+
+.set-toggle-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.set-toggle-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.set-toggle-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+
+.set-toggle-desc {
+  font-size: 10px;
+  color: var(--text-light);
+}
+
+/* 开关 */
+.set-toggle {
+  width: 40px;
+  height: 22px;
+  border-radius: 12px;
+  background: #ddd2d5;
+  padding: 2px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+}
+
+.set-toggle.on {
+  background: var(--pink-600);
+}
+
+.set-toggle-knob {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  transition: margin-left 0.2s ease;
+}
+
+.set-toggle.on .set-toggle-knob {
+  margin-left: 18px;
+}

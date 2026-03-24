@@ -1,0 +1,60 @@
+/* ============ 关于页 - Hero 区域 ============ */
+
+.about-hero-row {
+  display: flex;
+  gap: 10px;
+  min-height: 0;
+}
+
+.about-hero-img {
+  flex: 2;
+  position: relative;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  min-height: 120px;
+}
+
+.about-hero-img img { width: 100%; height: 100%; object-fit: cover; }
+
+.about-hero-overlay {
+  position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(120, 20, 50, 0.7) 0%, transparent 60%);
+}
+
+.about-hero-text { position: absolute; bottom: 10px; left: 14px; }
+.about-hero-text h1 { font-size: 20px; font-weight: 900; color: white; letter-spacing: 1px; }
+.about-hero-text p { font-size: 10px; color: color-mix(in srgb, var(--pink-200) calc(0.9 * 100%), transparent); font-weight: 600; }
+
+.about-version-card {
+  flex: 1;
+  background: rgba(255,255,255,0.7);
+  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  border-radius: var(--radius-xl);
+  padding: 14px;
+  display: flex; flex-direction: column;
+  justify-content: center; gap: 6px;
+}
+
+.about-release-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--pink-600); color: white;
+  border-radius: 20px; font-size: 8px;
+  font-weight: 800; letter-spacing: 1.5px;
+  text-transform: uppercase; width: fit-content;
+}
+
+.about-version-card h2 { font-size: 16px; font-weight: 800; color: var(--pink-700); }
+.about-version-card p { font-size: 10px; color: var(--text-mid); line-height: 1.5; }
+
+.about-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 9px; font-weight: 700; color: var(--pink-600);
+  text-transform: uppercase; letter-spacing: 1.5px;
+}
+
+.about-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%; background: var(--pink-500);
+  animation: pulse 2s infinite;
+}

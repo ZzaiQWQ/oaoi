@@ -1,0 +1,19 @@
+# Build
+/src-tauri/target/
+/dist/
+/node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+ms-sample/
+*.log
+
+# Secrets
+.env

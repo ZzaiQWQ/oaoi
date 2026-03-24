@@ -1,0 +1,198 @@
+/* ============ AI 崩溃分析弹窗 ============ */
+
+.crash-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: crashFadeIn 0.2s ease;
+}
+
+@keyframes crashFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes crashSlideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+.crash-modal {
+  background: linear-gradient(135deg, #fff5f7 0%, #fff 100%);
+  border-radius: 18px;
+  width: 420px;
+  max-width: 90vw;
+  max-height: 80vh;
+  box-shadow: 0 20px 60px rgba(232, 69, 116, 0.2), 0 0 0 1px rgba(255, 200, 215, 0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: crashSlideUp 0.3s ease;
+}
+
+.crash-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid rgba(255, 200, 215, 0.3);
+}
+
+.crash-modal-icon {
+  font-size: 28px;
+  width: 48px;
+  height: 48px;
+  background: linear-gradient(135deg, #fce4ec, #f8bbd0);
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.crash-modal-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--pink-700, #be185d);
+  margin: 0;
+}
+
+.crash-modal-subtitle {
+  font-size: 11px;
+  color: var(--text-light, #999);
+  margin: 2px 0 0;
+}
+
+.crash-modal-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-dark, #333);
+}
+
+.crash-modal-body h4 {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--pink-700, #be185d);
+  margin: 12px 0 4px;
+}
+
+.crash-modal-body h4:first-child {
+  margin-top: 0;
+}
+
+.crash-modal-body ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.crash-modal-body li {
+  margin: 2px 0;
+}
+
+.crash-modal-body code {
+  background: rgba(232, 69, 116, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--pink-700, #be185d);
+}
+
+.crash-modal-body p {
+  margin: 4px 0;
+}
+
+.crash-modal-footer {
+  padding: 12px 20px 16px;
+  text-align: right;
+  border-top: 1px solid rgba(255, 200, 215, 0.2);
+}
+
+.crash-modal-btn {
+  padding: 8px 24px;
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f472b6, #e84574);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.2s;
+  box-shadow: 0 4px 12px rgba(232, 69, 116, 0.3);
+}
+
+.crash-modal-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(232, 69, 116, 0.4);
+}
+
+/* ============ 整合包拖拽蒙层 ============ */
+
+#modpackDropOverlay {
+  display: flex;
+  visibility: hidden;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(255, 182, 200, 0.18);
+  backdrop-filter: blur(4px);
+  border: 3px dashed #e88fa8;
+  pointer-events: none;
+  transition: 0.2s;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  opacity: 0;
+}
+
+#modpackDropOverlay .drop-icon {
+  font-size: 48px;
+}
+
+#modpackDropOverlay .drop-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #c0426b;
+}
+
+#modpackDropOverlay .drop-desc {
+  font-size: 12px;
+  color: #a0607a;
+}
+
+/* ============ 设置页输入框通用样式 ============ */
+
+.set-text-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1.5px solid rgba(255, 200, 215, 0.3);
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-dark);
+  outline: none;
+}
+
+.set-mem-input {
+  width: 70px;
+  text-align: right;
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid rgba(255, 120, 160, 0.4);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--pink-700);
+  font-family: inherit;
+  outline: none;
+  padding: 2px 0;
+}

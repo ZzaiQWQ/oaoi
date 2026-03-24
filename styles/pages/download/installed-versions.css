@@ -1,0 +1,102 @@
+/* ============ 下载页 - 已安装版本 ============ */
+
+.installed-section {
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(var(--blur-radius, 20px));
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 20px;
+  padding: 16px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--pink-500) calc(0.08 * 100%), transparent);
+}
+
+.installed-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.installed-title {
+  font-size: 16px;
+  color: var(--pink-700);
+  font-weight: 700;
+}
+
+.installed-count {
+  background: var(--rose-gradient);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  min-width: 24px;
+  text-align: center;
+}
+
+.installed-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.installed-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.installed-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
+  border-radius: 4px;
+}
+
+.installed-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
+  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  min-width: 0;
+}
+
+.installed-card:hover {
+  background: color-mix(in srgb, var(--pink-200) calc(0.6 * 100%), transparent);
+  border-color: color-mix(in srgb, var(--pink-600) calc(0.4 * 100%), transparent);
+}
+
+.installed-card .ver-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pink-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.installed-card .ver-delete {
+  background: none;
+  border: none;
+  color: rgba(180, 80, 110, 0.5);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.installed-card .ver-delete:hover {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.15);
+}
+
+.installed-empty {
+  color: var(--text-mid);
+  font-size: 13px;
+  padding: 8px 0;
+  grid-column: 1 / -1;
+}

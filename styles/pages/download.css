@@ -1,0 +1,409 @@
+@import url('download/official-versions.css');
+@import url('download/installed-versions.css');
+@import url('download/active-downloads.css');
+@import url('download/install-modal.css');
+@import url('download/modpack-modal.css');
+/* ============ 下载页 - 入口 ============ */
+
+/* 下载页全局布局 */
+.page-download {
+  position: relative;
+  overflow: hidden;
+  padding: 10px 24px 10px;
+  height: 100%;
+}
+
+.page-download::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: url('assets/bg.png') center / cover no-repeat;
+  opacity: 0.15;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.page-download>* {
+  position: relative;
+  z-index: 1;
+}
+
+.dl-header {
+  margin-bottom: 8px;
+}
+
+.dl-title {
+  font-size: 24px;
+  font-weight: 900;
+  background: var(--rose-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.dl-subtitle {
+  font-size: 11px;
+  color: var(--text-light);
+  margin-top: 2px;
+}
+
+.dl-section-title {
+  font-size: 16px;
+  color: var(--pink-200);
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* 两栏布局 */
+.dl-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dl-left {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dl-right {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* 右栏 Mod 加载器卡片 */
+.dl-right .dl-section-title {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.dl-loader-card {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(var(--blur-radius, 20px));
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--pink-500) calc(0.06 * 100%), transparent);
+  transition: transform 0.2s;
+}
+
+.dl-loader-card:hover {
+  transform: translateY(-2px);
+}
+
+.dl-loader-forge {
+  border-left: 4px solid var(--pink-700);
+}
+
+.dl-loader-fabric {
+  border-left: 4px solid var(--pink-400);
+}
+
+.dl-loader-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.dl-loader-name {
+  display: block;
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: var(--pink-700);
+}
+
+.dl-loader-desc {
+  display: block;
+  font-size: 0.6rem;
+  color: var(--pink-600);
+  margin-top: 1px;
+}
+
+.dl-loader-icon {
+  font-size: 1.4rem;
+  opacity: 0.6;
+}
+
+.dl-loader-card-body {}
+
+.dl-loader-ver-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.4);
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 0.68rem;
+  margin-bottom: 8px;
+}
+
+.dl-loader-ver-row span:first-child {
+  color: var(--pink-600);
+  font-weight: 500;
+}
+
+.dl-loader-ver {
+  font-weight: 700;
+  color: var(--pink-700);
+}
+
+.dl-loader-install-btn {
+  width: 100%;
+  padding: 7px 0;
+  border: none;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  letter-spacing: 0.05em;
+}
+
+.dl-loader-forge .dl-loader-install-btn {
+  background: var(--rose-gradient);
+  color: #fff;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
+}
+
+.dl-loader-forge .dl-loader-install-btn:hover {
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--pink-500) calc(0.45 * 100%), transparent);
+  transform: translateY(-1px);
+}
+
+.dl-loader-fabric .dl-loader-install-btn {
+  background: color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+  color: var(--pink-700);
+}
+
+.dl-loader-fabric .dl-loader-install-btn:hover {
+  background: color-mix(in srgb, var(--pink-300) calc(0.5 * 100%), transparent);
+}
+
+/* 小贴士 */
+.dl-protip {
+  background: linear-gradient(135deg, var(--pink-700), var(--pink-700));
+  border-radius: 14px;
+  padding: 12px;
+  color: #fff;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--pink-700) calc(0.3 * 100%), transparent);
+}
+
+.dl-protip strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.75rem;
+}
+
+.dl-protip p {
+  font-size: 0.68rem;
+  opacity: 0.85;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* ============ Tab 切换 ============ */
+.dl-top-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 12px;
+  padding: 3px;
+}
+
+.dl-top-tab {
+  flex: 1;
+  padding: 8px 0;
+  border: none;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  background: transparent;
+  color: var(--pink-600);
+  transition: all 0.25s;
+}
+
+.dl-top-tab.active {
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--pink-600, var(--pink-600));
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent);
+}
+
+.dl-top-tab:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.dl-tab-content {
+  display: none;
+}
+
+.dl-tab-content.active {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+
+/* ============ 整合包卡片 ============ */
+.modpack-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  margin-bottom: 8px;
+  transition: all 0.2s;
+  cursor: default;
+}
+
+.modpack-card:hover {
+  background: rgba(255, 255, 255, 0.7);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.1 * 100%), transparent);
+}
+
+.modpack-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
+}
+
+.modpack-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.modpack-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pink-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modpack-desc {
+  font-size: 10px;
+  color: var(--pink-600);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.3;
+  margin-top: 2px;
+}
+
+.modpack-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--pink-400);
+  margin-top: 3px;
+  align-items: center;
+}
+
+.modpack-source-tag {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.modpack-source-tag.mr {
+  background: rgba(30, 200, 100, 0.15);
+  color: #1db954;
+}
+
+.modpack-source-tag.cf {
+  background: rgba(241, 100, 54, 0.15);
+  color: #f16436;
+}
+
+.modpack-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.modpack-link-row {
+  display: flex;
+  gap: 3px;
+}
+
+.modpack-link-btn {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.modpack-link-btn.mr {
+  background: rgba(30, 200, 100, 0.12);
+  color: #1db954;
+}
+
+.modpack-link-btn.mr:hover {
+  background: rgba(30, 200, 100, 0.25);
+}
+
+.modpack-link-btn.cf {
+  background: rgba(241, 100, 54, 0.12);
+  color: #f16436;
+}
+
+.modpack-link-btn.cf:hover {
+  background: rgba(241, 100, 54, 0.25);
+}
+
+.modpack-install-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--rose-gradient, linear-gradient(135deg, var(--pink-400), var(--pink-500), var(--pink-600)));
+  color: #fff;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent);
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.modpack-install-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--pink-500) calc(0.4 * 100%), transparent);
+}
+
+.modpack-install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}

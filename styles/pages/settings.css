@@ -1,0 +1,104 @@
+@import url('settings/performance.css');
+@import url('settings/account.css');
+@import url('settings/visual.css');
+/* ============ 设置页 - 入口 ============ */
+
+/* 设置页全局布局 */
+.page-settings {
+  padding: 12px 16px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  height: 100%;
+}
+
+.settings-header {
+  margin-bottom: 6px;
+}
+
+.settings-main-title {
+  font-size: 22px;
+  font-weight: 900;
+  color: var(--pink-700);
+  letter-spacing: 2px;
+}
+
+.settings-sub-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-light);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+/* 设置网格 */
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.set-card {
+  background: rgba(255, 255, 255, 0.8);
+  border-radius: var(--radius-xl);
+  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.set-card-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-dark);
+  margin-bottom: 8px;
+}
+
+/* Java 模式切换 */
+.java-mode-toggle { display: flex; gap: 6px; margin: 4px 0; }
+.java-mode-btn {
+  padding: 6px 16px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
+  border-radius: 18px; background: rgba(255,255,255,0.5);
+  color: var(--text-mid); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s ease; font-family: inherit;
+}
+.java-mode-btn:hover { border-color: color-mix(in srgb, var(--pink-500) 50%, transparent); }
+.java-mode-btn.active {
+  background: var(--rose-gradient);
+  color: #fff; border-color: transparent;
+}
+.java-auto-desc {
+  background: color-mix(in srgb, var(--pink-500) 8%, transparent); border-radius: 10px;
+  padding: 6px 10px; margin-top: 4px;
+}
+.java-auto-desc p { margin: 1px 0; font-size: 11px; color: var(--text-mid); }
+.java-auto-desc code {
+  background: color-mix(in srgb, var(--pink-500) 15%, transparent); padding: 1px 6px;
+  border-radius: 4px; font-size: 11px; color: var(--pink-700);
+}
+
+/* AI 崩溃分析设置 */
+.ai-provider-toggle { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.ai-provider-btn {
+  padding: 6px 16px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
+  border-radius: 18px; background: rgba(255,255,255,0.5);
+  color: var(--text-mid); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s ease; font-family: inherit;
+}
+.ai-provider-btn:hover { border-color: color-mix(in srgb, var(--pink-500) 50%, transparent); }
+.ai-provider-btn.active {
+  background: var(--rose-gradient);
+  color: #fff; border-color: transparent;
+}
+.ai-hint {
+  margin: 6px 0 0; font-size: 11px; color: var(--text-light);
+}
+.ai-actions {
+  display: flex; align-items: center; gap: 12px; margin-top: 4px;
+}
+.ai-test-result {
+  font-size: 12px; font-weight: 600;
+}

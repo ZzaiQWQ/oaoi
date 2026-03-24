@@ -1,0 +1,14 @@
+{
+  "name": "oaoi-launcher",
+  "version": "1.0.0",
+  "description": "oaoi - Minecraft 服务器启动器",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.5.0"
+  }
+}
