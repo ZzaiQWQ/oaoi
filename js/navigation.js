@@ -1,4 +1,4 @@
-﻿// ============ 导航切换 ============
+// ============ 导航切换 ============
 function initNavigation() {
   const navItems = document.querySelectorAll('.nav-item');
   const pages = document.querySelectorAll('.page');
@@ -9,6 +9,7 @@ function initNavigation() {
     download: document.getElementById('pageDownload'),
     settings: document.getElementById('pageSettings'),
     about: document.getElementById('pageAbout'),
+    diy: document.getElementById('pageDiy'),
   };
 
   navItems.forEach(item => {

@@ -1,4 +1,4 @@
-﻿/* ============================================
+/* ============================================
    oaoi - 启动器交互脚本
    ============================================ */
 
@@ -42,7 +42,7 @@ async function initWindowControls() {
     });
 
     // 全窗口拖拽：除了按钮、链接、输入框等可交互元素
-    const interactiveSelector = 'button, a, input, select, textarea, .win-btn, .launch-btn, .nav-item, .news-card, .window-controls, .java-results-header, .java-result-item, .set-toggle, .set-theme-item, .set-path-input, .set-player-input, .srv-card, [data-toggle], .modal-overlay, .modal, .loader-radio-btn, .form-group, .custom-select, .btn';
+    const interactiveSelector = 'button, a, input, select, textarea, .win-btn, .launch-btn, .nav-item, .news-card, .window-controls, .java-results-header, .java-result-item, .set-toggle, .set-theme-item, .set-path-input, .set-player-input, .srv-card, [data-toggle], .modal-overlay, .modal, .loader-radio-btn, .form-group, .custom-select, .btn, .diy-bg-item, .diy-toggle, .diy-slider-row, .diy-color-row, .diy-reset-btn, .diy-row, .diy-style-btn, .diy-theme-btn, .diy-style-grid, .diy-theme-grid';
     document.body.addEventListener('mousedown', async (e) => {
       // 如果点击的是可交互元素，不触发拖拽
       if (e.target.closest(interactiveSelector)) return;
@@ -56,10 +56,11 @@ async function initWindowControls() {
   }
 }
 class SakuraPetals {
-  constructor(container, count = 25) {
+  constructor(container, count = 15) {
     this.container = container;
     this.count = count;
     this.petals = ['🌸', '✿', '❀', '💮'];
+    this.paused = false;
     this.init();
   }
 
@@ -70,6 +71,10 @@ class SakuraPetals {
   }
 
   createPetal() {
+    if (this.paused) {
+      setTimeout(() => this.createPetal(), 1000);
+      return;
+    }
     const petal = document.createElement('div');
     petal.className = 'sakura-petal';
     petal.textContent = this.petals[Math.floor(Math.random() * this.petals.length)];
@@ -86,14 +91,11 @@ class SakuraPetals {
       animation-duration: ${duration}s;
       animation-delay: ${delay}s;
       opacity: ${0.4 + Math.random() * 0.4};
+      will-change: transform, opacity;
     `;
-
-    // 添加自定义摇摆动画
     petal.style.setProperty('--sway', `${swayAmount}px`);
-
     this.container.appendChild(petal);
 
-    // 动画结束后重新创建
     petal.addEventListener('animationend', () => {
       petal.remove();
       this.createPetal();

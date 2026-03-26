@@ -180,6 +180,33 @@ function initSettings() {
       }
     })();
   }
+  // Java 模式切换（自动/手动）
+  const javaModeAuto = document.getElementById('javaModeAuto');
+  const javaModeManual = document.getElementById('javaModeManual');
+  const javaAutoDesc = document.getElementById('javaAutoDesc');
+  const javaManualControls = document.getElementById('javaManualControls');
+
+  function setJavaMode(mode) {
+    localStorage.setItem('javaMode', mode);
+    if (mode === 'auto') {
+      javaModeAuto?.classList.add('active');
+      javaModeManual?.classList.remove('active');
+      if (javaAutoDesc) javaAutoDesc.style.display = '';
+      if (javaManualControls) javaManualControls.style.display = 'none';
+    } else {
+      javaModeAuto?.classList.remove('active');
+      javaModeManual?.classList.add('active');
+      if (javaAutoDesc) javaAutoDesc.style.display = 'none';
+      if (javaManualControls) javaManualControls.style.display = '';
+    }
+  }
+
+  // 恢复保存的模式
+  const savedJavaMode = localStorage.getItem('javaMode') || 'auto';
+  setJavaMode(savedJavaMode);
+
+  javaModeAuto?.addEventListener('click', () => setJavaMode('auto'));
+  javaModeManual?.addEventListener('click', () => setJavaMode('manual'));
 
   // Java 路径 - 浏览按钮
   const javaBrowseBtn = document.getElementById('javaBrowseBtn');
@@ -212,15 +239,11 @@ function initSettings() {
   const javaResultsToggle = document.getElementById('javaResultsToggle');
   const javaCount = document.getElementById('javaCount');
 
-  // 根据游戏版本推荐 Java 版本
+  // 根据游戏版本推荐 Java 版本（使用全局 getRequiredJavaMajor）
   function getRecommendedJavaMajor(mcVersion) {
-    if (!mcVersion) return 17;
-    const parts = mcVersion.split('.');
-    const minor = parseInt(parts[1]) || 0;
-    const patch = parseInt(parts[2]) || 0;
-    if (minor <= 16) return 8;
-    if (minor <= 20 && patch <= 4) return 17;
-    return 21;
+    return typeof getRequiredJavaMajor === 'function'
+      ? getRequiredJavaMajor(mcVersion)
+      : 21;
   }
   // 动态获取当前选中版本用于 Java 推荐
   function getCurrentMCVersion() {
@@ -248,7 +271,7 @@ function initSettings() {
       item.innerHTML = `
         <span class="java-result-path" title="${java.path}">${shortPath}</span>
         <span class="java-ver-badge ${isRecommended ? 'recommended' : ''}">
-          Java ${java.major}${isRecommended ? ' ★推荐' : ''}
+          Java ${java.major}
         </span>
       `;
       item.addEventListener('click', () => {
@@ -289,7 +312,7 @@ function initSettings() {
 
       try {
         const tauri = await waitForTauri();
-        const javas = await tauri.core.invoke('find_java');
+        const javas = await tauri.core.invoke('find_java', { gameDir: localStorage.getItem('gameDir') || '' });
 
         if (javas && javas.length > 0) {
           // 保存到缓存
@@ -315,6 +338,11 @@ function initSettings() {
       javaAutoBtn.disabled = false;
       javaAutoBtn.textContent = '🔍 自动查找';
     });
+
+    // 手动模式下，如果从未搜索过 Java，首次自动搜索一次
+    if (!localStorage.getItem('javaSearchResults')) {
+      javaAutoBtn.click();
+    }
   }
 
   // 折叠/展开搜索结果

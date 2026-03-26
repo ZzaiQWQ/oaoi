@@ -6,10 +6,35 @@ function initDownloadPage() {
   const dlSearch = document.getElementById('dlSearch');
   let allVersions = [];
   let dlFilter = 'release';
+  let dlSource = localStorage.getItem('downloadSource') || 'official';
+
+  // 下载源切换按钮
+  const sourceFilters = document.getElementById('dlSourceFilters');
+  if (sourceFilters) {
+    const sourceBtns = sourceFilters.querySelectorAll('.dl-filter-btn');
+    // 恢复保存的选择
+    sourceBtns.forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.source === dlSource);
+      btn.addEventListener('click', () => {
+        sourceBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        dlSource = btn.dataset.source;
+        localStorage.setItem('downloadSource', dlSource);
+        fetchVersions(); // 切换时重新加载版本列表
+      });
+    });
+  }
 
   async function fetchVersions() {
     try {
-      const resp = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json');
+      const officialUrl = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
+      const mirrorUrl = 'https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json';
+      let resp;
+      try {
+        resp = await fetch(dlSource === 'bmcl' ? mirrorUrl : officialUrl);
+      } catch (_) {
+        resp = await fetch(dlSource === 'bmcl' ? officialUrl : mirrorUrl);
+      }
       const data = await resp.json();
       allVersions = data.versions;
       renderVersions();
@@ -34,7 +59,7 @@ function initDownloadPage() {
 
     dlList.innerHTML = filtered.slice(0, 100).map(v => {
       const date = new Date(v.releaseTime);
-      const dateStr = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       const icon = v.type === 'release' ? '📦' : '🧪';
       const typeName = v.type === 'release' ? '正式版' : '快照';
       return `
@@ -57,31 +82,31 @@ function initDownloadPage() {
       btn.addEventListener('click', () => {
         const ver = btn.dataset.version;
         const url = btn.dataset.url;
-        
+
         document.getElementById('instMcVersion').value = ver;
         document.getElementById('instNameInput').value = `${ver}`;
         document.getElementById('instMetaUrl').value = url;
-        
+
         document.querySelectorAll('input[name="loader"]').forEach(el => {
-            if (el.value === 'vanilla') el.checked = true;
+          if (el.value === 'vanilla') el.checked = true;
         });
         document.querySelectorAll('.loader-radio-btn').forEach(el => el.classList.remove('active'));
         document.querySelector('input[value="vanilla"]').parentElement.classList.add('active');
         document.getElementById('loaderVersionGroup').style.display = 'none';
-        
+
         const createBtn = document.getElementById('createInstBtn');
         createBtn.disabled = false;
         createBtn.textContent = '确认创建';
-        
+
         document.getElementById('newInstanceModal').classList.remove('hidden');
       });
     });
   }
 
-  // 筛选按钮
-  document.querySelectorAll('.dl-filter-btn').forEach(btn => {
+  // 筛选按钮（仅版本类型，不影响源切换按钮）
+  document.querySelectorAll('.dl-filter-btn[data-filter]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.dl-filter-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.dl-filter-btn[data-filter]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       dlFilter = btn.dataset.filter;
       renderVersions();
@@ -109,22 +134,22 @@ function initDownloadPage() {
       radio.addEventListener('change', async (e) => {
         document.querySelectorAll('.loader-radio-btn').forEach(l => l.classList.remove('active'));
         e.target.parentElement.classList.add('active');
-        
+
         const loader = e.target.value;
         const mcVer = document.getElementById('instMcVersion').value;
         const nameInput = document.getElementById('instNameInput');
-        
+
         nameInput.value = loader === 'vanilla' ? mcVer : `${mcVer}-${loader}`;
-        
+
         if (loader === 'vanilla') {
           loaderVersionGroup.style.display = 'none';
           return;
         }
-        
+
         loaderVersionGroup.style.display = 'block';
         loaderSelect.innerHTML = '';
         loaderTargetSpinner.textContent = '加载中...';
-        
+
         try {
           const tauri = await waitForTauri();
           let versions = [];
@@ -132,8 +157,12 @@ function initDownloadPage() {
             versions = await tauri.core.invoke('get_fabric_versions', { mcVersion: mcVer });
           } else if (loader === 'forge') {
             versions = await tauri.core.invoke('get_forge_versions', { mcVersion: mcVer });
+          } else if (loader === 'neoforge') {
+            versions = await tauri.core.invoke('get_neoforge_versions', { mcVersion: mcVer });
+          } else if (loader === 'quilt') {
+            versions = await tauri.core.invoke('get_quilt_versions', { mcVersion: mcVer });
           }
-          
+
           if (versions.length === 0) {
             loaderTargetSpinner.textContent = ' 无可用版本';
           } else {
@@ -158,40 +187,54 @@ function initDownloadPage() {
       const metaUrl = document.getElementById('instMetaUrl').value;
       const loaderType = document.querySelector('input[name="loader"]:checked').value;
       const loaderVer = loaderSelect.value || '';
-      
+
       createBtn.disabled = true;
       createBtn.textContent = '✨ 创建中...';
-      
+
       try {
         const tauri = await waitForTauri();
         const dlActiveList = document.getElementById('dlActiveList');
+        const dlId = 'dl-' + Date.now();
 
         closeModal();
 
         if (dlActiveList) {
-          dlActiveList.innerHTML = `
-            <h2 class="dl-section-title">⏳ 活跃下载</h2>
-            <div class="dl-progress-card">
+          // 移除"暂无下载"提示
+          const emptyMsg = dlActiveList.querySelector('.dl-active-empty');
+          if (emptyMsg) emptyMsg.remove();
+          // 确保有标题
+          if (!dlActiveList.querySelector('.dl-section-title')) {
+            dlActiveList.insertAdjacentHTML('afterbegin', '<h2 class="dl-section-title">⏳ 活跃下载</h2>');
+          }
+          // 追加新的进度卡片
+          dlActiveList.insertAdjacentHTML('beforeend', `
+            <div class="dl-progress-card" id="${dlId}">
               <div class="dl-progress-name">📦 ${name}</div>
-              <div class="dl-progress-detail" id="dlProgressDetail">准备中...</div>
+              <div class="dl-progress-detail" id="${dlId}-detail">准备中...</div>
               <div class="dl-progress-bar-wrap">
-                <div class="dl-progress-bar" id="dlProgressBar" style="width: 0%"></div>
+                <div class="dl-progress-bar" id="${dlId}-bar" style="width: 0%"></div>
               </div>
             </div>
-          `;
+          `);
         }
 
+        let lastStage = '';
+        let lastPercent = 0;
         const unlisten = await tauri.event.listen('install-progress', (event) => {
-          const { stage, current, total, detail } = event.payload;
-          const progressDetail = document.getElementById('dlProgressDetail');
-          const progressBar = document.getElementById('dlProgressBar');
+          const { name: evtName, stage, current, total, detail } = event.payload;
+          // 只处理属于本次下载的事件
+          if (evtName !== name) return;
+          const progressDetail = document.getElementById(`${dlId}-detail`);
+          const progressBar = document.getElementById(`${dlId}-bar`);
+          const progressCard = document.getElementById(dlId);
 
           if (stage === 'done') {
             if (progressDetail) progressDetail.textContent = '✅ 安装完成！';
             if (progressBar) progressBar.style.width = '100%';
             loadInstalledVersions();
             setTimeout(() => {
-              if (dlActiveList) {
+              if (progressCard) progressCard.remove();
+              if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
                 dlActiveList.innerHTML = `
                   <h2 class="dl-section-title">⏳ 活跃下载</h2>
                   <div class="dl-active-empty">暂无下载任务</div>
@@ -203,7 +246,8 @@ function initDownloadPage() {
             if (progressDetail) progressDetail.textContent = '❌ ' + detail;
             if (progressBar) { progressBar.style.width = '100%'; progressBar.style.background = '#ff6b6b'; }
             setTimeout(() => {
-              if (dlActiveList) {
+              if (progressCard) progressCard.remove();
+              if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
                 dlActiveList.innerHTML = `
                   <h2 class="dl-section-title">⏳ 活跃下载</h2>
                   <div class="dl-active-empty">暂无下载任务</div>
@@ -212,23 +256,32 @@ function initDownloadPage() {
             }, 5000);
             unlisten();
           } else {
+            if (stage !== lastStage) {
+              lastStage = stage;
+              lastPercent = 0;
+            }
             if (progressDetail) progressDetail.textContent = detail;
             if (progressBar && total > 0) {
-              progressBar.style.width = Math.round((current / total) * 100) + '%';
+              const pct = Math.round((current / total) * 100);
+              if (pct >= lastPercent) {
+                lastPercent = pct;
+                progressBar.style.width = pct + '%';
+              }
             }
           }
         });
-        
+
         const gameDir = localStorage.getItem('gameDir') || '';
         const javaPath = localStorage.getItem('selectedJavaPath') || '';
-        await tauri.core.invoke('create_instance', { 
-           name: name,
-           mcVersion: mcVer,
-           metaUrl: metaUrl,
-           gameDir: gameDir,
-           loaderType: loaderType,
-           loaderVersion: loaderVer,
-           javaPath: javaPath
+        await tauri.core.invoke('create_instance', {
+          name: name,
+          mcVersion: mcVer,
+          metaUrl: metaUrl,
+          gameDir: gameDir,
+          loaderType: loaderType,
+          loaderVersion: loaderVer,
+          javaPath: javaPath,
+          useMirror: (localStorage.getItem('downloadSource') || 'official') === 'bmcl'
         });
       } catch (e) {
         console.error('创建失败:', e);

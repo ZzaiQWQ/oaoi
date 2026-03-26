@@ -46,6 +46,23 @@ body {
   position: relative;
 }
 
+/* ============ 全局背景 ============ */
+.global-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.global-bg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 /* ============ 樱花飘落动画 ============ */
 .sakura-container {
   position: fixed;

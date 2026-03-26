@@ -54,3 +54,26 @@
   color: var(--text-dark);
   margin-bottom: 10px;
 }
+
+/* Java 模式切换 */
+.java-mode-toggle { display: flex; gap: 8px; margin: 8px 0; }
+.java-mode-btn {
+  padding: 6px 16px; border: 2px solid rgba(232,69,116,0.3);
+  border-radius: 18px; background: rgba(255,255,255,0.5);
+  color: var(--text-mid); font-size: 12px; font-weight: 700;
+  cursor: pointer; transition: all 0.2s ease; font-family: inherit;
+}
+.java-mode-btn:hover { border-color: rgba(232,69,116,0.5); }
+.java-mode-btn.active {
+  background: linear-gradient(135deg, #f472b6, #e84574);
+  color: #fff; border-color: transparent;
+}
+.java-auto-desc {
+  background: rgba(232,69,116,0.08); border-radius: 12px;
+  padding: 10px 14px; margin-top: 6px;
+}
+.java-auto-desc p { margin: 2px 0; font-size: 12px; color: var(--text-mid); }
+.java-auto-desc code {
+  background: rgba(232,69,116,0.15); padding: 1px 6px;
+  border-radius: 4px; font-size: 11px; color: var(--pink-700);
+}
