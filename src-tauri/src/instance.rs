@@ -78,7 +78,7 @@ pub fn resolve_game_dir(game_dir: &str) -> std::path::PathBuf {
     }
 }
 
-pub const CF_API_KEY: &str = env!("CF_API_KEY");
+pub fn cf_api_key() -> String { crate::secrets::get_cf_api_key() }
 
 #[tauri::command]
 pub fn list_installed_versions(game_dir: String) -> Result<Vec<InstanceInfo>, String> {

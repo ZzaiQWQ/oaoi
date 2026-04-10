@@ -85,14 +85,18 @@ function getRequiredJavaMajor(mcVersion) {
 
 // 实例缓存（供启动时查 mc_version 用）
 let instancesCache = [];
+let isLaunching = false;
 
 // 显示崩溃分析弹窗
-function showCrashModal(version, content) {
+function showCrashModal(version, content, loading = false) {
   const modal = document.getElementById('crashModal');
   const body  = document.getElementById('crashModalBody');
   const ver   = document.getElementById('crashModalVersion');
+  const closeBtn = document.getElementById('crashModalClose');
   if (!modal || !body) return;
-  ver.textContent = `${version} · 退出码异常`;
+  ver.textContent = loading
+    ? `${version} · AI 分析中...`
+    : `${version} · 退出码异常`;
   // 简单 markdown → HTML
   let html = content
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -106,11 +110,18 @@ function showCrashModal(version, content) {
   // 给连续的 <li> 块包裹 <ul>（避免重复嵌套）
   html = html.replace(/(<li>.*?<\/li>)(?:<br>)*(<li>)/g, '$1$2');
   html = html.replace(/((?:<li>.*?<\/li>)+)/g, '<ul>$1</ul>');
+  if (loading) {
+    html += '<div style="margin-top:16px;text-align:center"><div class="crash-loading-dot"></div></div>';
+  }
   body.innerHTML = html;
   modal.style.display = '';
-  // 关闭
-  document.getElementById('crashModalClose').onclick = () => modal.style.display = 'none';
-  modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
+  // 加载中隐藏关闭按钮，分析完成后显示
+  if (closeBtn) closeBtn.style.display = loading ? 'none' : '';
+  if (!loading) {
+    closeBtn.textContent = '我知道了';
+    closeBtn.onclick = () => modal.style.display = 'none';
+    modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
+  }
 }
 
 // 监听后台游戏崩溃事件
@@ -141,18 +152,43 @@ function showCrashModal(version, content) {
           return;
         }
 
+        // 先弹窗显示"AI 分析中"加载状态，关闭按钮可取消
+        const aiAbort = new AbortController();
+        showCrashModal(version, '⏳ **AI 正在分析崩溃日志，请稍候...**\n\n这可能需要几秒钟时间。', true);
+        // 绑定取消按钮
+        const closeBtn = document.getElementById('crashModalClose');
+        if (closeBtn) {
+          closeBtn.style.display = '';
+          closeBtn.textContent = '取消分析';
+          closeBtn.onclick = () => {
+            aiAbort.abort();
+            document.getElementById('crashModal').style.display = 'none';
+            isLaunching = false;
+          };
+        }
+
         try {
           const aiResult = await callAiApi(aiKey, aiUrl, aiModel,
-            `Minecraft ${version} 崩溃了，退出码: ${exit_code}。请分析以下日志：\n\n${logForAi}`
+            `Minecraft ${version} 崩溃了，退出码: ${exit_code}。请分析以下日志：\n\n${logForAi}`,
+            aiAbort.signal
           );
-          showCrashModal(version, aiResult || diagnosis);
+          if (!aiAbort.signal.aborted) {
+            showCrashModal(version, aiResult || diagnosis);
+          }
         } catch (e) {
+          if (aiAbort.signal.aborted) return; // 用户取消，不再显示
           console.warn('AI 分析失败，降级到本地分析:', e);
           showCrashModal(version, `${diagnosis}\n\n**AI 分析失败:** ${e.message}`);
         }
       } else {
         showCrashModal(version, diagnosis);
       }
+    });
+
+    // 监听游戏正常退出，恢复启动按钮
+    await tauri.event.listen('game-exited', async () => {
+      const btn = document.getElementById('launchBtn');
+      if (btn) { resetLaunchBtn(btn); isLaunching = false; }
     });
   } catch (e) { console.warn('[crash] 监听崩溃事件失败:', e); }
 })();
@@ -253,7 +289,6 @@ function initLaunchButton() {
   // 初始加载版本列表
   loadInstalledVersions();
 
-  let isLaunching = false;
   btn.addEventListener('click', async () => {
     if (isLaunching) return;
     isLaunching = true;
@@ -390,14 +425,6 @@ function initLaunchButton() {
         <span>启动成功！</span>
       `;
       btn.style.background = 'linear-gradient(135deg, #86efac 0%, #4ade80 50%, #22c55e 100%)';
-
-      // 启动成功后自动最小化，减少 GPU 占用
-      setTimeout(async () => {
-        try {
-          const t = await waitForTauri();
-          await t.window.getCurrentWindow().minimize();
-        } catch (e) { console.warn('[home] 实例删除失败:', e); }
-      }, 1500);
     } catch (e) {
       console.log('❌ 启动失败:', e);
       const errMsg = typeof e === 'string' ? e : (e.message || '未知错误');

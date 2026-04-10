@@ -13,6 +13,10 @@ mod versions;
 mod installer;
 mod modpack;
 
+pub mod secrets {
+    include!(concat!(env!("OUT_DIR"), "/secrets.rs"));
+}
+
 use tauri::Manager;
 use tauri::Emitter;
 use tauri::window::Color;

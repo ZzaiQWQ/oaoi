@@ -541,10 +541,12 @@ function initAiSettings() {
 /**
  * AI API 调用（OpenAI 兼容格式，支持 DeepSeek / OpenAI / 任何兼容服务）
  */
-async function callAiApi(apiKey, apiUrl, model, userMessage) {
+async function callAiApi(apiKey, apiUrl, model, userMessage, signal) {
   const endpoint = apiUrl.includes('/v1/') ? apiUrl : `${apiUrl}/v1/chat/completions`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000); // 30秒超时
+  // 外部取消时也中止请求
+  if (signal) signal.addEventListener('abort', () => controller.abort());
   try {
     const resp = await fetch(endpoint, {
       method: 'POST',
