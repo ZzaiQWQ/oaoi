@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::instance::CF_API_KEY;
+use crate::instance::cf_api_key;
 use crate::modcn::{load_modcn, contains_chinese, search_modcn_fuzzy};
 
 #[derive(Serialize, Clone)]
@@ -294,7 +294,7 @@ fn do_curseforge_search(
     }
 
     let resp = http.get(&url)
-        .header("x-api-key", CF_API_KEY)
+        .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
         .send()
         .map_err(|e| format!("CurseForge 请求失败: {}", e))?;

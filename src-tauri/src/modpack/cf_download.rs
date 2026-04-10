@@ -1,5 +1,5 @@
 use crate::installer::download_file_if_needed;
-use crate::instance::CF_API_KEY;
+use crate::instance::cf_api_key;
 use super::detect_target_dir;
 
 /// 根据 fileId 构造 CurseForge CDN URL（fileId 拆分为 id/1000 和 id%1000 路径）
@@ -25,7 +25,7 @@ pub fn cf_download_mod(http: &reqwest::blocking::Client, project_id: u32, file_i
 
     // 策略1: API 获取文件信息
     let api_url = format!("https://api.curseforge.com/v1/mods/{}/files/{}", project_id, file_id);
-    if let Ok(resp) = api_client.get(&api_url).header("x-api-key", CF_API_KEY).send() {
+    if let Ok(resp) = api_client.get(&api_url).header("x-api-key", &cf_api_key()).send() {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<serde_json::Value>() {
                 let fname = json["data"]["fileName"].as_str().unwrap_or("").to_string();
@@ -46,7 +46,7 @@ pub fn cf_download_mod(http: &reqwest::blocking::Client, project_id: u32, file_i
                     }
                     // 1b) 尝试 download-url 端点
                     let dl_api = format!("https://api.curseforge.com/v1/mods/{}/files/{}/download-url", project_id, file_id);
-                    if let Ok(resp2) = api_client.get(&dl_api).header("x-api-key", CF_API_KEY).send() {
+                    if let Ok(resp2) = api_client.get(&dl_api).header("x-api-key", &cf_api_key()).send() {
                         if resp2.status().is_success() {
                             if let Ok(json2) = resp2.json::<serde_json::Value>() {
                                 if let Some(url) = json2["data"].as_str() {

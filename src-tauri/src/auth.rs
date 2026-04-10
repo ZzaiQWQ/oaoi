@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const MS_CLIENT_ID: &str = env!("MS_CLIENT_ID");
+fn ms_client_id() -> String { crate::secrets::get_ms_client_id() }
 
 /// 登录取消标志
 static LOGIN_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -42,9 +42,10 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
             .map_err(|e| format!("无法启动服务器: {}", e))?;
 
         // 2. 打开浏览器登录
+        let client_id = ms_client_id();
         let auth_url = format!(
             "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id={}&response_type=code&redirect_uri={}&response_mode=query&scope=XboxLive.signin%20XboxLive.offline_access&prompt=select_account",
-            MS_CLIENT_ID, redirect_uri
+            client_id, redirect_uri
         );
         Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", &auth_url])
@@ -89,10 +90,11 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
 
         // 4. 换取 Token
         let client = reqwest::blocking::Client::new();
+        let client_id = ms_client_id();
         let token_resp = client
             .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
             .form(&[
-                ("client_id", MS_CLIENT_ID),
+                ("client_id", client_id.as_str()),
                 ("code", code.as_str()),
                 ("redirect_uri", redirect_uri.as_str()),
                 ("grant_type", "authorization_code"),
@@ -121,10 +123,11 @@ pub async fn refresh_ms_login(refresh_token: String) -> Result<McProfile, String
         let client = reqwest::blocking::Client::new();
 
         // 1. 用 refresh_token 换新 token
+        let client_id = ms_client_id();
         let token_resp = client
             .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
             .form(&[
-                ("client_id", MS_CLIENT_ID),
+                ("client_id", client_id.as_str()),
                 ("refresh_token", refresh_token.as_str()),
                 ("grant_type", "refresh_token"),
                 ("scope", "XboxLive.signin XboxLive.offline_access"),

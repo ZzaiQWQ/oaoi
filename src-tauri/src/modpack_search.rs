@@ -1,5 +1,5 @@
 use std::sync::atomic::Ordering;
-use crate::instance::{CF_API_KEY, register_cancel, is_cancelled, unregister_cancel};
+use crate::instance::{cf_api_key, register_cancel, is_cancelled, unregister_cancel};
 
 // ===== 整合包在线搜索 =====
 
@@ -121,7 +121,7 @@ fn search_cf_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32
     );
 
     let resp = http.get(&url)
-        .header("x-api-key", CF_API_KEY)
+        .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
         .send()
         .map_err(|e| e.to_string())?;
@@ -229,7 +229,7 @@ fn get_mr_modpack_versions(http: &reqwest::blocking::Client, project_id: &str) -
 fn get_cf_modpack_versions(http: &reqwest::blocking::Client, project_id: &str) -> Result<Vec<ModpackVersionInfo>, String> {
     let url = format!("https://api.curseforge.com/v1/mods/{}/files?pageSize=20", project_id);
     let resp = http.get(&url)
-        .header("x-api-key", CF_API_KEY)
+        .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
         .send().map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;

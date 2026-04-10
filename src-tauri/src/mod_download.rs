@@ -1,4 +1,4 @@
-use crate::instance::{resolve_game_dir, CF_API_KEY};
+use crate::instance::{resolve_game_dir, cf_api_key};
 
 /// 下载 Mod/材质包/光影包到实例目录（异步）
 #[tauri::command]
@@ -179,7 +179,7 @@ fn download_from_curseforge(
     }
 
     let resp = http.get(&url)
-        .header("x-api-key", CF_API_KEY)
+        .header("x-api-key", &cf_api_key())
         .send()
         .map_err(|e| format!("CurseForge 请求失败: {}", e))?;
     let json: serde_json::Value = resp.json().map_err(|e| format!("解析失败: {}", e))?;
@@ -232,7 +232,7 @@ fn download_from_curseforge(
                 "https://api.curseforge.com/v1/mods/{}/files?pageSize=1&gameVersion={}&modLoaderType={}",
                 dep_mod_id, mc_version, loader_type
             );
-            if let Ok(dep_resp) = http.get(&dep_url).header("x-api-key", CF_API_KEY).send() {
+            if let Ok(dep_resp) = http.get(&dep_url).header("x-api-key", &cf_api_key()).send() {
                 if let Ok(dep_json) = dep_resp.json::<serde_json::Value>() {
                     if let Some(dep_files) = dep_json["data"].as_array() {
                         if let Some(df) = dep_files.first() {

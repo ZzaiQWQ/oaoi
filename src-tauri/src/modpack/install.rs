@@ -1,7 +1,7 @@
 use crate::installer::{download_file_if_needed, mirror_url};
 use super::{ModpackMeta, ModpackKind, build_http_client, emit_progress, sanitize_name, detect_target_dir};
 use super::cf_download::{cf_cdn_urls, cf_download_mod};
-use crate::instance::CF_API_KEY;
+use crate::instance::cf_api_key;
 
 pub fn do_install_modpack_inner(
     app: &tauri::AppHandle,
@@ -122,7 +122,7 @@ pub fn do_install_modpack_inner(
                     for chunk in unique_pids.chunks(50) {
                         let body = serde_json::json!({ "modIds": chunk, "filterPcOnly": true });
                         if let Ok(resp) = client.post("https://api.curseforge.com/v1/mods")
-                            .header("x-api-key", CF_API_KEY)
+                            .header("x-api-key", &cf_api_key())
                             .header("Content-Type", "application/json")
                             .json(&body).send()
                         {
@@ -149,7 +149,7 @@ pub fn do_install_modpack_inner(
                     for chunk in file_ids.chunks(500) {
                         let body = serde_json::json!({ "fileIds": chunk });
                         match client.post("https://api.curseforge.com/v1/mods/files")
-                            .header("x-api-key", CF_API_KEY)
+                            .header("x-api-key", &cf_api_key())
                             .header("Content-Type", "application/json")
                             .header("Accept", "application/json")
                             .json(&body).send()

@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::instance::{resolve_game_dir, CF_API_KEY};
+use crate::instance::{resolve_game_dir, cf_api_key};
 use crate::modcn::{load_modcn, contains_chinese};
 
 #[derive(Serialize, Clone)]
@@ -159,7 +159,7 @@ pub async fn lookup_mod_urls(file_names: Vec<String>) -> Result<Vec<ModUrlInfo>,
                     "https://api.curseforge.com/v1/mods/search?gameId=432&classId=6&searchFilter={}&pageSize=1",
                     urlencoding::encode(&search_name)
                 );
-                if let Ok(resp) = http.get(&url).header("x-api-key", CF_API_KEY).send() {
+                if let Ok(resp) = http.get(&url).header("x-api-key", &cf_api_key()).send() {
                     if let Ok(json) = resp.json::<serde_json::Value>() {
                         if let Some(data) = json["data"].as_array() {
                             if let Some(first) = data.first() {
