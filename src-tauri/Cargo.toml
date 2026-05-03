@@ -1,6 +1,6 @@
 [package]
 name = "oaoi"
-version = "1.0.0"
+version = "1.0.3"
 description = "oaoi - Minecraft Launcher"
 authors = ["you"]
 license = ""
@@ -16,6 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
+flate2 = "1"
 
 [dependencies]
 serde_json = "1.0"
@@ -25,10 +26,19 @@ tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 sysinfo = "0.33"
 tauri-plugin-dialog = "2.6.0"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
 tiny_http = "0.12"
 url = "2"
 sha1_smol = "1.0"
+sha2 = "0.10"
 zip = "2"
 urlencoding = "2"
 tokio = { version = "1", features = ["rt"] }
+flate2 = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"

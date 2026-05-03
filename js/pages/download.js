@@ -316,10 +316,22 @@ function initDownloadPage() {
           });
 
           // 取消按钮
-          document.getElementById(`${dlId}-cancel`)?.addEventListener('click', async () => {
+          document.getElementById(`${dlId}-cancel`)?.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const cancelBtn = event.currentTarget;
+            const summaryText = document.getElementById(`${dlId}-summary-text`);
+            cancelBtn.disabled = true;
+            cancelBtn.textContent = '…';
+            if (summaryText) summaryText.textContent = '正在取消...';
             try {
               await tauri.core.invoke('cancel_modpack_install', { fileName: name });
-            } catch (e) { console.warn('取消失败:', e); }
+            } catch (e) {
+              cancelBtn.disabled = false;
+              cancelBtn.textContent = '✕';
+              if (summaryText) summaryText.textContent = `取消失败: ${e}`;
+              console.warn('取消失败:', e);
+            }
           });
         }
 
@@ -420,7 +432,11 @@ function initDownloadPage() {
             const barEl = document.getElementById(`${stageId}-bar`);
             if (total > 0) {
               const pct = Math.min(100, Math.round((current / total) * 100));
-              if (countEl) countEl.textContent = `${current}/${total}`;
+              if (countEl) {
+                countEl.textContent = stage === 'downloading'
+                  ? `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
+                  : `${current}/${total}`;
+              }
               if (barEl) barEl.style.width = pct + '%';
               if (pct >= 100 && barEl) barEl.style.opacity = '0.5';
             } else {

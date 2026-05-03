@@ -1,6 +1,6 @@
 {
   "name": "oaoi-launcher",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "oaoi - Minecraft 服务器启动器",
   "scripts": {
     "tauri": "tauri"

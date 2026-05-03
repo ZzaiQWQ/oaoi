@@ -14,15 +14,23 @@ pub fn install_fabric(
 ) -> Result<(), String> {
     let emit = make_emitter(app_handle, name);
 
-    emit("fabric", 0, 1, &format!("处理 Fabric Loader {}...", loader_version));
+    emit(
+        "fabric",
+        0,
+        1,
+        &format!("处理 Fabric Loader {}...", loader_version),
+    );
 
     let profile_url = format!(
         "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
         mc_version, loader_version
     );
-    let profile_resp = http.get(&profile_url).send()
+    let profile_resp = http
+        .get(&profile_url)
+        .send()
         .map_err(|e| format!("获取 Fabric 配置失败: {}", e))?;
-    let fabric_profile: serde_json::Value = profile_resp.json()
+    let fabric_profile: serde_json::Value = profile_resp
+        .json()
         .map_err(|e| format!("解析 Fabric 配置失败: {}", e))?;
 
     // 下载 Fabric 库
@@ -34,9 +42,13 @@ pub fn install_fabric(
             let maven_url = lib["url"].as_str().unwrap_or("https://maven.fabricmc.net/");
             let sha1 = lib["sha1"].as_str();
 
-            if name_str.is_empty() { continue; }
+            if name_str.is_empty() {
+                continue;
+            }
             let parts: Vec<&str> = name_str.split(':').collect();
-            if parts.len() < 3 { continue; }
+            if parts.len() < 3 {
+                continue;
+            }
             let group_path = parts[0].replace('.', "/");
             let artifact = parts[1];
             let version = parts[2];
@@ -53,25 +65,42 @@ pub fn install_fabric(
         }
 
         let total = fabric_tasks.len();
-        emit("fabric-libs", 0, total, &format!("下载 {} 个 Fabric 组件...", total));
+        emit(
+            "fabric-libs",
+            0,
+            total,
+            &format!("下载 {} 个 Fabric 组件...", total),
+        );
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let handles: Vec<_> = fabric_tasks.into_iter().map(|(url, dest, sha1)| {
-            let done = done.clone();
-            let h = http.clone();
-            std::thread::spawn(move || {
-                let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handles: Vec<_> = fabric_tasks
+            .into_iter()
+            .map(|(url, dest, sha1)| {
+                let done = done.clone();
+                let h = http.clone();
+                std::thread::spawn(move || {
+                    let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })
             })
-        }).collect();
+            .collect();
 
         loop {
             let finished = done.load(std::sync::atomic::Ordering::Relaxed);
-            emit("fabric-libs", finished, total, &format!("Fabric 组件 {}/{}", finished, total));
-            if finished >= total { break; }
+            emit(
+                "fabric-libs",
+                finished,
+                total,
+                &format!("Fabric 组件 {}/{}", finished, total),
+            );
+            if finished >= total {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        for h in handles { let _ = h.join(); }
+        for h in handles {
+            let _ = h.join();
+        }
         emit("fabric-libs", total, total, "Fabric 组件下载完成");
     }
 
@@ -118,18 +147,26 @@ pub fn install_fabric(
                         if let Some(files) = first["files"].as_array() {
                             if let Some(file) = files.first() {
                                 let dl_url = file["url"].as_str().unwrap_or("");
-                                let filename = file["filename"].as_str().unwrap_or("fabric-api.jar");
+                                let filename =
+                                    file["filename"].as_str().unwrap_or("fabric-api.jar");
                                 if !dl_url.is_empty() {
                                     let dest = mods_dir.join(filename);
-                                    let _ = download_file_if_needed(http, dl_url, &dest, None, use_mirror);
-                                    emit("fabric-api", 1, 1, &format!("Fabric API {} 已下载", filename));
+                                    let _ = download_file_if_needed(
+                                        http, dl_url, &dest, None, use_mirror,
+                                    );
+                                    emit(
+                                        "fabric-api",
+                                        1,
+                                        1,
+                                        &format!("Fabric API {} 已下载", filename),
+                                    );
                                 }
                             }
                         }
                     }
                 }
             }
-        },
+        }
         Err(e) => eprintln!("[install] Fabric API 下载失败(非致命): {}", e),
     }
 

@@ -4,36 +4,176 @@ async function initModpackDrop() {
   const overlay = document.getElementById('modpackDropOverlay');
   const pill = document.getElementById('modpackDropPill');
   if (!overlay || !pill) return;
+  pill.setAttribute('data-no-drag', '');
+  pill.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  pill.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+  let activeDropId = '';
+  let hideTimer = null;
+  let cleanupTimer = null;
+  let receiveTimer = null;
+
+  function setOverlayText(title, desc, icon = '📦') {
+    const iconEl = overlay.querySelector('.drop-icon');
+    const titleEl = overlay.querySelector('.drop-title');
+    const descEl = overlay.querySelector('.drop-desc');
+    if (iconEl) iconEl.textContent = icon;
+    if (titleEl) titleEl.textContent = title;
+    if (descEl) descEl.textContent = desc;
+  }
+
+  function showDropOverlay(mode, fileName = '') {
+    if (receiveTimer) {
+      clearTimeout(receiveTimer);
+      receiveTimer = null;
+    }
+    overlay.classList.toggle('is-received', mode === 'received');
+    overlay.classList.add('is-visible');
+    overlay.style.visibility = 'visible';
+    overlay.style.opacity = '1';
+    if (mode === 'received') {
+      setOverlayText('正在导入整合包', fileName || '后台开始处理整合包', '✓');
+    } else {
+      setOverlayText('松开以导入整合包', '支持 CurseForge (.zip) 和 Modrinth (.mrpack)', '📦');
+    }
+  }
+
+  function hideDropOverlay(delay = 0) {
+    if (receiveTimer) clearTimeout(receiveTimer);
+    receiveTimer = setTimeout(() => {
+      overlay.classList.remove('is-visible', 'is-received');
+      overlay.style.visibility = 'hidden';
+      overlay.style.opacity = '0';
+      receiveTimer = null;
+    }, delay);
+  }
+
+  function clearDropTimers() {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer);
+      cleanupTimer = null;
+    }
+  }
+
+  function hidePillLater(dropId, delay, hideModal) {
+    clearDropTimers();
+    hideTimer = setTimeout(() => {
+      if (activeDropId !== dropId) return;
+      pill.style.animation = 'dropPillSlideOut 0.3s ease forwards';
+      cleanupTimer = setTimeout(() => {
+        if (activeDropId !== dropId) return;
+        pill.style.display = 'none';
+        pill.innerHTML = '';
+      }, 300);
+      if (hideModal) {
+        const modal = document.getElementById('dlDetailModal');
+        if (modal) modal.classList.add('hidden');
+      }
+    }, delay);
+  }
 
   const tauri = await waitForTauri();
+  let dragDepth = 0;
+  let dragHoverTimer = null;
+
+  function hasDraggedFiles(event) {
+    const types = event.dataTransfer?.types;
+    return !!types && Array.from(types).includes('Files');
+  }
+
+  function scheduleDragOverlayHide(delay = 260) {
+    if (dragHoverTimer) clearTimeout(dragHoverTimer);
+    dragHoverTimer = setTimeout(() => {
+      dragHoverTimer = null;
+      dragDepth = 0;
+      if (!overlay.classList.contains('is-received')) hideDropOverlay();
+    }, delay);
+  }
+
+  function keepDragOverlayVisible() {
+    if (dragHoverTimer) {
+      clearTimeout(dragHoverTimer);
+      dragHoverTimer = null;
+    }
+    showDropOverlay('ready');
+    scheduleDragOverlayHide(420);
+  }
+
+  document.addEventListener('dragenter', (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    keepDragOverlayVisible();
+  }, true);
+
+  document.addEventListener('dragover', (event) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    keepDragOverlayVisible();
+  }, true);
+
+  document.addEventListener('dragleave', (event) => {
+    if (!hasDraggedFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) scheduleDragOverlayHide(180);
+  }, true);
+
+  document.addEventListener('drop', (event) => {
+    if (!hasDraggedFiles(event)) return;
+    dragDepth = 0;
+    if (dragHoverTimer) {
+      clearTimeout(dragHoverTimer);
+      dragHoverTimer = null;
+    }
+  }, true);
 
   // 显示/隐藏拖拽蒙层（由 Rust 端的 DragDropEvent 触发）
   await tauri.event.listen('modpack-drag-enter', () => {
-    overlay.style.visibility = 'visible';
-    overlay.style.opacity = '1';
+    dragDepth = Math.max(1, dragDepth);
+    keepDragOverlayVisible();
   });
   await tauri.event.listen('modpack-drag-leave', () => {
-    overlay.style.visibility = 'hidden';
-    overlay.style.opacity = '0';
+    dragDepth = 0;
+    scheduleDragOverlayHide(220);
   });
 
-  // 接收文件路径，执行安装
+  // 处理文件路径，执行安装
   await tauri.event.listen('modpack-drop', async (evt) => {
-    overlay.style.visibility = 'hidden';
-    overlay.style.opacity = '0';
-
     const filePath = evt.payload?.path;
-    if (!filePath) return;
+    if (!filePath) {
+      hideDropOverlay();
+      return;
+    }
 
     const gameDir = localStorage.getItem('gameDir') || '';
     const javaPath = localStorage.getItem('selectedJavaPath') || '';
     const useMirror = (localStorage.getItem('downloadSource') || 'official') === 'bmcl';
     const displayName = filePath.split(/[/\\]/).pop() || '整合包';
     const dlId = 'droppill-' + Date.now();
+    dragDepth = 0;
+    if (dragHoverTimer) {
+      clearTimeout(dragHoverTimer);
+      dragHoverTimer = null;
+    }
+    showDropOverlay('received', displayName);
+    hideDropOverlay(900);
+    activeDropId = dlId;
+    clearDropTimers();
 
     // 1. 渲染浮动胶囊
     pill.className = 'drop-pill';
+    pill.setAttribute('data-no-drag', '');
+    pill.dataset.dropId = dlId;
     pill.style.display = 'block';
+    pill.style.animation = '';
     pill.innerHTML = `
       <div class="drop-pill-header">
         <div class="drop-pill-title">
@@ -56,7 +196,9 @@ async function initModpackDrop() {
     pill.appendChild(stagesData);
 
     // 2. 点击胶囊打开详情弹窗（复用下载页的 dlDetailModal）
-    pill.onclick = () => {
+    pill.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       let modal = document.getElementById('dlDetailModal');
       if (!modal) {
         document.body.insertAdjacentHTML('beforeend', `
@@ -107,12 +249,7 @@ async function initModpackDrop() {
           const modalStages = document.getElementById('dlDetailStages');
           if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
           if (typeof loadInstalledVersions === 'function') loadInstalledVersions();
-          setTimeout(() => {
-            pill.style.animation = 'dropPillSlideOut 0.3s ease forwards';
-            setTimeout(() => { pill.style.display = 'none'; pill.innerHTML = ''; }, 300);
-            const modal = document.getElementById('dlDetailModal');
-            if (modal) modal.classList.add('hidden');
-          }, 2500);
+          hidePillLater(dlId, 2500, true);
           if (unlisten) unlisten();
         } else if (stage === 'error' || stage === 'cancelled') {
           const icon = stage === 'cancelled' ? '🚫' : '❌';
@@ -122,10 +259,7 @@ async function initModpackDrop() {
           stagesData.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${msg}</span></div>`;
           const modalStages = document.getElementById('dlDetailStages');
           if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
-          setTimeout(() => {
-            pill.style.animation = 'dropPillSlideOut 0.3s ease forwards';
-            setTimeout(() => { pill.style.display = 'none'; pill.innerHTML = ''; }, 300);
-          }, 3000);
+          hidePillLater(dlId, 3000, false);
           if (unlisten) unlisten();
         } else {
           // 正常进度更新
@@ -164,7 +298,11 @@ async function initModpackDrop() {
           const stageBarEl = document.getElementById(`${stageElId}-bar`);
           if (total > 0) {
             const pct = Math.min(100, Math.round((current / total) * 100));
-            if (countEl) countEl.textContent = `${current}/${total}`;
+            if (countEl) {
+              countEl.textContent = stage === 'downloading'
+                ? `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
+                : `${current}/${total}`;
+            }
             if (stageBarEl) stageBarEl.style.width = pct + '%';
             if (pct >= 100 && stageBarEl) stageBarEl.style.opacity = '0.5';
           } else {
@@ -186,16 +324,14 @@ async function initModpackDrop() {
         gameDir,
         javaPath,
         useMirror,
+        displayName,
       });
     } catch (err) {
       if (unlisten) unlisten();
       if (statusEl) statusEl.textContent = `❌ 导入失败: ${err}`;
       pill.classList.add('error');
       console.error('[modpack-drop]', err);
-      setTimeout(() => {
-        pill.style.animation = 'dropPillSlideOut 0.3s ease forwards';
-        setTimeout(() => { pill.style.display = 'none'; pill.innerHTML = ''; }, 300);
-      }, 4000);
+      hidePillLater(dlId, 4000, false);
     }
   });
 }

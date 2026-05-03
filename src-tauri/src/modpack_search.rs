@@ -1,5 +1,5 @@
+use crate::instance::{cf_api_key, is_cancelled, register_cancel, unregister_cancel};
 use std::sync::atomic::Ordering;
-use crate::instance::{cf_api_key, register_cancel, is_cancelled, unregister_cancel};
 
 // ===== 整合包在线搜索 =====
 
@@ -17,36 +17,39 @@ pub struct ModpackResult {
 }
 
 #[tauri::command]
-pub async fn search_modpacks(query: String, offset: Option<u32>) -> Result<Vec<ModpackResult>, String> {
+pub async fn search_modpacks(
+    query: String,
+    offset: Option<u32>,
+) -> Result<Vec<ModpackResult>, String> {
     let offset = offset.unwrap_or(0);
-    tokio::task::spawn_blocking(move || {
-        do_search_modpacks(&query, offset)
-    }).await.map_err(|e| format!("线程错误: {}", e))?
+    tokio::task::spawn_blocking(move || do_search_modpacks(&query, offset))
+        .await
+        .map_err(|e| format!("线程错误: {}", e))?
 }
 
 fn do_search_modpacks(query: &str, offset: u32) -> Result<Vec<ModpackResult>, String> {
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("OAOI-Launcher/1.0")
-        .build().map_err(|e| e.to_string())?;
+        .build()
+        .map_err(|e| e.to_string())?;
 
     // 全部并发搜索（使用 thread::scope 避免孤儿线程）
     let (mr_results, cf_results) = std::thread::scope(|s| {
         let q1 = query.to_string();
         let h1 = http.clone();
         let off1 = offset;
-        let mr_handle = s.spawn(move || {
-            search_mr_modpacks(&h1, &q1, off1).unwrap_or_default()
-        });
+        let mr_handle = s.spawn(move || search_mr_modpacks(&h1, &q1, off1).unwrap_or_default());
 
         let q2 = query.to_string();
         let h2 = http.clone();
         let off2 = offset;
-        let cf_handle = s.spawn(move || {
-            search_cf_modpacks(&h2, &q2, off2).unwrap_or_default()
-        });
+        let cf_handle = s.spawn(move || search_cf_modpacks(&h2, &q2, off2).unwrap_or_default());
 
-        (mr_handle.join().unwrap_or_default(), cf_handle.join().unwrap_or_default())
+        (
+            mr_handle.join().unwrap_or_default(),
+            cf_handle.join().unwrap_or_default(),
+        )
     });
 
     // 合并双平台: 同名整合包合并 mr_url + cf_url
@@ -78,7 +81,11 @@ fn do_search_modpacks(query: &str, offset: u32) -> Result<Vec<ModpackResult>, St
     Ok(merged)
 }
 
-fn search_mr_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32) -> Result<Vec<ModpackResult>, String> {
+fn search_mr_modpacks(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    offset: u32,
+) -> Result<Vec<ModpackResult>, String> {
     let url = if query.is_empty() {
         format!("https://api.modrinth.com/v2/search?facets=[[\"project_type:modpack\"]]&limit=20&offset={}&index=downloads", offset)
     } else {
@@ -111,7 +118,11 @@ fn search_mr_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32
     Ok(results)
 }
 
-fn search_cf_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32) -> Result<Vec<ModpackResult>, String> {
+fn search_cf_modpacks(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    offset: u32,
+) -> Result<Vec<ModpackResult>, String> {
     let sort_field = if query.is_empty() { "6" } else { "1" };
     let url = format!(
         "https://api.curseforge.com/v1/mods/search?gameId=432&classId=4471&searchFilter={}&pageSize=20&sortField={}&sortOrder=desc&index={}",
@@ -120,7 +131,8 @@ fn search_cf_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32
         offset,
     );
 
-    let resp = http.get(&url)
+    let resp = http
+        .get(&url)
         .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
         .send()
@@ -131,14 +143,16 @@ fn search_cf_modpacks(http: &reqwest::blocking::Client, query: &str, offset: u32
     let mut results = Vec::new();
     if let Some(data) = json["data"].as_array() {
         for item in data {
-            let authors = item["authors"].as_array()
+            let authors = item["authors"]
+                .as_array()
                 .and_then(|a| a.first())
                 .and_then(|a| a["name"].as_str())
                 .unwrap_or("");
             let logo = item["logo"]["url"].as_str().unwrap_or("");
             let id = item["id"].as_u64().unwrap_or(0);
             let fallback_url = format!("https://www.curseforge.com/minecraft/modpacks/{}", id);
-            let cf_url = item["links"]["websiteUrl"].as_str()
+            let cf_url = item["links"]["websiteUrl"]
+                .as_str()
                 .unwrap_or(&fallback_url);
             results.push(ModpackResult {
                 title: item["name"].as_str().unwrap_or("").to_string(),
@@ -170,7 +184,10 @@ pub struct ModpackVersionInfo {
 }
 
 #[tauri::command]
-pub async fn get_modpack_versions(project_id: String, source: String) -> Result<Vec<ModpackVersionInfo>, String> {
+pub async fn get_modpack_versions(
+    project_id: String,
+    source: String,
+) -> Result<Vec<ModpackVersionInfo>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(do_get_modpack_versions(&project_id, &source));
@@ -178,11 +195,15 @@ pub async fn get_modpack_versions(project_id: String, source: String) -> Result<
     rx.recv().map_err(|_| "线程通信失败".to_string())?
 }
 
-fn do_get_modpack_versions(project_id: &str, source: &str) -> Result<Vec<ModpackVersionInfo>, String> {
+fn do_get_modpack_versions(
+    project_id: &str,
+    source: &str,
+) -> Result<Vec<ModpackVersionInfo>, String> {
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("OAOI-Launcher/1.0")
-        .build().map_err(|e| e.to_string())?;
+        .build()
+        .map_err(|e| e.to_string())?;
 
     match source {
         "modrinth" | "both" => get_mr_modpack_versions(&http, project_id),
@@ -191,7 +212,10 @@ fn do_get_modpack_versions(project_id: &str, source: &str) -> Result<Vec<Modpack
     }
 }
 
-fn get_mr_modpack_versions(http: &reqwest::blocking::Client, project_id: &str) -> Result<Vec<ModpackVersionInfo>, String> {
+fn get_mr_modpack_versions(
+    http: &reqwest::blocking::Client,
+    project_id: &str,
+) -> Result<Vec<ModpackVersionInfo>, String> {
     let url = format!("https://api.modrinth.com/v2/project/{}/version", project_id);
     let resp = http.get(&url).send().map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
@@ -199,64 +223,119 @@ fn get_mr_modpack_versions(http: &reqwest::blocking::Client, project_id: &str) -
 
     let mut results = Vec::new();
     for ver in arr.iter().take(20) {
-        let game_versions = ver["game_versions"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+        let game_versions = ver["game_versions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         let files = ver["files"].as_array();
         let (dl_url, fname, fsize) = if let Some(files) = files {
-            if let Some(f) = files.iter().find(|f| f["primary"].as_bool().unwrap_or(false)).or(files.first()) {
+            if let Some(f) = files
+                .iter()
+                .find(|f| f["primary"].as_bool().unwrap_or(false))
+                .or(files.first())
+            {
                 (
                     f["url"].as_str().unwrap_or("").to_string(),
-                    f["filename"].as_str().unwrap_or("modpack.mrpack").to_string(),
+                    f["filename"]
+                        .as_str()
+                        .unwrap_or("modpack.mrpack")
+                        .to_string(),
                     f["size"].as_u64().unwrap_or(0),
                 )
-            } else { continue; }
-        } else { continue; };
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
 
         results.push(ModpackVersionInfo {
-            version_name: ver["name"].as_str().unwrap_or(ver["version_number"].as_str().unwrap_or("")).to_string(),
+            version_name: ver["name"]
+                .as_str()
+                .unwrap_or(ver["version_number"].as_str().unwrap_or(""))
+                .to_string(),
             mc_versions: game_versions,
             download_url: dl_url,
             file_name: fname,
             file_size: fsize,
-            date: ver["date_published"].as_str().unwrap_or("").chars().take(10).collect(),
+            date: ver["date_published"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(10)
+                .collect(),
             version_id: ver["id"].as_str().unwrap_or("").to_string(),
         });
     }
     Ok(results)
 }
 
-fn get_cf_modpack_versions(http: &reqwest::blocking::Client, project_id: &str) -> Result<Vec<ModpackVersionInfo>, String> {
-    let url = format!("https://api.curseforge.com/v1/mods/{}/files?pageSize=20", project_id);
-    let resp = http.get(&url)
+fn get_cf_modpack_versions(
+    http: &reqwest::blocking::Client,
+    project_id: &str,
+) -> Result<Vec<ModpackVersionInfo>, String> {
+    let url = format!(
+        "https://api.curseforge.com/v1/mods/{}/files?pageSize=20",
+        project_id
+    );
+    let resp = http
+        .get(&url)
         .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
-        .send().map_err(|e| e.to_string())?;
+        .send()
+        .map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
     let data = json["data"].as_array().ok_or("格式错误")?;
 
     let mut results = Vec::new();
     for file in data.iter().take(20) {
-        let game_versions = file["gameVersions"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+        let game_versions = file["gameVersions"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         let dl_url = file["downloadUrl"].as_str().unwrap_or("").to_string();
         // CF 有时 downloadUrl 为 null，需要用 fileId 构造 CDN URL
         let dl_url = if dl_url.is_empty() {
             let fid = file["id"].as_u64().unwrap_or(0);
             if fid > 0 {
-                format!("https://edge.forgecdn.net/files/{}/{}/{}", fid / 1000, fid % 1000,
-                    file["fileName"].as_str().unwrap_or("file.zip"))
-            } else { continue; }
-        } else { dl_url };
+                format!(
+                    "https://edge.forgecdn.net/files/{}/{}/{}",
+                    fid / 1000,
+                    fid % 1000,
+                    file["fileName"].as_str().unwrap_or("file.zip")
+                )
+            } else {
+                continue;
+            }
+        } else {
+            dl_url
+        };
 
         results.push(ModpackVersionInfo {
             version_name: file["displayName"].as_str().unwrap_or("").to_string(),
             mc_versions: game_versions,
             download_url: dl_url,
-            file_name: file["fileName"].as_str().unwrap_or("modpack.zip").to_string(),
+            file_name: file["fileName"]
+                .as_str()
+                .unwrap_or("modpack.zip")
+                .to_string(),
             file_size: file["fileLength"].as_u64().unwrap_or(0),
-            date: file["fileDate"].as_str().unwrap_or("").chars().take(10).collect(),
+            date: file["fileDate"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(10)
+                .collect(),
             version_id: file["id"].as_u64().unwrap_or(0).to_string(),
         });
     }
@@ -274,16 +353,31 @@ pub fn install_modpack_direct(
 ) -> Result<String, String> {
     let cancel_flag = register_cancel(&file_name);
     std::thread::spawn(move || {
-        let result = do_install_modpack_direct(&app_handle, &download_url, &file_name, &game_dir, &java_path, use_mirror);
+        let result = do_install_modpack_direct(
+            &app_handle,
+            &download_url,
+            &file_name,
+            &game_dir,
+            &java_path,
+            use_mirror,
+        );
         unregister_cancel(&file_name);
         match result {
             Ok(msg) => eprintln!("[modpack-dl] {}", msg),
             Err(e) => {
-                let stage = if cancel_flag.load(Ordering::Relaxed) { "cancelled" } else { "error" };
+                let stage = if cancel_flag.load(Ordering::Relaxed) {
+                    "cancelled"
+                } else {
+                    "error"
+                };
                 eprintln!("[modpack-dl] {}: {}", stage, e);
-                let _ = tauri::Emitter::emit(&app_handle, "install-progress", serde_json::json!({
-                    "name": file_name, "stage": stage, "current": 0, "total": 0, "detail": e
-                }));
+                let _ = tauri::Emitter::emit(
+                    &app_handle,
+                    "install-progress",
+                    serde_json::json!({
+                        "name": file_name, "stage": stage, "current": 0, "total": 0, "detail": e
+                    }),
+                );
             }
         }
     });
@@ -298,72 +392,38 @@ fn do_install_modpack_direct(
     java_path: &str,
     use_mirror: bool,
 ) -> Result<String, String> {
-    let _ = tauri::Emitter::emit(app_handle, "install-progress", serde_json::json!({
-        "name": file_name, "stage": "downloading", "current": 0, "total": 1, "detail": format!("正在下载 {}...", file_name)
-    }));
+    let _ = tauri::Emitter::emit(
+        app_handle,
+        "install-progress",
+        serde_json::json!({
+            "name": file_name, "stage": "downloading", "current": 0, "total": 1, "detail": format!("正在下载 {}...", file_name)
+        }),
+    );
 
     let http = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .user_agent("OAOI-Launcher/1.0")
-        .build().map_err(|e| e.to_string())?;
-
-    let resp = http.get(download_url).send().map_err(|e| format!("下载失败: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    let total_size = resp.content_length().unwrap_or(0);
+        .build()
+        .map_err(|e| e.to_string())?;
 
     // 保存到临时文件（流式写入）
     let tmp_dir = std::env::temp_dir().join("oaoi_modpack_dl");
     std::fs::create_dir_all(&tmp_dir).ok();
     let tmp_path = tmp_dir.join(file_name);
-    let mut out_file = std::fs::File::create(&tmp_path).map_err(|e| format!("创建文件失败: {}", e))?;
-
-    let mut downloaded: u64 = 0;
-    let mut last_report = std::time::Instant::now();
-    let mut reader = std::io::BufReader::new(resp);
-    loop {
-        // 检查取消
-        if is_cancelled(file_name) {
-            drop(out_file);
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err("用户取消下载".to_string());
-        }
-
-        use std::io::Read;
-        let mut buf = [0u8; 65536];
-        let n = reader.read(&mut buf).map_err(|e| format!("读取失败: {}", e))?;
-        if n == 0 { break; }
-        use std::io::Write;
-        out_file.write_all(&buf[..n]).map_err(|e| format!("写入失败: {}", e))?;
-        downloaded += n as u64;
-
-        // 每 500ms 报告一次进度
-        if last_report.elapsed().as_millis() >= 500 {
-            last_report = std::time::Instant::now();
-            if total_size > 0 {
-                let pct = (downloaded as f64 / total_size as f64 * 100.0) as u64;
-                let _ = tauri::Emitter::emit(app_handle, "install-progress", serde_json::json!({
-                    "name": file_name, "stage": "downloading",
-                    "current": downloaded, "total": total_size,
-                    "detail": format!("{:.1}MB / {:.1}MB ({}%)", downloaded as f64 / 1048576.0, total_size as f64 / 1048576.0, pct)
-                }));
-            } else {
-                let _ = tauri::Emitter::emit(app_handle, "install-progress", serde_json::json!({
-                    "name": file_name, "stage": "downloading",
-                    "current": downloaded, "total": 0,
-                    "detail": format!("已下载 {:.1}MB", downloaded as f64 / 1048576.0)
-                }));
-            }
-        }
-    }
-    drop(out_file);
+    let downloaded =
+        download_modpack_archive(app_handle, &http, download_url, file_name, &tmp_path)?;
+    let total_size = std::fs::metadata(&tmp_path)
+        .map(|m| m.len())
+        .unwrap_or(downloaded);
 
     // 标记下载完成
-    let _ = tauri::Emitter::emit(app_handle, "install-progress", serde_json::json!({
-        "name": file_name, "stage": "downloading", "current": total_size, "total": total_size, "detail": "下载完成"
-    }));
+    let _ = tauri::Emitter::emit(
+        app_handle,
+        "install-progress",
+        serde_json::json!({
+            "name": file_name, "stage": "downloading", "current": total_size, "total": total_size, "detail": "下载完成"
+        }),
+    );
 
     // 再次检查取消
     if is_cancelled(file_name) {
@@ -371,7 +431,10 @@ fn do_install_modpack_direct(
         return Err("用户取消安装".to_string());
     }
 
-    eprintln!("[modpack-dl] 下载完成 ({:.1} MB), 开始安装...", downloaded as f64 / 1048576.0);
+    eprintln!(
+        "[modpack-dl] 下载完成 ({:.1} MB), 开始安装...",
+        downloaded as f64 / 1048576.0
+    );
 
     // 调用现有的 import_modpack 逻辑，传入 file_name 作为 display_name
     let result = crate::modpack::do_import_modpack_named(
@@ -388,4 +451,299 @@ fn do_install_modpack_direct(
     let _ = std::fs::remove_dir(&tmp_dir);
 
     result
+}
+
+const MODPACK_PARALLEL_MIN_SIZE: u64 = 16 * 1024 * 1024;
+const MODPACK_PARALLEL_WORKERS: u64 = 8;
+
+fn download_modpack_archive(
+    app_handle: &tauri::AppHandle,
+    http: &reqwest::blocking::Client,
+    download_url: &str,
+    file_name: &str,
+    tmp_path: &std::path::Path,
+) -> Result<u64, String> {
+    if let Ok(Some(total_size)) = probe_range_size(http, download_url) {
+        if total_size >= MODPACK_PARALLEL_MIN_SIZE {
+            match download_modpack_parallel(
+                app_handle,
+                http,
+                download_url,
+                file_name,
+                tmp_path,
+                total_size,
+            ) {
+                Ok(downloaded) => return Ok(downloaded),
+                Err(e) => {
+                    eprintln!("[modpack-dl] 分片下载失败，回退单连接: {}", e);
+                    let _ = std::fs::remove_file(tmp_path);
+                    remove_part_files(tmp_path, MODPACK_PARALLEL_WORKERS as usize);
+                }
+            }
+        }
+    }
+
+    download_modpack_single(app_handle, http, download_url, file_name, tmp_path)
+}
+
+fn probe_range_size(
+    http: &reqwest::blocking::Client,
+    download_url: &str,
+) -> Result<Option<u64>, String> {
+    let resp = http
+        .get(download_url)
+        .header("Range", "bytes=0-0")
+        .send()
+        .map_err(|e| format!("探测分片下载失败: {}", e))?;
+
+    if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Ok(resp
+            .headers()
+            .get("content-range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range_total));
+    }
+
+    Ok(None)
+}
+
+fn parse_content_range_total(value: &str) -> Option<u64> {
+    value.rsplit('/').next()?.parse::<u64>().ok()
+}
+
+fn part_path(tmp_path: &std::path::Path, index: usize) -> std::path::PathBuf {
+    let file_name = tmp_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("modpack.zip");
+    tmp_path.with_file_name(format!("{}.part{}", file_name, index))
+}
+
+fn remove_part_files(tmp_path: &std::path::Path, count: usize) {
+    for index in 0..count {
+        let _ = std::fs::remove_file(part_path(tmp_path, index));
+    }
+}
+
+fn emit_download_progress(
+    app_handle: &tauri::AppHandle,
+    file_name: &str,
+    downloaded: u64,
+    total_size: u64,
+) {
+    if total_size > 0 {
+        let pct = (downloaded as f64 / total_size as f64 * 100.0) as u64;
+        let _ = tauri::Emitter::emit(
+            app_handle,
+            "install-progress",
+            serde_json::json!({
+                "name": file_name, "stage": "downloading",
+                "current": downloaded, "total": total_size,
+                "detail": format!("{:.1}MB / {:.1}MB ({}%)", downloaded as f64 / 1048576.0, total_size as f64 / 1048576.0, pct)
+            }),
+        );
+    } else {
+        let _ = tauri::Emitter::emit(
+            app_handle,
+            "install-progress",
+            serde_json::json!({
+                "name": file_name, "stage": "downloading",
+                "current": downloaded, "total": 0,
+                "detail": format!("已下载 {:.1}MB", downloaded as f64 / 1048576.0)
+            }),
+        );
+    }
+}
+
+fn download_modpack_single(
+    app_handle: &tauri::AppHandle,
+    http: &reqwest::blocking::Client,
+    download_url: &str,
+    file_name: &str,
+    tmp_path: &std::path::Path,
+) -> Result<u64, String> {
+    let _ = tauri::Emitter::emit(
+        app_handle,
+        "install-progress",
+        serde_json::json!({
+            "name": file_name, "stage": "downloading", "current": 0, "total": 0, "detail": "单连接下载"
+        }),
+    );
+    let resp = http
+        .get(download_url)
+        .send()
+        .map_err(|e| format!("下载失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
+    let total_size = resp.content_length().unwrap_or(0);
+    let mut out_file =
+        std::fs::File::create(tmp_path).map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut downloaded: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    let mut reader = std::io::BufReader::new(resp);
+    let mut buf = [0u8; 128 * 1024];
+
+    loop {
+        if is_cancelled(file_name) {
+            drop(out_file);
+            let _ = std::fs::remove_file(tmp_path);
+            return Err("用户取消下载".to_string());
+        }
+
+        use std::io::Read;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("读取失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        use std::io::Write;
+        out_file
+            .write_all(&buf[..n])
+            .map_err(|e| format!("写入失败: {}", e))?;
+        downloaded += n as u64;
+
+        if last_report.elapsed().as_millis() >= 500 {
+            last_report = std::time::Instant::now();
+            emit_download_progress(app_handle, file_name, downloaded, total_size);
+        }
+    }
+
+    Ok(downloaded)
+}
+
+fn download_modpack_parallel(
+    app_handle: &tauri::AppHandle,
+    http: &reqwest::blocking::Client,
+    download_url: &str,
+    file_name: &str,
+    tmp_path: &std::path::Path,
+    total_size: u64,
+) -> Result<u64, String> {
+    let worker_count = MODPACK_PARALLEL_WORKERS
+        .min(total_size.div_ceil(8 * 1024 * 1024))
+        .max(1);
+    let _ = tauri::Emitter::emit(
+        app_handle,
+        "install-progress",
+        serde_json::json!({
+            "name": file_name, "stage": "downloading", "current": 0, "total": total_size,
+            "detail": format!("分片下载 {} 线程", worker_count)
+        }),
+    );
+    let chunk_size = total_size.div_ceil(worker_count);
+    let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let app_for_report = app_handle.clone();
+    let name_for_report = file_name.to_string();
+    let downloaded_for_report = downloaded.clone();
+    let done_for_report = done.clone();
+    let reporter = std::thread::spawn(move || {
+        while !done_for_report.load(std::sync::atomic::Ordering::Relaxed) {
+            let current = downloaded_for_report.load(std::sync::atomic::Ordering::Relaxed);
+            emit_download_progress(&app_for_report, &name_for_report, current, total_size);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+
+    let mut handles = Vec::new();
+    for index in 0..worker_count as usize {
+        let start = index as u64 * chunk_size;
+        if start >= total_size {
+            break;
+        }
+        let end = (start + chunk_size - 1).min(total_size - 1);
+        let url = download_url.to_string();
+        let part = part_path(tmp_path, index);
+        let client = http.clone();
+        let name = file_name.to_string();
+        let downloaded_for_worker = downloaded.clone();
+
+        handles.push(std::thread::spawn(move || -> Result<(), String> {
+            let mut resp = client
+                .get(&url)
+                .header("Range", format!("bytes={}-{}", start, end))
+                .send()
+                .map_err(|e| format!("分片 {} 请求失败: {}", index + 1, e))?;
+            if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err(format!("分片 {} HTTP {}", index + 1, resp.status()));
+            }
+
+            let mut out_file =
+                std::fs::File::create(&part).map_err(|e| format!("创建分片失败: {}", e))?;
+            let mut written: u64 = 0;
+            let mut buf = [0u8; 256 * 1024];
+            loop {
+                if is_cancelled(&name) {
+                    drop(out_file);
+                    let _ = std::fs::remove_file(&part);
+                    return Err("用户取消下载".to_string());
+                }
+
+                use std::io::Read;
+                let n = resp
+                    .read(&mut buf)
+                    .map_err(|e| format!("分片 {} 读取失败: {}", index + 1, e))?;
+                if n == 0 {
+                    break;
+                }
+                use std::io::Write;
+                out_file
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("分片 {} 写入失败: {}", index + 1, e))?;
+                written += n as u64;
+                downloaded_for_worker.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            let expected = end - start + 1;
+            if written != expected {
+                return Err(format!(
+                    "分片 {} 大小不完整: {}/{}",
+                    index + 1,
+                    written,
+                    expected
+                ));
+            }
+            Ok(())
+        }));
+    }
+
+    let mut first_error: Option<String> = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some("分片线程崩溃".to_string());
+                }
+            }
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = reporter.join();
+
+    if let Some(error) = first_error {
+        remove_part_files(tmp_path, worker_count as usize);
+        return Err(error);
+    }
+
+    let mut out_file =
+        std::fs::File::create(tmp_path).map_err(|e| format!("创建文件失败: {}", e))?;
+    for index in 0..worker_count as usize {
+        let part = part_path(tmp_path, index);
+        let mut part_file =
+            std::fs::File::open(&part).map_err(|e| format!("读取分片失败: {}", e))?;
+        std::io::copy(&mut part_file, &mut out_file).map_err(|e| format!("合并分片失败: {}", e))?;
+        let _ = std::fs::remove_file(&part);
+    }
+
+    Ok(total_size)
 }

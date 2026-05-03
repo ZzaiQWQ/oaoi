@@ -336,9 +336,17 @@
                   <div class="set-field">
                     <div class="set-field-row">
                       <label>最大内存分配 (Memory Allocation)</label>
-                      <span class="set-field-value"><input type="number" id="memValue" value="4096" min="512" step="512" class="set-mem-input">
+                      <span class="set-field-value"><input type="number" id="memValue" value="4096" min="512" step="512"
+                          style="width:70px;text-align:right;background:transparent;border:none;border-bottom:1.5px solid rgba(255,120,160,0.4);font-size:15px;font-weight:700;color:var(--pink-700);font-family:inherit;outline:none;padding:2px 0;">
                         MB</span>
                     </div>
+                    <div class="memory-mode-row" aria-label="内存分配模式">
+                      <button type="button" class="java-mode-btn memory-mode-btn active" id="memoryModeManual"
+                        data-mode="manual">自己设置</button>
+                      <button type="button" class="java-mode-btn memory-mode-btn" id="memoryModeAuto"
+                        data-mode="auto">自动</button>
+                    </div>
+                    <div class="memory-mode-hint" id="memoryModeHint">启动时使用下方数值，不会被整合包自动值覆盖。</div>
                     <input type="range" class="set-slider" id="memSlider" min="1024" max="16384" value="4096"
                       step="512">
                     <div class="set-slider-labels"><span>1024MB</span><span>8192MB</span><span>16384MB</span></div>
@@ -347,7 +355,8 @@
                   <div class="set-field">
                     <label>自定义 JVM 参数 (Custom JVM Arguments)</label>
                     <input type="text" class="set-text-input" id="customJvmArgs"
-                      placeholder="例如: -XX:+AlwaysPreTouch -Dfml.readTimeout=120">
+                      placeholder="例如: -XX:+AlwaysPreTouch -Dfml.readTimeout=120"
+                      style="width:100%;padding:5px 10px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:11px;font-family:inherit;color:var(--text-dark);outline:none;">
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
@@ -381,19 +390,22 @@
                 <div class="set-tab-content" id="setTabAi" style="display:none;">
                   <div class="set-field">
                     <label>API Key</label>
-                    <input type="password" class="set-text-input" id="aiApiKey" placeholder="填写 API Key 启用 AI 分析...">
+                    <input type="password" class="set-text-input" id="aiApiKey" placeholder="填写 API Key 启用 AI 分析..."
+                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                     <p class="ai-hint">未填写则不启用 AI 分析，崩溃时仅使用本地规则匹配</p>
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
                     <label>API 地址 (兼容 OpenAI 格式)</label>
-                    <input type="text" class="set-text-input" id="aiApiUrl" placeholder="例如: https://api.deepseek.com">
+                    <input type="text" class="set-text-input" id="aiApiUrl" placeholder="例如: https://api.deepseek.com"
+                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                     <p class="ai-hint">支持 DeepSeek / OpenAI / 任何兼容 OpenAI 格式的 API</p>
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
                     <label>模型名称</label>
-                    <input type="text" class="set-text-input" id="aiModel" placeholder="例如: deepseek-chat">
+                    <input type="text" class="set-text-input" id="aiModel" placeholder="例如: deepseek-chat"
+                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                   </div>
                   <div class="set-divider"></div>
                   <div class="ai-actions">
@@ -438,7 +450,7 @@
                   </div>
                 </div>
                 <div class="about-version-card">
-                  <span class="about-release-badge">v1.0.0</span>
+                  <span class="about-release-badge" id="appVersionBadge">v1.0.3</span>
                   <h2>oaoi 启动器</h2>
                   <p>支持 Fabric / Forge / NeoForge / Quilt 加载器，一键导入 CurseForge 与 Modrinth 整合包。</p>
                   <div class="about-status"><span class="about-status-dot"></span><span>开源项目</span></div>
@@ -464,9 +476,9 @@
                 </div>
                 <div class="about-links-card">
                   <a class="about-link-item" href="#"><span class="about-link-icon">💬</span><span>加入
-                      Discord</span><span class="about-link-arrow">→</span></a>
+                      Discord（待定）</span><span class="about-link-arrow">→</span></a>
                   <a class="about-link-item" href="#"><span class="about-link-icon">💬</span><span>QQ
-                      群：592810</span><span class="about-link-arrow">→</span></a>
+                      群：699974473</span><span class="about-link-arrow">→</span></a>
                   <a class="about-link-item" href="#"><span class="about-link-icon">🌐</span><span>官方网站</span><span
                       class="about-link-arrow">→</span></a>
                 </div>
@@ -673,6 +685,40 @@
               <button class="instance-folder-btn" data-sub="config" id="folderConfig">配置</button>
             </div>
 
+            <h3 class="instance-section-title">实例设置</h3>
+            <div class="instance-settings-panel" data-no-drag>
+              <div class="instance-settings-grid">
+                <label class="instance-setting-field">
+                  <span>内存 MB</span>
+                  <input type="number" id="instanceMemInput" min="512" step="512" placeholder="跟随默认">
+                </label>
+                <label class="instance-setting-field">
+                  <span>Java</span>
+                  <select id="instanceJavaMode">
+                    <option value="global">跟随全局</option>
+                    <option value="auto">自动匹配</option>
+                    <option value="manual">指定路径</option>
+                  </select>
+                </label>
+                <label class="instance-setting-field instance-setting-wide" id="instanceJavaPathRow">
+                  <span>Java 路径</span>
+                  <div class="instance-path-row">
+                    <input type="text" id="instanceJavaPathInput" placeholder="留空则使用全局 Java 路径">
+                    <button type="button" id="instanceUseGlobalJavaBtn">使用全局</button>
+                  </div>
+                </label>
+                <label class="instance-setting-field instance-setting-wide">
+                  <span>JVM 参数</span>
+                  <input type="text" id="instanceJvmArgsInput" placeholder="留空则跟随全局 JVM 参数">
+                </label>
+              </div>
+              <div class="instance-settings-actions">
+                <button type="button" id="instanceSettingsSave">保存设置</button>
+                <button type="button" id="instanceSettingsReset">恢复默认</button>
+                <span id="instanceSettingsHint"></span>
+              </div>
+            </div>
+
             <div class="mod-manager-section" data-no-drag>
               <div class="mod-manager-header">
                 <div class="mod-tabs">
@@ -818,7 +864,7 @@
         <div class="drop-title">松开以导入整合包</div>
         <div class="drop-desc">支持 CurseForge (.zip) 和 Modrinth (.mrpack)</div>
       </div>
-      <div id="modpackDropPill" class="drop-pill" style="display:none;"></div>
+      <div id="modpackDropPill" class="drop-pill" data-no-drag style="display:none;"></div>
 
       <!-- 模块化 JS -->
       <script src="js/tauri.js"></script>

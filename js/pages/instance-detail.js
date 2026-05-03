@@ -18,9 +18,10 @@ function showInstanceDetail(instanceName) {
   document.getElementById('instanceDetailMcVer').textContent = instance.mc_version;
   document.getElementById('instanceDetailLoader').textContent =
     instance.loader_type === 'vanilla' ? '原版' :
-    instance.loader_type.charAt(0).toUpperCase() + instance.loader_type.slice(1);
+      instance.loader_type.charAt(0).toUpperCase() + instance.loader_type.slice(1);
   document.getElementById('instanceDetailLoaderVer').textContent =
     instance.loader_version || '-';
+  loadInstanceSettings();
 
   // 切换到详情页
   const pages = document.querySelectorAll('.page');
@@ -41,9 +42,10 @@ function showInstanceDetail(instanceName) {
   // 切换实例后刷新在线列表（用缓存或清空）
   const onlineList = document.getElementById('onlineModList');
   if (onlineList) {
-    const cacheKey = `${instance.mc_version||''}:${instance.loader_type||''}:${currentOnlineCategory}:`;
-    if (onlineSearchCache[cacheKey]) {
-      renderOnlineResults(onlineSearchCache[cacheKey], '');
+    const cacheKey = `${instance.mc_version || ''}:${instance.loader_type || ''}:${currentOnlineCategory}:`;
+    const cached = onlineSearchCache[cacheKey];
+    if (cached) {
+      renderOnlineResults(cached._data || cached, '');
     } else {
       const typeLabel = { mod: 'Mod', resourcepack: '材质包', shader: '光影包' }[currentOnlineCategory] || 'Mod';
       onlineList.innerHTML = `<div class="mod-list-empty">输入关键词搜索 Modrinth + CurseForge 上的 ${typeLabel}</div>`;
@@ -51,6 +53,91 @@ function showInstanceDetail(instanceName) {
   }
 
   loadModList();
+}
+
+function instanceSettingKey(prefix) {
+  return `${prefix}_${currentDetailInstance}`;
+}
+
+function updateInstanceJavaPathState() {
+  const mode = document.getElementById('instanceJavaMode')?.value || 'global';
+  const pathInput = document.getElementById('instanceJavaPathInput');
+  const useGlobalBtn = document.getElementById('instanceUseGlobalJavaBtn');
+  const manual = mode === 'manual';
+  if (pathInput) pathInput.disabled = !manual;
+  if (useGlobalBtn) useGlobalBtn.disabled = !manual;
+}
+
+function loadInstanceSettings() {
+  if (!currentDetailInstance) return;
+  const memInput = document.getElementById('instanceMemInput');
+  const javaMode = document.getElementById('instanceJavaMode');
+  const javaPath = document.getElementById('instanceJavaPathInput');
+  const jvmArgs = document.getElementById('instanceJvmArgsInput');
+  const hint = document.getElementById('instanceSettingsHint');
+  const globalMem = parseInt(localStorage.getItem('memAlloc') || '4096') || 4096;
+  const memoryMode = localStorage.getItem('memoryMode') || 'manual';
+  const autoMemory = typeof getInstanceAutoMemory === 'function'
+    ? getInstanceAutoMemory(currentDetailInfo)
+    : null;
+  const fallbackText = memoryMode === 'auto' && autoMemory
+    ? `自动 ${autoMemory.memory} MB（${autoMemory.source}）`
+    : `全局手动 ${globalMem} MB`;
+
+  if (memInput) {
+    memInput.value = localStorage.getItem(instanceSettingKey('mem')) || '';
+    memInput.placeholder = `留空使用${fallbackText}`;
+  }
+  if (javaMode) javaMode.value = localStorage.getItem(instanceSettingKey('javaMode')) || 'global';
+  if (javaPath) javaPath.value = localStorage.getItem(instanceSettingKey('javaPath')) || '';
+  if (jvmArgs) jvmArgs.value = localStorage.getItem(instanceSettingKey('jvmArgs')) || '';
+  if (hint) {
+    hint.textContent = `留空会使用${fallbackText}，其它项跟随全局`;
+  }
+  updateInstanceJavaPathState();
+}
+
+function saveInstanceSettings() {
+  if (!currentDetailInstance) return;
+  const memInput = document.getElementById('instanceMemInput');
+  const javaMode = document.getElementById('instanceJavaMode');
+  const javaPath = document.getElementById('instanceJavaPathInput');
+  const jvmArgs = document.getElementById('instanceJvmArgsInput');
+  const hint = document.getElementById('instanceSettingsHint');
+
+  const memValue = (memInput?.value || '').trim();
+  if (memValue) localStorage.setItem(instanceSettingKey('mem'), memValue);
+  else localStorage.removeItem(instanceSettingKey('mem'));
+
+  const modeValue = javaMode?.value || 'global';
+  if (modeValue === 'global') localStorage.removeItem(instanceSettingKey('javaMode'));
+  else localStorage.setItem(instanceSettingKey('javaMode'), modeValue);
+
+  const javaValue = (javaPath?.value || '').trim();
+  if (javaValue) localStorage.setItem(instanceSettingKey('javaPath'), javaValue);
+  else localStorage.removeItem(instanceSettingKey('javaPath'));
+
+  const jvmValue = (jvmArgs?.value || '').trim();
+  if (jvmValue) localStorage.setItem(instanceSettingKey('jvmArgs'), jvmValue);
+  else localStorage.removeItem(instanceSettingKey('jvmArgs'));
+
+  if (hint) {
+    hint.textContent = '已保存';
+    setTimeout(() => { if (hint) hint.textContent = '留空则使用全局设置'; }, 1800);
+  }
+}
+
+function resetInstanceSettings() {
+  if (!currentDetailInstance) return;
+  ['mem', 'javaMode', 'javaPath', 'jvmArgs'].forEach(prefix => {
+    localStorage.removeItem(instanceSettingKey(prefix));
+  });
+  loadInstanceSettings();
+  const hint = document.getElementById('instanceSettingsHint');
+  if (hint) {
+    hint.textContent = '已恢复默认';
+    setTimeout(() => { if (hint) hint.textContent = '留空则使用全局设置'; }, 1800);
+  }
 }
 
 // Tab 切换
@@ -63,7 +150,7 @@ function switchModTab(tab) {
   // 切到在线搜索时自动加载热门
   if (tab === 'online') {
     const listEl = document.getElementById('onlineModList');
-    const cacheKey = `${currentDetailInfo?.mc_version||''}:${currentDetailInfo?.loader_type||''}:${currentOnlineCategory}:`;
+    const cacheKey = `${currentDetailInfo?.mc_version || ''}:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:`;
     if (listEl && listEl.querySelector('.mod-list-empty') && !onlineSearchCache[cacheKey]) {
       searchOnlineMods();
     }
@@ -212,6 +299,7 @@ function _applyModUrls(info) {
 }
 
 let currentOnlineCategory = 'mod';
+let _onlineSearchId = 0; // 防止异步竞态
 
 // 持久化缓存（localStorage，3天过期，新的覆盖旧的）
 const CACHE_KEY = 'onlineSearchCache';
@@ -235,10 +323,15 @@ function _loadCache() {
 
 function _saveCache(cache) {
   try {
-    // 给每条记录打上时间戳
     const now = Date.now();
     for (const k of Object.keys(cache)) {
-      if (!cache[k]?._ts) cache[k] = { ...cache[k], _ts: now };
+      const v = cache[k];
+      // 数组值包装成 { _data, _ts }；已包装过的跳过
+      if (Array.isArray(v)) {
+        cache[k] = { _data: v, _ts: now };
+      } else if (v && typeof v === 'object' && !v._ts) {
+        v._ts = now;
+      }
     }
     // 超 150 条 → 按时间排序，删最旧的
     const keys = Object.keys(cache);
@@ -300,13 +393,16 @@ async function searchOnlineMods() {
   if (!listEl) return;
 
   // 检查缓存
-  const cacheKey = `${currentDetailInfo?.mc_version||''}:${currentDetailInfo?.loader_type||''}:${currentOnlineCategory}:${query}`;
-  if (onlineSearchCache[cacheKey]) {
-    renderOnlineResults(onlineSearchCache[cacheKey], query);
+  const cacheKey = `${currentDetailInfo?.mc_version || ''}:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:${query}`;
+  const cached = onlineSearchCache[cacheKey];
+  if (cached) {
+    renderOnlineResults(cached._data || cached, query);
     return;
   }
 
   listEl.innerHTML = '<div class="mod-list-empty">搜索中...</div>';
+
+  const searchId = ++_onlineSearchId;
 
   try {
     const tauri = await waitForTauri();
@@ -314,10 +410,13 @@ async function searchOnlineMods() {
     const loader = currentDetailInfo?.loader_type || '';
     const projectType = currentOnlineCategory;
     const results = await tauri.core.invoke('search_online_mods', { query, mcVersion, loader, projectType });
+    // 丢弃过期请求（快速切换类别时旧请求晚回来）
+    if (searchId !== _onlineSearchId) return;
     onlineSearchCache[cacheKey] = results;
     _saveCache(onlineSearchCache);
     renderOnlineResults(results, query);
   } catch (err) {
+    if (searchId !== _onlineSearchId) return;
     listEl.innerHTML = `<div class="mod-list-empty">搜索失败: ${err}</div>`;
   }
 }
@@ -459,6 +558,15 @@ function initInstanceDetailPage() {
   document.getElementById('modSearchInput')?.addEventListener('input', () => renderModList(currentModList));
   document.getElementById('modRefreshBtn')?.addEventListener('click', () => loadModList());
 
+  // 实例独立设置
+  document.getElementById('instanceJavaMode')?.addEventListener('change', updateInstanceJavaPathState);
+  document.getElementById('instanceUseGlobalJavaBtn')?.addEventListener('click', () => {
+    const input = document.getElementById('instanceJavaPathInput');
+    if (input) input.value = localStorage.getItem('selectedJavaPath') || '';
+  });
+  document.getElementById('instanceSettingsSave')?.addEventListener('click', saveInstanceSettings);
+  document.getElementById('instanceSettingsReset')?.addEventListener('click', resetInstanceSettings);
+
   // 在线搜索
   document.getElementById('onlineModSearchBtn')?.addEventListener('click', searchOnlineMods);
   document.getElementById('onlineModSearch')?.addEventListener('keydown', (e) => {
@@ -495,6 +603,9 @@ function initInstanceDetailPage() {
       if (!confirmed) return;
       const tauri = await waitForTauri();
       await tauri.core.invoke('delete_version', { gameDir, name: currentDetailInstance });
+      ['mem', 'javaMode', 'javaPath', 'jvmArgs'].forEach(prefix => {
+        localStorage.removeItem(instanceSettingKey(prefix));
+      });
       // 只有同版本同loader的最后一个实例删除时才清缓存
       const mcV = currentDetailInfo?.mc_version;
       const ldr = currentDetailInfo?.loader_type;

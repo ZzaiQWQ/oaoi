@@ -1,6 +1,6 @@
-use serde::Serialize;
 use crate::instance::cf_api_key;
-use crate::modcn::{load_modcn, contains_chinese, search_modcn_fuzzy};
+use crate::modcn::{contains_chinese, load_modcn, search_modcn_fuzzy};
+use serde::Serialize;
 
 #[derive(Serialize, Clone)]
 pub struct OnlineModResult {
@@ -27,7 +27,9 @@ pub async fn search_online_mods(
     let ptype = project_type.unwrap_or_else(|| "mod".to_string());
     let result: Result<Vec<OnlineModResult>, String> = tokio::task::spawn_blocking(move || {
         search_online_mods_blocking(&query, &mc_version, &loader, &ptype)
-    }).await.map_err(|e| format!("任务失败: {}", e))?;
+    })
+    .await
+    .map_err(|e| format!("任务失败: {}", e))?;
     result
 }
 
@@ -49,15 +51,21 @@ fn search_online_mods_blocking(
     // 中文查询 → 模糊匹配 → 拿到英文名去搜
     let fuzzy_matches = if contains_chinese(query) {
         search_modcn_fuzzy(query, modcn)
-    } else { vec![] };
+    } else {
+        vec![]
+    };
 
     // 提取英文搜索词（去重，最多5个）
-    let en_queries: Vec<String> = fuzzy_matches.iter()
+    let en_queries: Vec<String> = fuzzy_matches
+        .iter()
         .map(|(en, _, _)| en.clone())
         .take(5)
         .collect();
 
-    eprintln!("[search] 原始查询: '{}', 英文搜索词: {:?}", query, en_queries);
+    eprintln!(
+        "[search] 原始查询: '{}', 英文搜索词: {:?}",
+        query, en_queries
+    );
 
     let mut all: Vec<OnlineModResult> = Vec::new();
 
@@ -70,21 +78,23 @@ fn search_online_mods_blocking(
                 .unwrap_or_default()
         });
         let h_cf = s.spawn(|| {
-            do_curseforge_search(&http, query, mc_version, loader, project_type)
-                .unwrap_or_default()
+            do_curseforge_search(&http, query, mc_version, loader, project_type).unwrap_or_default()
         });
 
         // 2. 用英文名搜 Modrinth + CurseForge
-        let en_handles: Vec<_> = en_queries.iter().map(|en| {
-            s.spawn(|| {
-                let mr = do_modrinth_search(&http, en, mc_version, loader, project_type)
-                    .or_else(|_| do_modrinth_search(&http, en, mc_version, "", project_type))
-                    .unwrap_or_default();
-                let cf = do_curseforge_search(&http, en, mc_version, loader, project_type)
-                    .unwrap_or_default();
-                (mr, cf)
+        let en_handles: Vec<_> = en_queries
+            .iter()
+            .map(|en| {
+                s.spawn(|| {
+                    let mr = do_modrinth_search(&http, en, mc_version, loader, project_type)
+                        .or_else(|_| do_modrinth_search(&http, en, mc_version, "", project_type))
+                        .unwrap_or_default();
+                    let cf = do_curseforge_search(&http, en, mc_version, loader, project_type)
+                        .unwrap_or_default();
+                    (mr, cf)
+                })
             })
-        }).collect();
+            .collect();
 
         // === 合并去重 ===
 
@@ -99,8 +109,12 @@ fn search_online_mods_blocking(
                 }
                 for cf in cf_res {
                     let cf_slug = cf.slug.to_lowercase();
-                    if let Some(existing) = all.iter_mut().find(|r| r.slug.to_lowercase() == cf_slug) {
-                        if existing.cf_url.is_empty() { existing.cf_url = cf.cf_url; }
+                    if let Some(existing) =
+                        all.iter_mut().find(|r| r.slug.to_lowercase() == cf_slug)
+                    {
+                        if existing.cf_url.is_empty() {
+                            existing.cf_url = cf.cf_url;
+                        }
                     } else {
                         all.push(cf);
                     }
@@ -117,7 +131,9 @@ fn search_online_mods_blocking(
         for cf in h_cf.join().unwrap_or_default() {
             let cf_slug = cf.slug.to_lowercase();
             if let Some(existing) = all.iter_mut().find(|r| r.slug.to_lowercase() == cf_slug) {
-                if existing.cf_url.is_empty() { existing.cf_url = cf.cf_url; }
+                if existing.cf_url.is_empty() {
+                    existing.cf_url = cf.cf_url;
+                }
             } else {
                 all.push(cf);
             }
@@ -128,12 +144,19 @@ fn search_online_mods_blocking(
     // 构建快速查找表（英文名小写 → 中文名）
     let mut en_to_cn: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for entry in modcn {
-        if !entry.cn_name.is_empty() && contains_chinese(&entry.cn_name) && !entry.en_name.is_empty() {
-            en_to_cn.entry(entry.en_name.to_lowercase()).or_insert_with(|| entry.cn_name.clone());
+        if !entry.cn_name.is_empty()
+            && contains_chinese(&entry.cn_name)
+            && !entry.en_name.is_empty()
+        {
+            en_to_cn
+                .entry(entry.en_name.to_lowercase())
+                .or_insert_with(|| entry.cn_name.clone());
         }
     }
     for r in all.iter_mut() {
-        if !r.cn_title.is_empty() { continue; }
+        if !r.cn_title.is_empty() {
+            continue;
+        }
         let title_lower = r.title.to_lowercase();
         let slug_lower = r.slug.to_lowercase();
         // 1. 英文名精确匹配
@@ -149,10 +172,15 @@ fn search_online_mods_blocking(
         }
         // 3. 遍历 modcn 做包含匹配
         for entry in modcn {
-            if entry.cn_name.is_empty() || !contains_chinese(&entry.cn_name) { continue; }
+            if entry.cn_name.is_empty() || !contains_chinese(&entry.cn_name) {
+                continue;
+            }
             let en_lower = entry.en_name.to_lowercase();
-            if en_lower.is_empty() { continue; }
-            if title_lower.contains(&en_lower) || en_lower.contains(&title_lower)
+            if en_lower.is_empty() {
+                continue;
+            }
+            if title_lower.contains(&en_lower)
+                || en_lower.contains(&title_lower)
                 || slug_spaced == en_lower
             {
                 r.cn_title = entry.cn_name.clone();
@@ -175,14 +203,23 @@ fn do_modrinth_direct_lookup(
     http: &reqwest::blocking::Client,
     slug: &str,
 ) -> Option<OnlineModResult> {
-    let url = format!("https://api.modrinth.com/v2/project/{}", urlencoding::encode(slug));
-    let resp = http.get(&url)
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{}",
+        urlencoding::encode(slug)
+    );
+    let resp = http
+        .get(&url)
         .timeout(std::time::Duration::from_secs(5))
-        .send().ok()?;
-    if !resp.status().is_success() { return None; }
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
     let json: serde_json::Value = resp.json().ok()?;
     let project_type = json["project_type"].as_str().unwrap_or("");
-    if project_type != "mod" { return None; }
+    if project_type != "mod" {
+        return None;
+    }
     let slug_val = json["slug"].as_str().unwrap_or("").to_string();
     let id = json["id"].as_str().unwrap_or("").to_string();
     eprintln!("[modrinth_direct] 精确命中: {} ({})", slug_val, id);
@@ -220,7 +257,11 @@ fn do_modrinth_search(
         facets.push(format!(r#"["categories:{}"]"#, loader));
     }
     let facets_str = format!("[{}]", facets.join(","));
-    let sort_index = if query.is_empty() { "downloads" } else { "relevance" };
+    let sort_index = if query.is_empty() {
+        "downloads"
+    } else {
+        "relevance"
+    };
 
     let url = format!(
         "https://api.modrinth.com/v2/search?query={}&facets={}&limit=40&index={}",
@@ -229,7 +270,10 @@ fn do_modrinth_search(
         sort_index,
     );
 
-    let resp = http.get(&url).send().map_err(|e| format!("搜索请求失败: {}", e))?;
+    let resp = http
+        .get(&url)
+        .send()
+        .map_err(|e| format!("搜索请求失败: {}", e))?;
     let json: serde_json::Value = resp.json().map_err(|e| format!("解析响应失败: {}", e))?;
 
     let mut results = Vec::new();
@@ -293,25 +337,31 @@ fn do_curseforge_search(
         url.push_str(&format!("&modLoaderType={}", loader_type));
     }
 
-    let resp = http.get(&url)
+    let resp = http
+        .get(&url)
         .header("x-api-key", &cf_api_key())
         .header("Accept", "application/json")
         .send()
         .map_err(|e| format!("CurseForge 请求失败: {}", e))?;
 
-    let json: serde_json::Value = resp.json().map_err(|e| format!("CurseForge 解析失败: {}", e))?;
+    let json: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("CurseForge 解析失败: {}", e))?;
 
     let mut results = Vec::new();
     if let Some(data) = json["data"].as_array() {
         for item in data {
-            let authors = item["authors"].as_array()
+            let authors = item["authors"]
+                .as_array()
                 .and_then(|a| a.first())
                 .and_then(|a| a["name"].as_str())
                 .unwrap_or("");
             let logo = item["logo"]["url"].as_str().unwrap_or("");
             let id = item["id"].as_u64().unwrap_or(0);
-            let cf_url = item["links"]["websiteUrl"].as_str()
-                .unwrap_or("").to_string();
+            let cf_url = item["links"]["websiteUrl"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             results.push(OnlineModResult {
                 slug: item["slug"].as_str().unwrap_or("").to_string(),
                 title: item["name"].as_str().unwrap_or("").to_string(),

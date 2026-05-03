@@ -3,16 +3,33 @@
 // ===== Minecraft 官方资讯拉取 =====
 const MC_NEWS_API = 'https://launchercontent.mojang.com/v2/javaPatchNotes.json';
 const MC_IMG_BASE = 'https://launchercontent.mojang.com';
+const MC_NEWS_CACHE_KEY = 'mcOfficialNewsCache';
 
 (async function loadNews() {
   const container = document.getElementById('newsCards');
   if (!container) return;
 
-  // 内置默认资讯（加载失败时显示）
-  const DEFAULT_NEWS = [
-    { title: '欢迎使用 oaoi 启动器！', desc: '全新樱花主题，畅享 Minecraft 之旅。', img: 'assets/news1.png', link: '' },
-    { title: '支持一键安装整合包', desc: 'Modrinth / CurseForge 整合包拖拽即装。', img: 'assets/news2.png', link: '' },
-  ];
+  function readCachedNews() {
+    try {
+      const cached = JSON.parse(localStorage.getItem(MC_NEWS_CACHE_KEY) || '[]');
+      return Array.isArray(cached) ? cached : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function fetchWithTimeout(url, timeoutMs) {
+    if (typeof AbortController === 'undefined') {
+      return fetch(url);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   function renderNewsCards(items) {
     container.innerHTML = items.map(n => `
@@ -30,15 +47,19 @@ const MC_IMG_BASE = 'https://launchercontent.mojang.com';
   }
 
   try {
-    const resp = await fetch(MC_NEWS_API, { signal: AbortSignal.timeout(8000) });
+    const resp = await fetchWithTimeout(MC_NEWS_API, 8000);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
 
-    // 取前 4 条（默认已按日期排序，最新在前）
-    const posts = (data.entries || []).slice(0, 4);
+    // 按日期降序排列，取前 4 条最新
+    const posts = (data.entries || [])
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(0, 4);
 
     if (!posts.length) {
-      renderNewsCards(DEFAULT_NEWS);
+      const cached = readCachedNews();
+      if (cached.length) renderNewsCards(cached);
+      else container.innerHTML = '<div class="news-empty"><p>官方资讯暂时没有内容</p></div>';
       return;
     }
 
@@ -58,10 +79,16 @@ const MC_IMG_BASE = 'https://launchercontent.mojang.com';
       };
     });
 
+    localStorage.setItem(MC_NEWS_CACHE_KEY, JSON.stringify(items));
     renderNewsCards(items);
   } catch (e) {
     console.warn('[news] Minecraft 官方资讯加载失败:', e);
-    renderNewsCards(DEFAULT_NEWS);
+    const cached = readCachedNews();
+    if (cached.length) {
+      renderNewsCards(cached);
+    } else {
+      container.innerHTML = '<div class="news-empty"><p>官方资讯加载失败，请稍后重试</p></div>';
+    }
   }
 })();
 
@@ -87,18 +114,49 @@ function getRequiredJavaMajor(mcVersion) {
 let instancesCache = [];
 let isLaunching = false;
 
+function parseMemoryMb(value) {
+  const memory = parseInt(value, 10);
+  return Number.isFinite(memory) && memory > 0 ? memory : null;
+}
+
+function estimateMemoryByModCount(modCount) {
+  const count = parseInt(modCount, 10) || 0;
+  if (count === 0) return 2048;
+  if (count <= 50) return 4096;
+  if (count <= 150) return 6144;
+  if (count <= 250) return 8192;
+  return 10240;
+}
+
+function getInstanceAutoMemory(instance) {
+  if (!instance) return null;
+  const packMemory = parseMemoryMb(instance.packRecommendedMemory);
+  if (packMemory) {
+    return { memory: packMemory, source: '整合包内部' };
+  }
+
+  const estimatedMemory = parseMemoryMb(instance.estimatedMemory) || estimateMemoryByModCount(instance.modCount);
+  if (estimatedMemory) {
+    return { memory: estimatedMemory, source: '按 Mod 数估算' };
+  }
+  return null;
+}
+
 // 显示崩溃分析弹窗
-function showCrashModal(version, content, loading = false) {
+function showCrashModal(version, content, loading = false, isLocal = false) {
   const modal = document.getElementById('crashModal');
-  const body  = document.getElementById('crashModalBody');
-  const ver   = document.getElementById('crashModalVersion');
+  const body = document.getElementById('crashModalBody');
+  const ver = document.getElementById('crashModalVersion');
   const closeBtn = document.getElementById('crashModalClose');
+  const titleEl = modal ? modal.querySelector('.crash-modal-title') : null;
   if (!modal || !body) return;
+  // 标题区分 AI 和本地
+  if (titleEl) titleEl.textContent = isLocal ? '本地崩溃检测' : 'AI 崩溃分析';
   ver.textContent = loading
     ? `${version} · AI 分析中...`
-    : `${version} · 退出码异常`;
+    : isLocal ? `${version} · 本地检测` : `${version} · 退出码异常`;
   // 简单 markdown → HTML
-  let html = content
+  let html = escapeHtml(String(content || ''))
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/^### (.+)$/gm, '<h4>$1</h4>')
@@ -112,6 +170,10 @@ function showCrashModal(version, content, loading = false) {
   html = html.replace(/((?:<li>.*?<\/li>)+)/g, '<ul>$1</ul>');
   if (loading) {
     html += '<div style="margin-top:16px;text-align:center"><div class="crash-loading-dot"></div></div>';
+  }
+  // 本地检测提示配置 AI
+  if (isLocal) {
+    html += '<div style="margin-top:12px;padding:8px 12px;background:rgba(232,69,116,0.06);border-radius:8px;font-size:11px;color:#be185d;">💡 当前为本地检测，前往 <strong>设置 → AI 崩溃分析</strong> 配置 API 可获得更精准的分析结果。</div>';
   }
   body.innerHTML = html;
   modal.style.display = '';
@@ -130,18 +192,19 @@ function showCrashModal(version, content, loading = false) {
     const tauri = await waitForTauri();
     await tauri.event.listen('game-crashed', async (event) => {
       const { version, exit_code, diagnosis, log_tail, crash_report } = event.payload;
-      console.log(`游戏崩溃: ${version}, 退出码: ${exit_code}`);
+      console.log(`[CRASH DEBUG] 游戏崩溃: ${version}, 退出码: ${exit_code}, diagnosis长度: ${(diagnosis || '').length}`);
 
       // 立即恢复启动按钮
       const btn = document.getElementById('launchBtn');
       if (btn) { resetLaunchBtn(btn); isLaunching = false; }
 
-      // 检查是否配置了 AI
-      const aiKey      = localStorage.getItem('ai_api_key') || '';
-      const aiUrl      = localStorage.getItem('ai_api_url') || '';
-      const aiModel    = localStorage.getItem('ai_model') || '';
+      // 检查是否配置了 AI 且已启用
+      const aiKey = localStorage.getItem('ai_api_key') || '';
+      const aiUrl = localStorage.getItem('ai_api_url') || '';
+      const aiModel = localStorage.getItem('ai_model') || '';
+      const aiEnabled = localStorage.getItem('ai_enabled') !== 'false';
 
-      if (aiKey && aiUrl) {
+      if (aiKey && aiUrl && aiEnabled) {
         const logForAi = [
           crash_report ? `=== Crash Report ===\n${crash_report}` : '',
           log_tail ? `=== Game Log (last 150 lines) ===\n${log_tail}` : '',
@@ -169,7 +232,12 @@ function showCrashModal(version, content, loading = false) {
 
         try {
           const aiResult = await callAiApi(aiKey, aiUrl, aiModel,
-            `Minecraft ${version} 崩溃了，退出码: ${exit_code}。请分析以下日志：\n\n${logForAi}`,
+            `你是 Minecraft 崩溃分析助手。请注意以下 Java 版本要求：\n` +
+            `- Minecraft 26.1+ 需要 Java 25\n` +
+            `- Minecraft 1.21~1.21.11 需要 Java 21\n` +
+            `- Minecraft 1.17~1.20 需要 Java 17\n` +
+            `- Minecraft 1.16 及以下需要 Java 8\n\n` +
+            `Minecraft ${version} 崩溃了，退出码: ${exit_code}。请分析以下日志并给出解决方案：\n\n${logForAi}`,
             aiAbort.signal
           );
           if (!aiAbort.signal.aborted) {
@@ -181,7 +249,7 @@ function showCrashModal(version, content, loading = false) {
           showCrashModal(version, `${diagnosis}\n\n**AI 分析失败:** ${e.message}`);
         }
       } else {
-        showCrashModal(version, diagnosis);
+        showCrashModal(version, diagnosis || `Minecraft ${version} 异常退出，退出码: ${exit_code}`, false, true);
       }
     });
 
@@ -278,6 +346,23 @@ async function loadInstalledVersions() {
   }
 }
 
+async function refreshInstanceForLaunch(gameDir, selectedVersion) {
+  if (!gameDir || !selectedVersion) {
+    return instancesCache.find(i => i.name === selectedVersion) || null;
+  }
+  try {
+    const tauri = await waitForTauri();
+    const instances = await tauri.core.invoke('list_installed_versions', { gameDir });
+    if (Array.isArray(instances)) {
+      instancesCache = instances;
+      return instances.find(i => i.name === selectedVersion) || null;
+    }
+  } catch (err) {
+    console.warn('[launch] 启动前刷新实例信息失败，使用页面缓存:', err);
+  }
+  return instancesCache.find(i => i.name === selectedVersion) || null;
+}
+
 function initLaunchButton() {
   const btn = document.getElementById('launchBtn');
   const sel = document.getElementById('versionSelector');
@@ -295,19 +380,27 @@ function initLaunchButton() {
     // 读取设置
     const gameDir = localStorage.getItem('gameDir');
     let memAlloc = parseInt(localStorage.getItem('memAlloc') || '4096');
+    const memoryMode = localStorage.getItem('memoryMode') || 'manual';
     const selectedVersion = sel ? sel.value : '';
     const loginMode = localStorage.getItem('loginMode') || 'offline';
 
-    // 检查实例是否有推荐内存（整合包安装时自动计算的）
+    // 实例单独设置优先；全局选择自动时，才使用整合包推荐内存。
     if (selectedVersion) {
-      const inst = instancesCache.find(i => i.name === selectedVersion);
-      if (inst && inst.recommendedMemory) {
-        // 使用整合包推荐内存（除非用户在实例设置里手动覆盖了）
-        const instMemOverride = localStorage.getItem(`mem_${selectedVersion}`);
-        if (!instMemOverride) {
-          memAlloc = inst.recommendedMemory;
-          console.log(`[launch] 使用整合包推荐内存: ${memAlloc}MB`);
+      const inst = await refreshInstanceForLaunch(gameDir, selectedVersion);
+      const instMemOverride = localStorage.getItem(`mem_${selectedVersion}`);
+      if (instMemOverride) {
+        memAlloc = parseInt(instMemOverride) || memAlloc;
+        console.log(`[launch] 使用实例内存: ${memAlloc}MB`);
+      } else if (memoryMode === 'auto') {
+        const autoMemory = getInstanceAutoMemory(inst);
+        if (autoMemory) {
+          memAlloc = autoMemory.memory;
+          console.log(`[launch] 使用自动内存(${autoMemory.source}): ${memAlloc}MB`);
+        } else {
+          console.log(`[launch] 自动内存无可用值，使用全局内存: ${memAlloc}MB`);
         }
+      } else {
+        console.log(`[launch] 使用全局手动内存: ${memAlloc}MB`);
       }
     }
     // 根据登录模式决定玩家信息
@@ -336,7 +429,10 @@ function initLaunchButton() {
     if (!playerName) { showToast('请先在设置页输入玩家名称或微软登录', 'warn'); isLaunching = false; return; }
 
     // 自动/手动 Java 选择
-    const javaMode = localStorage.getItem('javaMode') || 'auto';
+    const instanceJavaMode = localStorage.getItem(`javaMode_${selectedVersion}`) || 'global';
+    const javaMode = instanceJavaMode === 'global'
+      ? (localStorage.getItem('javaMode') || 'auto')
+      : instanceJavaMode;
     let javaPath;
 
     if (javaMode === 'auto') {
@@ -390,8 +486,8 @@ function initLaunchButton() {
         return;
       }
     } else {
-      javaPath = localStorage.getItem('selectedJavaPath');
-      if (!javaPath) { showToast('请先在设置页选择 Java 路径', 'warn'); isLaunching = false; return; }
+      javaPath = localStorage.getItem(`javaPath_${selectedVersion}`) || localStorage.getItem('selectedJavaPath');
+      if (!javaPath) { showToast('请先在实例设置或设置页选择 Java 路径', 'warn'); isLaunching = false; return; }
     }
 
     btn.style.pointerEvents = 'none';
@@ -404,6 +500,10 @@ function initLaunchButton() {
 
     try {
       const tauri = await waitForTauri();
+      const instanceJvmArgs = localStorage.getItem(`jvmArgs_${selectedVersion}`);
+      const customJvmArgs = instanceJvmArgs !== null
+        ? instanceJvmArgs
+        : (localStorage.getItem('customJvmArgs') || null);
       const result = await tauri.core.invoke('launch_minecraft', {
         options: {
           java_path: javaPath,
@@ -415,7 +515,7 @@ function initLaunchButton() {
           server_port: null,
           access_token: accessToken,
           uuid: playerUuid,
-          custom_jvm_args: localStorage.getItem('customJvmArgs') || null,
+          custom_jvm_args: customJvmArgs,
         }
       });
 

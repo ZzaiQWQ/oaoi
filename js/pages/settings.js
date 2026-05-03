@@ -264,8 +264,27 @@ function initSettings() {
   const memValue = document.getElementById('memValue');
   const sliderLabels = document.querySelector('.set-slider-labels');
   const cachedMem = localStorage.getItem('memAlloc');
+  const memoryModeManual = document.getElementById('memoryModeManual');
+  const memoryModeAuto = document.getElementById('memoryModeAuto');
+  const memoryModeHint = document.getElementById('memoryModeHint');
+
+  function setMemoryMode(mode) {
+    const nextMode = mode === 'auto' ? 'auto' : 'manual';
+    localStorage.setItem('memoryMode', nextMode);
+    memoryModeManual?.classList.toggle('active', nextMode === 'manual');
+    memoryModeAuto?.classList.toggle('active', nextMode === 'auto');
+    if (memoryModeHint) {
+      memoryModeHint.textContent = nextMode === 'auto'
+        ? '启动整合包时优先使用自动值；没有自动值时使用下方数值。'
+        : '启动时使用下方数值，不会被整合包自动值覆盖。';
+    }
+  }
 
   if (memSlider && memValue) {
+    setMemoryMode(localStorage.getItem('memoryMode') || 'manual');
+    memoryModeManual?.addEventListener('click', () => setMemoryMode('manual'));
+    memoryModeAuto?.addEventListener('click', () => setMemoryMode('auto'));
+
     // 滑块 → 数字输入
     memSlider.addEventListener('input', () => {
       memValue.value = memSlider.value;
@@ -525,49 +544,79 @@ function initAiSettings() {
         if (resp) {
           testResult.textContent = '✅ 连接成功：' + resp.substring(0, 30);
           testResult.style.color = '#22c55e';
+          localStorage.setItem('ai_enabled', 'true');
+          showDisconnectBtn();
         } else {
           testResult.textContent = '❌ 无响应';
           testResult.style.color = '#ef4444';
         }
       } catch (e) {
-        testResult.textContent = '❌ ' + (e.message || '连接失败');
+        const errMsg = typeof e === 'string' ? e : (e.message || JSON.stringify(e) || '连接失败');
+        testResult.textContent = '❌ ' + errMsg;
         testResult.style.color = '#ef4444';
+        console.error('[AI Test]', e);
       }
       testBtn.disabled = false;
     });
   }
+
+  // 断开连接按钮
+  function showDisconnectBtn() {
+    let dcBtn = document.getElementById('aiDisconnectBtn');
+    if (!dcBtn) {
+      dcBtn = document.createElement('button');
+      dcBtn.id = 'aiDisconnectBtn';
+      dcBtn.textContent = '断开连接';
+      dcBtn.style.cssText = 'margin-left:8px;padding:6px 16px;border:1px solid #f472b6;border-radius:10px;background:transparent;color:#e84574;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.2s;';
+      dcBtn.onmouseenter = () => { dcBtn.style.background = '#fce4ec'; };
+      dcBtn.onmouseleave = () => { dcBtn.style.background = 'transparent'; };
+      testBtn.parentNode.insertBefore(dcBtn, testBtn.nextSibling);
+    }
+    dcBtn.style.display = '';
+    dcBtn.textContent = '断开连接';
+    dcBtn.onclick = () => {
+      localStorage.setItem('ai_enabled', 'false');
+      testResult.textContent = '⏸️ 已断开（数据已保留，点击测试连接可重新启用）';
+      testResult.style.color = 'var(--text-mid)';
+      dcBtn.style.display = 'none';
+    };
+  }
+
+  // 页面加载时检查状态
+  if (apiKeyInput.value && apiUrlInput.value) {
+    const enabled = localStorage.getItem('ai_enabled') !== 'false';
+    if (enabled) {
+      testResult.textContent = '✅ 已配置';
+      testResult.style.color = '#22c55e';
+    } else {
+      testResult.textContent = '⏸️ 已断开（点击测试连接可重新启用）';
+      testResult.style.color = 'var(--text-mid)';
+    }
+    showDisconnectBtn();
+    if (!enabled) document.getElementById('aiDisconnectBtn').style.display = 'none';
+  }
 }
 
 /**
- * AI API 调用（OpenAI 兼容格式，支持 DeepSeek / OpenAI / 任何兼容服务）
+ * AI API 调用（通过 Tauri 后端请求，兼容 OpenAI 格式）
  */
 async function callAiApi(apiKey, apiUrl, model, userMessage, signal) {
-  const endpoint = apiUrl.includes('/v1/') ? apiUrl : `${apiUrl}/v1/chat/completions`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000); // 30秒超时
-  // 外部取消时也中止请求
-  if (signal) signal.addEventListener('abort', () => controller.abort());
-  try {
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: [
-          { role: 'system', content: '你是 oaoi Minecraft 启动器内置的崩溃日志分析专家。用户正在使用 oaoi 启动器。分析日志后用中文给出：1.崩溃原因 2.涉及的Mod/组件 3.解决方案。简洁明了，不超过200字。注意：绝对不要推荐用户更换其他启动器（如 HMCL、PCL、BakaXL 等），所有解决方案必须基于 oaoi 启动器本身。' },
-          { role: 'user', content: userMessage }
-        ],
-        max_tokens: 500
-      })
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-    const data = await resp.json();
-    return data?.choices?.[0]?.message?.content || '';
-  } finally {
-    clearTimeout(timeout);
-  }
+  if (signal?.aborted) throw new Error('Aborted');
+
+  const tauri = await waitForTauri();
+  const request = tauri.core.invoke('call_ai_api', {
+    apiKey,
+    apiUrl,
+    model: model || 'gpt-3.5-turbo',
+    userMessage
+  });
+
+  if (!signal) return request;
+
+  return Promise.race([
+    request,
+    new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+    })
+  ]);
 }

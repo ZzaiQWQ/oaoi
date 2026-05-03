@@ -63,8 +63,76 @@ document.addEventListener('DOMContentLoaded', () => {
   // 首次启动：选择游戏目录
   try { checkFirstLaunch(); } catch (e) { console.error('首次启动检查失败:', e); }
 
+  setTimeout(() => {
+    checkForUpdates().catch(e => console.warn('[update] 检查更新失败:', e));
+  }, 2000);
+
+  updateVersionBadge().catch(e => console.warn('[version] 读取版本失败:', e));
+
   console.log('🌸 oaoi 启动器已加载！');
 });
+
+const UPDATE_MANIFEST_URLS = [
+  'https://gitee.com/iszaizai/oaoi/raw/main/update/latest.json',
+  'https://gitee.com/iszaizai/oaoi/raw/master/update/latest.json'
+];
+
+async function checkForUpdates() {
+  const tauri = await waitForTauri();
+  const currentVersion = await tauri.core.invoke('get_app_version');
+  const manifest = await fetchUpdateManifest(tauri);
+  if (!manifest || !manifest.version || !manifest.url) return;
+  if (compareVersions(manifest.version, currentVersion) <= 0) return;
+
+  const skipped = sessionStorage.getItem('update_skip_version');
+  if (skipped === manifest.version) return;
+
+  const notes = manifest.notes ? `\n\n${manifest.notes}` : '';
+  const confirmed = await showConfirm(
+    `发现新版本 ${manifest.version}，当前版本 ${currentVersion}。${notes}`,
+    { title: '发现更新', confirmText: '立即更新', cancelText: '稍后', kind: 'info' }
+  );
+  if (!confirmed) {
+    sessionStorage.setItem('update_skip_version', manifest.version);
+    return;
+  }
+
+  showToast('正在下载更新，完成后会自动重启...', 'info', 15000);
+  try {
+    await tauri.core.invoke('install_update', {
+      url: manifest.url,
+      mirrorUrl: manifest.mirror_url || null,
+      sha256: manifest.sha256 || ''
+    });
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : (e.message || JSON.stringify(e) || '更新失败');
+    showToast(`更新失败：${msg}`, 'error', 12000);
+    console.error('[update] install failed:', e);
+  }
+}
+
+async function updateVersionBadge() {
+  const badge = document.getElementById('appVersionBadge');
+  if (!badge) return;
+  const tauri = await waitForTauri();
+  const version = await tauri.core.invoke('get_app_version');
+  badge.textContent = `v${version}`;
+}
+
+async function fetchUpdateManifest(tauri) {
+  return await tauri.core.invoke('get_update_manifest');
+}
+
+function compareVersions(a, b) {
+  const pa = String(a).replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 async function checkFirstLaunch() {
   if (localStorage.getItem('gameDir')) return; // 已选过

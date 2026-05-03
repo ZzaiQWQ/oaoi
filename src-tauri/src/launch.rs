@@ -1,7 +1,7 @@
 use crate::instance::resolve_game_dir;
-use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use tauri::Emitter;
 
 #[derive(serde::Deserialize)]
 pub struct LaunchOptions {
@@ -18,16 +18,20 @@ pub struct LaunchOptions {
 }
 
 #[tauri::command]
-pub async fn launch_minecraft(app_handle: tauri::AppHandle, options: LaunchOptions) -> Result<String, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
+pub async fn launch_minecraft(
+    app_handle: tauri::AppHandle,
+    options: LaunchOptions,
+) -> Result<String, String> {
     let handle = app_handle.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send(do_launch_minecraft(options, handle));
-    });
-    rx.recv().map_err(|_| "线程通信失败".to_string())?
+    tokio::task::spawn_blocking(move || do_launch_minecraft(options, handle))
+        .await
+        .map_err(|e| format!("启动线程失败: {}", e))?
 }
 
-fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> Result<String, String> {
+fn do_launch_minecraft(
+    options: LaunchOptions,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let game_dir = resolve_game_dir(&options.game_dir);
     if !game_dir.exists() {
         return Err("游戏目录不存在".to_string());
@@ -44,11 +48,12 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
     let version_json_path = ver_dir.join("instance.json");
     let json_str = std::fs::read_to_string(&version_json_path)
         .map_err(|e| format!("读取实例配置失败: {}", e))?;
-    let json: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("解析实例 JSON 失败: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("解析实例 JSON 失败: {}", e))?;
 
     // 获取主类
-    let main_class = json["mainClass"].as_str()
+    let main_class = json["mainClass"]
+        .as_str()
         .ok_or("版本 JSON 中缺少 mainClass")?;
 
     // 获取 asset index
@@ -69,18 +74,31 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                     match (action, os_name) {
                         ("allow", None) => allowed = true,
                         ("allow", Some("windows")) => allowed = true,
-                        ("disallow", Some("windows")) => { allowed = false; break; },
-                        ("disallow", None) => { allowed = false; break; },
+                        ("disallow", Some("windows")) => {
+                            allowed = false;
+                            break;
+                        }
+                        ("disallow", None) => {
+                            allowed = false;
+                            break;
+                        }
                         _ => {}
                     }
                 }
-                if !allowed { continue; }
+                if !allowed {
+                    continue;
+                }
             }
 
             // 解析库路径
-            let lib_path_opt = if let Some(artifact) = lib["downloads"]["artifact"]["path"].as_str() {
+            let lib_path_opt = if let Some(artifact) = lib["downloads"]["artifact"]["path"].as_str()
+            {
                 let p = libs_dir.join(artifact.replace('/', "\\"));
-                if p.exists() { Some(p.to_string_lossy().to_string()) } else { None }
+                if p.exists() {
+                    Some(p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
             } else if let Some(name) = lib["name"].as_str() {
                 let parts: Vec<&str> = name.split(':').collect();
                 if parts.len() >= 3 {
@@ -92,20 +110,35 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                     } else {
                         format!("{}-{}.jar", artifact_name, version)
                     };
-                    let p = libs_dir.join(&group_path).join(artifact_name).join(version).join(&jar_name);
-                    if p.exists() { Some(p.to_string_lossy().to_string()) } else { None }
-                } else { None }
-            } else { None };
+                    let p = libs_dir
+                        .join(&group_path)
+                        .join(artifact_name)
+                        .join(version)
+                        .join(&jar_name);
+                    if p.exists() {
+                        Some(p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             if let Some(path) = lib_path_opt {
-                let dedup_key = lib["name"].as_str()
+                let dedup_key = lib["name"]
+                    .as_str()
                     .and_then(|n| {
                         let parts: Vec<&str> = n.split(':').collect();
                         if parts.len() >= 4 {
                             Some(format!("{}:{}:{}", parts[0], parts[1], parts[3]))
                         } else if parts.len() >= 2 {
                             Some(format!("{}:{}", parts[0], parts[1]))
-                        } else { None }
+                        } else {
+                            None
+                        }
                     })
                     .unwrap_or_default();
 
@@ -141,10 +174,14 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
 
     // natives 目录
     let natives_dir = ver_dir.join("natives");
-    if !natives_dir.exists() { let _ = std::fs::create_dir_all(&natives_dir); }
+    if !natives_dir.exists() {
+        let _ = std::fs::create_dir_all(&natives_dir);
+    }
 
     // 自动解压 natives（老版本需要 LWJGL native dll）
-    let natives_empty = std::fs::read_dir(&natives_dir).map(|mut d| d.next().is_none()).unwrap_or(true);
+    let natives_empty = std::fs::read_dir(&natives_dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
     if natives_empty {
         if let Some(libs) = json["libraries"].as_array() {
             for lib in libs {
@@ -154,14 +191,18 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                     None => continue,
                 };
                 // 获取 natives jar 路径
-                let native_jar_path = if let Some(cl) = lib["downloads"]["classifiers"][&classifier_key]["path"].as_str() {
+                let native_jar_path = if let Some(cl) =
+                    lib["downloads"]["classifiers"][&classifier_key]["path"].as_str()
+                {
                     libs_dir.join(cl.replace('/', "\\"))
                 } else {
                     continue;
                 };
                 if !native_jar_path.exists() {
                     // 尝试下载
-                    if let Some(url) = lib["downloads"]["classifiers"][&classifier_key]["url"].as_str() {
+                    if let Some(url) =
+                        lib["downloads"]["classifiers"][&classifier_key]["url"].as_str()
+                    {
                         if let Some(parent) = native_jar_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
@@ -180,7 +221,10 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                             for i in 0..archive.len() {
                                 if let Ok(mut entry) = archive.by_index(i) {
                                     let name = entry.name().to_string();
-                                    if name.ends_with(".dll") || name.ends_with(".so") || name.ends_with(".dylib") {
+                                    if name.ends_with(".dll")
+                                        || name.ends_with(".so")
+                                        || name.ends_with(".dylib")
+                                    {
                                         let filename = name.rsplit('/').next().unwrap_or(&name);
                                         let out_path = natives_dir.join(filename);
                                         if !out_path.exists() {
@@ -218,7 +262,9 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                 }
             }
             #[cfg(not(windows))]
-            { String::new() }
+            {
+                String::new()
+            }
         };
         let mc_lang = match sys_lang.to_lowercase().as_str() {
             "zh-cn" => "zh_cn",
@@ -237,7 +283,9 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
 
     // 生成离线 UUID（使用 "OfflinePlayer:" + 玩家名的 SHA1 前 128 bit，与官方离线模式一致）
     let uuid = {
-        let digest = sha1_smol::Sha1::from(format!("OfflinePlayer:{}", options.player_name)).digest().bytes();
+        let digest = sha1_smol::Sha1::from(format!("OfflinePlayer:{}", options.player_name))
+            .digest()
+            .bytes();
         // 取前16字节作为 UUID bytes
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&digest[..16]);
@@ -298,20 +346,22 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
         let natives_dir_str = natives_dir.to_string_lossy().to_string();
 
         let replace_vars = |s: &str| -> String {
-            let mut r = s.replace("${natives_directory}", &natives_dir_str)
-             .replace("${library_directory}", &libs_dir_str)
-             .replace("${launcher_name}", "oaoi")
-             .replace("${launcher_version}", "1.0")
-             .replace("${classpath}", &classpath_str)
-             .replace("${classpath_separator}", ";")
-             .replace("${version_name}", version_name)
-             .replace("${primary_jar_name}", "client.jar");
+            let mut r = s
+                .replace("${natives_directory}", &natives_dir_str)
+                .replace("${library_directory}", &libs_dir_str)
+                .replace("${launcher_name}", "oaoi")
+                .replace("${launcher_version}", "1.0")
+                .replace("${classpath}", &classpath_str)
+                .replace("${classpath_separator}", ";")
+                .replace("${version_name}", version_name)
+                .replace("${primary_jar_name}", "client.jar");
             // NeoForge: ignoreList 引用 ${version_name}.jar，但我们的是 client.jar
             if r.starts_with("-DignoreList=") {
                 r = r.replace(&format!("{}.jar", version_name), "client.jar");
             }
             // Windows: 检测任意盘符路径，将正斜杠统一为反斜杠
-            let has_drive_letter = r.len() >= 2 && r.as_bytes()[1] == b':' && r.as_bytes()[0].is_ascii_alphabetic();
+            let has_drive_letter =
+                r.len() >= 2 && r.as_bytes()[1] == b':' && r.as_bytes()[0].is_ascii_alphabetic();
             let has_embedded_drive = r.contains(":\\") || r.contains(":/");
             if has_drive_letter || has_embedded_drive {
                 r = r.replace('/', "\\");
@@ -322,7 +372,9 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
         for arg in jvm_args {
             if let Some(s) = arg.as_str() {
                 let resolved = replace_vars(s);
-                if resolved == "-cp" || resolved == classpath_str { continue; }
+                if resolved == "-cp" || resolved == classpath_str {
+                    continue;
+                }
                 args.push(resolved);
             } else if arg.is_object() {
                 let rules = arg["rules"].as_array();
@@ -333,14 +385,12 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                         let os_name = rule["os"]["name"].as_str();
                         let os_arch = rule["os"]["arch"].as_str();
                         match action {
-                            "allow" => {
-                                match (os_name, os_arch) {
-                                    (None, None) => allowed = true,
-                                    (Some("windows"), _) => allowed = true,
-                                    (None, Some("x86")) => {},
-                                    _ => {}
-                                }
-                            }
+                            "allow" => match (os_name, os_arch) {
+                                (None, None) => allowed = true,
+                                (Some("windows"), _) => allowed = true,
+                                (None, Some("x86")) => {}
+                                _ => {}
+                            },
                             "disallow" => {
                                 if os_name == Some("windows") || os_name.is_none() {
                                     allowed = false;
@@ -357,7 +407,9 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                         for v in vals {
                             if let Some(s) = v.as_str() {
                                 let resolved = replace_vars(s);
-                                if resolved == "-cp" || resolved == classpath_str { continue; }
+                                if resolved == "-cp" || resolved == classpath_str {
+                                    continue;
+                                }
                                 args.push(resolved);
                             }
                         }
@@ -369,7 +421,9 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
 
     // Forge / NeoForge 必需的 -DlibraryDirectory
     let loader_type = json["loader"]["type"].as_str().unwrap_or("");
-    if (loader_type == "forge" || loader_type == "neoforge") && !args.iter().any(|a| a.starts_with("-DlibraryDirectory")) {
+    if (loader_type == "forge" || loader_type == "neoforge")
+        && !args.iter().any(|a| a.starts_with("-DlibraryDirectory"))
+    {
         args.push(format!("-DlibraryDirectory={}", libs_dir.to_string_lossy()));
     }
 
@@ -392,8 +446,18 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
             .replace("${assets_root}", &game_dir.join("res").to_string_lossy())
             .replace("${assets_index_name}", asset_index)
             .replace("${auth_uuid}", options.uuid.as_deref().unwrap_or(&uuid))
-            .replace("${auth_access_token}", options.access_token.as_deref().unwrap_or("0"))
-            .replace("${user_type}", if options.access_token.is_some() { "msa" } else { "legacy" })
+            .replace(
+                "${auth_access_token}",
+                options.access_token.as_deref().unwrap_or("0"),
+            )
+            .replace(
+                "${user_type}",
+                if options.access_token.is_some() {
+                    "msa"
+                } else {
+                    "legacy"
+                },
+            )
             .replace("${version_type}", "release")
             .replace("${user_properties}", "{}");
         for part in replaced.split_whitespace() {
@@ -405,26 +469,45 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
             "-cp".to_string(),
             classpath_str.clone(),
             main_class.to_string(),
-            "--username".to_string(), options.player_name.clone(),
-            "--version".to_string(), version_name.clone(),
-            "--gameDir".to_string(), ver_dir.to_string_lossy().to_string(),
-            "--assetsDir".to_string(), game_dir.join("res").to_string_lossy().to_string(),
-            "--assetIndex".to_string(), asset_index.to_string(),
-            "--uuid".to_string(), options.uuid.clone().unwrap_or(uuid.clone()),
-            "--accessToken".to_string(), options.access_token.clone().unwrap_or("0".to_string()),
-            "--userType".to_string(), if options.access_token.is_some() { "msa".to_string() } else { "legacy".to_string() },
-            "--versionType".to_string(), "release".to_string(),
+            "--username".to_string(),
+            options.player_name.clone(),
+            "--version".to_string(),
+            version_name.clone(),
+            "--gameDir".to_string(),
+            ver_dir.to_string_lossy().to_string(),
+            "--assetsDir".to_string(),
+            game_dir.join("res").to_string_lossy().to_string(),
+            "--assetIndex".to_string(),
+            asset_index.to_string(),
+            "--uuid".to_string(),
+            options.uuid.clone().unwrap_or(uuid.clone()),
+            "--accessToken".to_string(),
+            options.access_token.clone().unwrap_or("0".to_string()),
+            "--userType".to_string(),
+            if options.access_token.is_some() {
+                "msa".to_string()
+            } else {
+                "legacy".to_string()
+            },
+            "--versionType".to_string(),
+            "release".to_string(),
         ]);
 
         // 注入 game 参数
         if let Some(game_args) = json["arguments"]["game"].as_array() {
             for arg in game_args {
                 if let Some(s) = arg.as_str() {
-                    if !s.contains("${") && !s.starts_with("--username") && !s.starts_with("--version")
-                        && !s.starts_with("--gameDir") && !s.starts_with("--assetsDir")
-                        && !s.starts_with("--assetIndex") && !s.starts_with("--uuid")
-                        && !s.starts_with("--accessToken") && !s.starts_with("--userType")
-                        && !s.starts_with("--versionType") {
+                    if !s.contains("${")
+                        && !s.starts_with("--username")
+                        && !s.starts_with("--version")
+                        && !s.starts_with("--gameDir")
+                        && !s.starts_with("--assetsDir")
+                        && !s.starts_with("--assetIndex")
+                        && !s.starts_with("--uuid")
+                        && !s.starts_with("--accessToken")
+                        && !s.starts_with("--userType")
+                        && !s.starts_with("--versionType")
+                    {
                         args.push(s.to_string());
                     }
                 }
@@ -462,14 +545,8 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
     }
     eprintln!("[launch] ===== END =====\n");
 
-    // 启动游戏（将输出写入日志文件以便调试）
-    let java_path = std::path::Path::new(&options.java_path);
-    let javaw_path = java_path.with_file_name("javaw.exe");
-    let launch_exe = if javaw_path.exists() {
-        javaw_path.to_string_lossy().to_string()
-    } else {
-        options.java_path.clone()
-    };
+    // 启动游戏（使用 java.exe + CREATE_NO_WINDOW：无黑窗，JVM 错误写入日志而非弹对话框）
+    let launch_exe = options.java_path.clone();
 
     // 创建日志文件
     let log_path = ver_dir.join("launch_output.log");
@@ -479,13 +556,22 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
     let mut cmd = std::process::Command::new(&launch_exe);
     cmd.args(&args)
         .current_dir(&ver_dir)
-        .stdout(log_file.map(|f| std::process::Stdio::from(f)).unwrap_or(std::process::Stdio::null()))
-        .stderr(stderr_file.map(|f| std::process::Stdio::from(f)).unwrap_or(std::process::Stdio::null()))
+        .stdout(
+            log_file
+                .map(|f| std::process::Stdio::from(f))
+                .unwrap_or(std::process::Stdio::null()),
+        )
+        .stderr(
+            stderr_file
+                .map(|f| std::process::Stdio::from(f))
+                .unwrap_or(std::process::Stdio::null()),
+        )
         .stdin(std::process::Stdio::null());
     #[cfg(windows)]
-    { cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
-    let mut child = cmd.spawn()
-        .map_err(|e| format!("启动游戏失败: {}", e))?;
+    {
+        cmd.creation_flags(0x08000000);
+    } // CREATE_NO_WINDOW
+    let mut child = cmd.spawn().map_err(|e| format!("启动游戏失败: {}", e))?;
 
     let pid = child.id();
     let cp_len = classpath.len();
@@ -501,25 +587,93 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
                 if exit_code != 0 {
                     // 非正常退出 → 安全读取日志尾部（最多200行），避免大日志 OOM
                     let log_content = read_tail_lines(&log_path_clone, 200);
-                    let diagnosis = analyze_crash_log(&log_content, exit_code);
+                    let mut diagnosis = analyze_crash_log(&log_content, exit_code);
+
+                    // 如果启动日志没匹配到有用规则，再读游戏自己的日志做二次分析
+                    let mut combined_log = log_content.clone();
+                    if diagnosis.contains("日志最后几行") || diagnosis.contains("日志文件为空")
+                    {
+                        let game_log =
+                            read_tail_lines(&ver_dir_clone.join("logs").join("latest.log"), 100);
+                        let fml_log = read_tail_lines(
+                            &ver_dir_clone.join("logs").join("fml-client-latest.log"),
+                            100,
+                        );
+                        let game_combined = format!("{}\n{}", game_log, fml_log);
+                        let retry = analyze_crash_log(&game_combined, exit_code);
+                        if !retry.contains("日志最后几行") && !retry.contains("日志文件为空")
+                        {
+                            diagnosis = retry;
+                        }
+                        combined_log = format!("{}\n{}", combined_log, game_combined);
+                    }
+
                     // 截取最后 150 行给 AI 分析
-                    let log_lines: Vec<&str> = log_content.lines().collect();
-                    let tail_start = if log_lines.len() > 150 { log_lines.len() - 150 } else { 0 };
+                    let log_lines: Vec<&str> = combined_log.lines().collect();
+                    let tail_start = if log_lines.len() > 150 {
+                        log_lines.len() - 150
+                    } else {
+                        0
+                    };
                     let log_tail = log_lines[tail_start..].join("\n");
-                    // 也尝试读取 crash-reports 和 latest.log
+                    // 也尝试读取 crash-reports
                     let crash_report = read_latest_crash_report(&ver_dir_clone);
-                    let _ = app_handle.emit("game-crashed", serde_json::json!({
-                        "version": version_for_log,
-                        "exit_code": exit_code,
-                        "diagnosis": diagnosis,
-                        "log_tail": log_tail,
-                        "crash_report": crash_report
-                    }));
+                    let _ = app_handle.emit(
+                        "game-crashed",
+                        serde_json::json!({
+                            "version": version_for_log,
+                            "exit_code": exit_code,
+                            "diagnosis": diagnosis,
+                            "log_tail": log_tail,
+                            "crash_report": crash_report
+                        }),
+                    );
                 } else {
-                    let _ = app_handle.emit("game-exited", serde_json::json!({
-                        "version": version_for_log,
-                        "exit_code": 0
-                    }));
+                    // 退出码 0 但可能有 Forge/Fabric Mod 加载错误（弹窗关闭后退出码仍为 0）
+                    let game_log =
+                        read_tail_lines(&ver_dir_clone.join("logs").join("latest.log"), 100);
+                    let fml_log = read_tail_lines(
+                        &ver_dir_clone.join("logs").join("fml-client-latest.log"),
+                        100,
+                    );
+                    let combined = format!("{}\n{}", game_log, fml_log);
+                    let combined_lower = combined.to_lowercase();
+
+                    // 检测 Forge/Fabric 常见 Mod 错误
+                    if combined_lower.contains("missing mods")
+                        || combined_lower.contains("there were errors previously")
+                        || combined_lower.contains("errors loading minecraft")
+                        || combined_lower.contains("missing or unsupported mandatory dependencies")
+                        || combined_lower.contains("(missing)")
+                        || combined_lower.contains("incompatible mods found")
+                    {
+                        let diagnosis = analyze_crash_log(&combined, 0);
+                        let log_lines: Vec<&str> = combined.lines().collect();
+                        let tail_start = if log_lines.len() > 150 {
+                            log_lines.len() - 150
+                        } else {
+                            0
+                        };
+                        let log_tail = log_lines[tail_start..].join("\n");
+                        let _ = app_handle.emit(
+                            "game-crashed",
+                            serde_json::json!({
+                                "version": version_for_log,
+                                "exit_code": 0,
+                                "diagnosis": diagnosis,
+                                "log_tail": log_tail,
+                                "crash_report": ""
+                            }),
+                        );
+                    } else {
+                        let _ = app_handle.emit(
+                            "game-exited",
+                            serde_json::json!({
+                                "version": version_for_log,
+                                "exit_code": 0
+                            }),
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -529,7 +683,10 @@ fn do_launch_minecraft(options: LaunchOptions, app_handle: tauri::AppHandle) -> 
     });
 
     // 立即返回启动成功
-    Ok(format!("游戏已启动 (PID: {}), 版本: {}, 库: {}/{}", pid, version_name, cp_len, total_libs))
+    Ok(format!(
+        "游戏已启动 (PID: {}), 版本: {}, 库: {}/{}",
+        pid, version_name, cp_len, total_libs
+    ))
 }
 
 /// 检测 Java 主版本号（如 8, 17, 21, 25）
@@ -538,14 +695,16 @@ fn detect_java_major(java_path: &str) -> u32 {
         .arg("-version")
         .creation_flags(0x08000000)
         .output();
-    let Ok(out) = output else { return 8; };
+    let Ok(out) = output else {
+        return 8;
+    };
     // java -version 输出到 stderr
     let ver_str = String::from_utf8_lossy(&out.stderr);
     // 匹配 "1.8.0" 或 "17.0.1" 或 "25.0.1" 等
     for line in ver_str.lines() {
         if let Some(start) = line.find('"') {
-            if let Some(end) = line[start+1..].find('"') {
-                let ver = &line[start+1..start+1+end];
+            if let Some(end) = line[start + 1..].find('"') {
+                let ver = &line[start + 1..start + 1 + end];
                 let parts: Vec<&str> = ver.split('.').collect();
                 if let Some(first) = parts.first() {
                     if let Ok(major) = first.parse::<u32>() {
@@ -565,7 +724,9 @@ fn detect_java_major(java_path: &str) -> u32 {
 /// 读取最新的 crash-report 文件内容（如果存在且是最近 2 分钟内的）
 fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
     let crash_dir = game_dir.join("crash-reports");
-    if !crash_dir.exists() { return String::new(); }
+    if !crash_dir.exists() {
+        return String::new();
+    }
     let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     if let Ok(entries) = std::fs::read_dir(&crash_dir) {
         for entry in entries.flatten() {
@@ -586,7 +747,11 @@ fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
         if time.elapsed().map_or(true, |d| d.as_secs() < 120) {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let lines: Vec<&str> = content.lines().collect();
-                let start = if lines.len() > 100 { lines.len() - 100 } else { 0 };
+                let start = if lines.len() > 100 {
+                    lines.len() - 100
+                } else {
+                    0
+                };
                 return lines[start..].join("\n");
             }
         }
@@ -594,26 +759,43 @@ fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
     String::new()
 }
 
-
 /// 安全地只读取文件末尾最多 max_lines 行（最大读取 1MB），避免大日志 OOM
 fn read_tail_lines(path: &std::path::Path, max_lines: usize) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else { return String::new() };
-    let Ok(metadata) = file.metadata() else { return String::new() };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(metadata) = file.metadata() else {
+        return String::new();
+    };
     let file_size = metadata.len();
     // 最多读取 1MB
     let read_size = std::cmp::min(file_size, 1024 * 1024) as usize;
-    if read_size == 0 { return String::new(); }
+    if read_size == 0 {
+        return String::new();
+    }
     let offset = file_size - read_size as u64;
-    if file.seek(SeekFrom::Start(offset)).is_err() { return String::new(); }
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        return String::new();
+    }
     let mut buf = vec![0u8; read_size];
-    let Ok(n) = file.read(&mut buf) else { return String::new() };
+    let Ok(n) = file.read(&mut buf) else {
+        return String::new();
+    };
     buf.truncate(n);
     let content = String::from_utf8_lossy(&buf);
     let lines: Vec<&str> = content.lines().collect();
-    let start = if lines.len() > max_lines { lines.len() - max_lines } else { 0 };
+    let start = if lines.len() > max_lines {
+        lines.len() - max_lines
+    } else {
+        0
+    };
     // 如果从文件中间开始读取，第一行可能是不完整的，跳过它
-    let start = if offset > 0 && start == 0 && !lines.is_empty() { 1 } else { start };
+    let start = if offset > 0 && start == 0 && !lines.is_empty() {
+        1
+    } else {
+        start
+    };
     lines[start..].join("\n")
 }
 
@@ -623,11 +805,20 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
 
     // 按优先级匹配常见错误模式
     let patterns: Vec<(&str, &str)> = vec![
-        // Mod 不兼容（Fabric Loader 弹窗）
+        // Mod/Forge 加载错误
+        ("missing mods", "❌ 缺少前置 Mod！\n有 Mod 需要的前置依赖未安装。\n请检查游戏日志确认缺少哪些 Mod，然后安装对应的前置 Mod。"),
+        ("there were errors previously", "❌ Forge Mod 加载出错！\n有 Mod 缺少依赖或版本不匹配，游戏无法启动。\n请检查 Mod 列表和前置依赖是否完整。"),
+        ("errors loading minecraft", "❌ Mod 加载失败！\n有 Mod 缺少依赖或版本不匹配。\n请检查 Mod 的前置依赖是否已安装，以及 Forge 版本是否满足要求。"),
+        ("missing or unsupported mandatory dependencies", "❌ 缺少必要的 Mod 依赖！\n请根据提示安装缺失的前置 Mod。"),
         ("incompatible mods found", "❌ 发现不兼容的 Mod！\nMod 之间存在版本冲突或缺少依赖。\n请根据弹窗提示安装/更新对应的 Mod。"),
-        // Java 版本问题
-        ("unsupportedclassversionerror", "❌ Java 版本不对！\n该游戏版本需要更高版本的 Java。\n请在设置中切换为「自动选择 Java」。"),
+        // Java 版本问题（优先级高的放前面）
+        ("sun-misc-unsafe-memory-access", "❌ Java 版本过低！\n参数 --sun-misc-unsafe-memory-access 需要 Java 25 才支持。\nMinecraft 26.1+ 需要 Java 25，请在设置中选择 Java 25 的路径。"),
+        ("unrecognized option", "❌ Java 版本过低，无法识别启动参数！\nMinecraft 26.1+ 需要 Java 25，请在设置中选择正确的 Java 版本。"),
+        ("could not create the java virtual machine", "❌ 无法创建 Java 虚拟机！\nJava 版本与游戏不匹配。\nMinecraft 26.1+ 需要 Java 25，1.21-26.0 需要 Java 21，1.17-1.20 需要 Java 17，1.16 及以下需要 Java 8。"),
+        ("urlclassloader", "❌ Java 版本不兼容！\n该游戏版本需要 Java 8，但当前使用的是 Java 9 或更高版本。\nURLClassLoader 在 Java 9+ 中已被移除。\n解决方案：请在设置中选择 Java 8（1.8）路径。"),
         ("has been compiled by a more recent version", "❌ Java 版本过低！\n请升级 Java 或使用自动选择模式。"),
+        ("unsupportedclassversionerror", "❌ Java 版本不对！\n该游戏版本需要更高版本的 Java。\n请在设置中切换为合适的 Java 版本。"),
+        ("java.lang.classcastexception", "❌ 类型转换异常！\n可能是 Java 版本不匹配或 Mod 冲突。\n如果是 1.12.2 等老版本，请使用 Java 8。"),
         ("java.lang.unsupportedoperationexception", "❌ Java 版本不兼容，请尝试其他 Java 版本。"),
         // 内存不足
         ("outofmemoryerror", "❌ 内存不足！\n请在设置中增加内存分配（建议至少 4096MB）。"),
@@ -648,6 +839,30 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
         // natives 问题
         ("no lwjgl", "❌ 缺少 LWJGL 本地库！\n请重新安装此版本。"),
         ("unsatisfiedlinkerror", "❌ 本地库加载失败！\n可能是 natives 文件缺失或损坏。\n请删除实例的 natives 文件夹后重试。"),
+        // 显卡/OpenGL 问题
+        ("pixel format not accelerated", "❌ 显卡不支持 OpenGL！\n请更新显卡驱动或检查是否使用了核显。\n笔记本用户请确保游戏使用独立显卡运行。"),
+        ("opengl", "⚠️ OpenGL 相关错误！\n请更新显卡驱动，或尝试降低游戏画质设置。"),
+        ("gl error", "⚠️ 显卡渲染出错！\n请更新显卡驱动。"),
+        // 着色器
+        ("shader", "⚠️ 着色器加载失败！\n当前光影可能与游戏版本不兼容。\n请删除或更换光影包后重试。"),
+        // 堆栈溢出
+        ("stackoverflowerror", "❌ 堆栈溢出！\n可能是 Mod 之间循环引用或递归过深。\n请排查最近安装的 Mod。"),
+        // Mod 重复
+        ("duplicate", "⚠️ 检测到重复的 Mod！\n请检查 mods 文件夹是否有同一个 Mod 的多个版本。"),
+        // 权限问题
+        ("access is denied", "❌ 文件访问被拒绝！\n请以管理员身份运行，或检查游戏目录权限。"),
+        ("permission denied", "❌ 权限不足！\n请检查游戏文件夹的权限设置。"),
+        // Fabric 特定
+        ("fabric.mod.json", "❌ Fabric Mod 配置无效！\n某个 Mod 的 fabric.mod.json 文件损坏或格式错误。"),
+        ("requires fabric", "❌ Mod 需要 Fabric 加载器！\n请确认已安装 Fabric Loader。"),
+        ("requires quilt", "❌ Mod 需要 Quilt 加载器！\n请安装 Quilt Loader 后重试。"),
+        // 世界损坏
+        ("corrupt", "⚠️ 文件可能已损坏！\n游戏文件或存档可能损坏。\n请尝试恢复备份或重新安装。"),
+        // 端口占用
+        ("address already in use", "❌ 端口被占用！\n可能有其他 Minecraft 实例正在运行。\n请关闭后重试。"),
+        // Java 进程崩溃（JVM crash）
+        ("exception_access_violation", "❌ Java 进程崩溃（严重错误）！\n可能是显卡驱动或 Java 版本问题。\n请更新显卡驱动和 Java 版本。"),
+        ("sigsegv", "❌ Java 进程崩溃（段错误）！\n请更新 Java 版本和显卡驱动。"),
     ];
 
     for (pattern, msg) in &patterns {
@@ -657,13 +872,18 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
     }
 
     // 未匹配到已知模式，显示日志最后几行
-    let last_lines: Vec<&str> = log.lines().rev()
+    let last_lines: Vec<&str> = log
+        .lines()
+        .rev()
         .filter(|l| !l.trim().is_empty())
         .take(8)
         .collect();
 
     if last_lines.is_empty() {
-        format!("❌ 游戏崩溃，但日志文件为空。\n退出码: {}\n请检查 Java 路径是否正确。", exit_code)
+        format!(
+            "❌ 游戏崩溃，但日志文件为空。\n退出码: {}\n请检查 Java 路径是否正确。",
+            exit_code
+        )
     } else {
         let mut result = String::from("❌ 游戏崩溃，以下是日志最后几行：\n\n");
         for line in last_lines.iter().rev() {

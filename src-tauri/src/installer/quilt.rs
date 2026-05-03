@@ -14,15 +14,23 @@ pub fn install_quilt(
 ) -> Result<(), String> {
     let emit = make_emitter(app_handle, name);
 
-    emit("quilt", 0, 1, &format!("处理 Quilt Loader {}...", loader_version));
+    emit(
+        "quilt",
+        0,
+        1,
+        &format!("处理 Quilt Loader {}...", loader_version),
+    );
 
     let profile_url = format!(
         "https://meta.quiltmc.org/v3/versions/loader/{}/{}/profile/json",
         mc_version, loader_version
     );
-    let profile_resp = http.get(&profile_url).send()
+    let profile_resp = http
+        .get(&profile_url)
+        .send()
         .map_err(|e| format!("获取 Quilt 配置失败: {}", e))?;
-    let quilt_profile: serde_json::Value = profile_resp.json()
+    let quilt_profile: serde_json::Value = profile_resp
+        .json()
         .map_err(|e| format!("解析 Quilt 配置失败: {}", e))?;
 
     // 下载 Quilt 库
@@ -31,12 +39,18 @@ pub fn install_quilt(
 
         for lib in quilt_libs {
             let name_str = lib["name"].as_str().unwrap_or("");
-            let maven_url = lib["url"].as_str().unwrap_or("https://maven.quiltmc.org/repository/release/");
+            let maven_url = lib["url"]
+                .as_str()
+                .unwrap_or("https://maven.quiltmc.org/repository/release/");
             let sha1 = lib["sha1"].as_str();
 
-            if name_str.is_empty() { continue; }
+            if name_str.is_empty() {
+                continue;
+            }
             let parts: Vec<&str> = name_str.split(':').collect();
-            if parts.len() < 3 { continue; }
+            if parts.len() < 3 {
+                continue;
+            }
             let group_path = parts[0].replace('.', "/");
             let artifact = parts[1];
             let version = parts[2];
@@ -45,30 +59,50 @@ pub fn install_quilt(
             } else {
                 format!("{}-{}.jar", artifact, version)
             };
-            let url = format!("{}{}/{}/{}/{}", maven_url, group_path, artifact, version, jar_name);
-            let dest = game_dir.join("libs").join(&group_path).join(artifact).join(version).join(&jar_name);
+            let url = format!(
+                "{}{}/{}/{}/{}",
+                maven_url, group_path, artifact, version, jar_name
+            );
+            let dest = game_dir
+                .join("libs")
+                .join(&group_path)
+                .join(artifact)
+                .join(version)
+                .join(&jar_name);
             quilt_tasks.push((url, dest, sha1.map(|s| s.to_string())));
         }
         let total = quilt_tasks.len();
         emit("quilt", 0, total, &format!("下载 Quilt 库 0/{}", total));
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let handles: Vec<_> = quilt_tasks.into_iter().map(|(url, dest, sha1)| {
-            let done = done.clone();
-            let h = http.clone();
-            std::thread::spawn(move || {
-                let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handles: Vec<_> = quilt_tasks
+            .into_iter()
+            .map(|(url, dest, sha1)| {
+                let done = done.clone();
+                let h = http.clone();
+                std::thread::spawn(move || {
+                    let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })
             })
-        }).collect();
+            .collect();
 
         loop {
             let finished = done.load(std::sync::atomic::Ordering::Relaxed);
-            emit("quilt", finished, total, &format!("Quilt 库 {}/{}", finished, total));
-            if finished >= total { break; }
+            emit(
+                "quilt",
+                finished,
+                total,
+                &format!("Quilt 库 {}/{}", finished, total),
+            );
+            if finished >= total {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        for h in handles { let _ = h.join(); }
+        for h in handles {
+            let _ = h.join();
+        }
         emit("quilt", total, total, "Quilt 库下载完成");
     }
 
