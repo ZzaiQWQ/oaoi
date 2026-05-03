@@ -320,8 +320,8 @@
               <div class="set-card set-card-perf">
                 <!-- Tab 切换 -->
                 <div class="dl-top-tabs" style="margin-bottom:6px;">
-                  <button type="button" class="dl-top-tab set-left-tab active" data-set-tab="perf">⚙️ 性能分配</button>
-                  <button type="button" class="dl-top-tab set-left-tab" data-set-tab="ai">🤖 AI 崩溃分析</button>
+                  <button type="button" class="dl-top-tab set-left-tab active" data-set-tab="perf">性能分配</button>
+                  <button type="button" class="dl-top-tab set-left-tab" data-set-tab="ai">AI 崩溃分析</button>
                 </div>
                 <!-- 性能分配内容 -->
                 <div class="set-tab-content" id="setTabPerf">
@@ -329,7 +329,7 @@
                     <label>游戏目录 (Game Directory)</label>
                     <div class="set-path-row">
                       <div class="set-path-input" id="gameDirDisplay">未选择目录</div>
-                      <button class="set-browse-btn" id="gameDirBtn">📁 选择目录</button>
+                      <button class="set-browse-btn" id="gameDirBtn">选择目录</button>
                     </div>
                   </div>
                   <div class="set-divider"></div>
@@ -362,10 +362,8 @@
                   <div class="set-field">
                     <label>Java 运行环境 (Java Executable Path)</label>
                     <div class="java-mode-toggle">
-                      <button type="button" class="java-mode-btn active" id="javaModeAuto" data-mode="auto">🔄
-                        自动选择</button>
-                      <button type="button" class="java-mode-btn" id="javaModeManual" data-mode="manual">📂
-                        手动选择</button>
+                      <button type="button" class="java-mode-btn active" id="javaModeAuto" data-mode="auto">自动选择</button>
+                      <button type="button" class="java-mode-btn" id="javaModeManual" data-mode="manual">手动选择</button>
                     </div>
                     <div class="java-auto-desc" id="javaAutoDesc">
                       <p>如未安装对应 Java 将自动下载，安装到 <code>runtime/</code> 目录</p>
@@ -374,11 +372,11 @@
                       <div class="set-path-row">
                         <div class="set-path-input" id="javaPathDisplay">未检测到 Java</div>
                         <button class="set-browse-btn" id="javaBrowseBtn">浏览...</button>
-                        <button class="set-browse-btn set-auto-btn" id="javaAutoBtn">🔍 自动查找</button>
+                        <button class="set-browse-btn set-auto-btn" id="javaAutoBtn">自动查找</button>
                       </div>
                       <div class="java-results" id="javaResults">
                         <div class="java-results-header" id="javaResultsToggle">
-                          <span>📋 搜索到的 Java 版本 (<span id="javaCount">0</span>)</span>
+                          <span>搜索到的 Java 版本 (<span id="javaCount">0</span>)</span>
                           <span class="java-results-arrow" id="javaArrow">▶</span>
                         </div>
                         <div class="java-results-list" id="javaResultsList"></div>
@@ -409,19 +407,19 @@
                   </div>
                   <div class="set-divider"></div>
                   <div class="ai-actions">
-                    <button class="set-browse-btn" id="aiTestBtn" style="flex:0 0 auto;">🧪 测试连接</button>
+                    <button class="set-browse-btn" id="aiTestBtn" style="flex:0 0 auto;">测试连接</button>
                     <span class="ai-test-result" id="aiTestResult"></span>
                   </div>
                 </div>
               </div>
               <div class="set-card set-card-display">
-                <h2 class="set-card-title">🔑 账户管理</h2>
+                <h2 class="set-card-title">账户管理</h2>
                 <div class="set-field">
                   <label>正版账号列表 (Microsoft Accounts)</label>
                   <div class="account-list" id="accountList">
                     <!-- 动态生成账号卡片 -->
                   </div>
-                  <button class="set-browse-btn" id="msLoginBtn" style="margin-top:8px;width:100%">➕ 添加微软账号</button>
+                  <button class="set-browse-btn" id="msLoginBtn" style="margin-top:8px;width:100%">添加微软账号</button>
                   <div id="msLoginStatus" style="font-size:11px;color:var(--text-light);margin-top:4px;display:none">
                   </div>
                 </div>
@@ -518,7 +516,7 @@
 
               <!-- 背景图片 -->
               <div class="diy-section">
-                <div class="diy-section-title"><span>🖼️</span> 背景图片</div>
+                <div class="diy-section-title">背景图片</div>
                 <div class="diy-bg-grid">
                   <div class="diy-bg-item active" data-bg="assets/bg.png">
                     <img src="assets/bg.png" alt="默认背景">
@@ -533,7 +531,6 @@
                     <div class="diy-bg-label">甜心之城</div>
                   </div>
                   <div class="diy-bg-item diy-bg-custom" id="diyCustomBg">
-                    <span>📁</span>
                     <span>自定义</span>
                   </div>
                 </div>
@@ -541,7 +538,7 @@
 
               <!-- 樱花动画 -->
               <div class="diy-section">
-                <div class="diy-section-title"><span>🌸</span> 樱花动画</div>
+                <div class="diy-section-title">樱花动画</div>
                 <div class="diy-row">
                   <div>
                     <div class="diy-row-label">飘落花瓣</div>
@@ -581,7 +578,7 @@
 
               <!-- 主题色 -->
               <div class="diy-section">
-                <div class="diy-section-title"><span>🎨</span> 主题色</div>
+                <div class="diy-section-title">主题色</div>
                 <div class="diy-theme-grid">
                   <button class="diy-theme-btn active" data-theme="pink" style="--tc:#ff6b8a;">
                     <span class="diy-theme-dot"></span> 樱花粉
@@ -603,7 +600,7 @@
 
               <!-- 界面调整 -->
               <div class="diy-section">
-                <div class="diy-section-title"><span>⚙️</span> 界面调整</div>
+                <div class="diy-section-title">界面调整</div>
                 <div class="diy-slider-row">
                   <label>背景模糊 <small style="color:var(--text-light);font-weight:400">(降低可减少GPU占用)</small></label>
                   <input type="range" id="diyBlurRadius" min="0" max="30" value="1">
@@ -624,19 +621,19 @@
 
               <!-- 窗口大小 -->
               <div class="diy-section">
-                <div class="diy-section-title"><span>📐</span> 窗口大小</div>
+                <div class="diy-section-title">窗口大小</div>
                 <div class="diy-row">
                   <div>
                     <div class="diy-row-label">当前窗口大小</div>
                     <div class="diy-row-desc" id="diyWindowSizeDisplay">800 × 480</div>
                   </div>
                   <button class="diy-reset-btn" id="diyResetWindowSize"
-                    style="margin:0;padding:6px 16px;font-size:12px;">↩ 恢复默认 (800×480)</button>
+                    style="margin:0;padding:6px 16px;font-size:12px;">恢复默认 (800×480)</button>
                 </div>
               </div>
 
               <!-- 重置 -->
-              <button class="diy-reset-btn" id="diyResetBtn">🔄 恢复默认设置</button>
+              <button class="diy-reset-btn" id="diyResetBtn">恢复默认设置</button>
 
             </div>
           </div>
