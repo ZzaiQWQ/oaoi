@@ -171,7 +171,7 @@ function initSettings() {
       // 已在等待中 → 用户点击取消
       if (msLoginPending) {
         msLoginPending = false;
-        msLoginBtn.textContent = '➕ 添加微软账号';
+        msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
         if (msLoginStatus) { msLoginStatus.textContent = '已取消登录'; setTimeout(() => { msLoginStatus.style.display = 'none'; }, 2000); }
         // 通知后端停止等待
@@ -181,7 +181,7 @@ function initSettings() {
       try {
         const tauri = await waitForTauri();
         msLoginPending = true;
-        msLoginBtn.textContent = '✕ 取消登录';
+        msLoginBtn.textContent = '取消登录';
         msLoginBtn.disabled = false; // 保持可点击，用于取消
         if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = '请在浏览器中完成微软登录...'; }
 
@@ -195,16 +195,16 @@ function initSettings() {
         saveAccounts(accs);
         renderAccountList();
 
-        msLoginBtn.textContent = '➕ 添加微软账号';
+        msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
-        if (msLoginStatus) { msLoginStatus.textContent = `✅ ${profile.name} 登录成功`; setTimeout(() => { msLoginStatus.style.display = 'none'; }, 3000); }
+        if (msLoginStatus) { msLoginStatus.textContent = `${profile.name} 登录成功`; setTimeout(() => { msLoginStatus.style.display = 'none'; }, 3000); }
         updateSidebarPlayer(profile.name, profile.uuid);
         if (typeof setLoginMode === 'function') setLoginMode('online');
       } catch (e) {
         msLoginPending = false;
-        msLoginBtn.textContent = '➕ 添加微软账号';
+        msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
-        if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = `❌ 登录失败: ${e}`; }
+        if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = `登录失败: ${e}`; }
       }
     });
   }
@@ -446,7 +446,7 @@ function initSettings() {
   if (javaAutoBtn && javaPathDisplay) {
     javaAutoBtn.addEventListener('click', async () => {
       javaAutoBtn.disabled = true;
-      javaAutoBtn.textContent = '⏳ 搜索中...';
+      javaAutoBtn.textContent = '搜索中...';
       javaPathDisplay.textContent = '正在搜索...';
       javaResultsList.innerHTML = '';
 
@@ -467,16 +467,16 @@ function initSettings() {
           renderJavaList(javas, selected.path);
           console.log(`☕ 找到 ${javas.length} 个 Java (推荐: Java ${recommendedMajor})`);
         } else {
-          javaPathDisplay.textContent = '❌ 未找到 Java';
+          javaPathDisplay.textContent = '未找到 Java';
           javaResults.classList.remove('has-results');
         }
       } catch (e) {
-        javaPathDisplay.textContent = '❌ 搜索失败';
+        javaPathDisplay.textContent = '搜索失败';
         console.log('⚠️ 自动搜索失败:', e);
       }
 
       javaAutoBtn.disabled = false;
-      javaAutoBtn.textContent = '🔍 自动查找';
+      javaAutoBtn.textContent = '自动查找';
     });
 
     // 手动模式下，如果从未搜索过 Java，首次自动搜索一次
@@ -532,27 +532,27 @@ function initAiSettings() {
       const key   = apiKeyInput.value.trim();
       const url   = apiUrlInput.value.trim();
       const model = modelInput.value.trim();
-      if (!key) { testResult.textContent = '❌ 请先填写 API Key'; testResult.style.color = '#ef4444'; return; }
-      if (!url) { testResult.textContent = '❌ 请先填写 API 地址'; testResult.style.color = '#ef4444'; return; }
+      if (!key) { testResult.textContent = '请先填写 API Key'; testResult.style.color = '#ef4444'; return; }
+      if (!url) { testResult.textContent = '请先填写 API 地址'; testResult.style.color = '#ef4444'; return; }
 
-      testResult.textContent = '⏳ 测试中...';
+      testResult.textContent = '测试中...';
       testResult.style.color = 'var(--text-mid)';
       testBtn.disabled = true;
 
       try {
         const resp = await callAiApi(key, url, model, '你好，请回复"连接成功"四个字。');
         if (resp) {
-          testResult.textContent = '✅ 连接成功：' + resp.substring(0, 30);
+          testResult.textContent = '连接成功：' + resp.substring(0, 30);
           testResult.style.color = '#22c55e';
           localStorage.setItem('ai_enabled', 'true');
           showDisconnectBtn();
         } else {
-          testResult.textContent = '❌ 无响应';
+          testResult.textContent = '无响应';
           testResult.style.color = '#ef4444';
         }
       } catch (e) {
         const errMsg = typeof e === 'string' ? e : (e.message || JSON.stringify(e) || '连接失败');
-        testResult.textContent = '❌ ' + errMsg;
+        testResult.textContent = errMsg;
         testResult.style.color = '#ef4444';
         console.error('[AI Test]', e);
       }
@@ -576,7 +576,7 @@ function initAiSettings() {
     dcBtn.textContent = '断开连接';
     dcBtn.onclick = () => {
       localStorage.setItem('ai_enabled', 'false');
-      testResult.textContent = '⏸️ 已断开（数据已保留，点击测试连接可重新启用）';
+      testResult.textContent = '已断开（数据已保留，点击测试连接可重新启用）';
       testResult.style.color = 'var(--text-mid)';
       dcBtn.style.display = 'none';
     };
@@ -586,10 +586,10 @@ function initAiSettings() {
   if (apiKeyInput.value && apiUrlInput.value) {
     const enabled = localStorage.getItem('ai_enabled') !== 'false';
     if (enabled) {
-      testResult.textContent = '✅ 已配置';
+      testResult.textContent = '已配置';
       testResult.style.color = '#22c55e';
     } else {
-      testResult.textContent = '⏸️ 已断开（点击测试连接可重新启用）';
+      testResult.textContent = '已断开（点击测试连接可重新启用）';
       testResult.style.color = 'var(--text-mid)';
     }
     showDisconnectBtn();

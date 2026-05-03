@@ -20,17 +20,12 @@
 .diy-section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-dark);
   margin-bottom: 10px;
   padding-bottom: 6px;
   border-bottom: 2px solid var(--pink-200);
-}
-
-.diy-section-title span {
-  font-size: 18px;
 }
 
 /* ---- 背景选择 ---- */
@@ -87,10 +82,6 @@
   font-size: 13px;
   flex-direction: column;
   gap: 4px;
-}
-
-.diy-bg-custom span:first-child {
-  font-size: 20px;
 }
 
 /* ---- 开关控件 ---- */
