@@ -1,10 +1,10 @@
 use serde::Serialize;
-use sysinfo::System;
-use std::path::Path;
-use std::process::Command;
 use std::collections::HashSet;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::Path;
+use std::process::Command;
+use sysinfo::System;
 
 #[derive(Serialize, Clone)]
 pub struct JavaInfo {
@@ -16,13 +16,19 @@ pub struct JavaInfo {
 #[tauri::command]
 pub fn get_system_memory() -> u64 {
     let sys = System::new_with_specifics(
-        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything())
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
     );
     sys.total_memory() / 1024 / 1024
 }
 
 #[tauri::command]
-pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
+pub async fn find_java(game_dir: Option<String>) -> Result<Vec<JavaInfo>, String> {
+    tokio::task::spawn_blocking(move || find_java_blocking(game_dir))
+        .await
+        .map_err(|e| format!("Java 扫描线程失败: {}", e))
+}
+
+pub fn find_java_blocking(game_dir: Option<String>) -> Vec<JavaInfo> {
     let mut results = Vec::new();
     let mut checked = HashSet::new();
 
@@ -42,7 +48,14 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
             if let Ok(entries) = std::fs::read_dir(&runtime_base) {
                 for entry in entries.flatten() {
                     if entry.path().is_dir() {
-                        try_java(entry.path().join("bin").join("java.exe").to_string_lossy().to_string());
+                        try_java(
+                            entry
+                                .path()
+                                .join("bin")
+                                .join("java.exe")
+                                .to_string_lossy()
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -50,11 +63,17 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
     }
 
     // 1. where java (PATH)
-    if let Ok(output) = Command::new("where").arg("java").creation_flags(0x08000000).output() {
+    if let Ok(output) = Command::new("where")
+        .arg("java")
+        .creation_flags(0x08000000)
+        .output()
+    {
         if let Ok(stdout) = String::from_utf8(output.stdout) {
             for line in stdout.lines() {
                 let path = line.trim().to_string();
-                if !path.is_empty() { try_java(path); }
+                if !path.is_empty() {
+                    try_java(path);
+                }
             }
         }
     }
@@ -91,7 +110,10 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
 
     // 4. 扫描常见安装路径
     let known_names = [
-        "Java", "java", "jdk", "jre",
+        "Java",
+        "java",
+        "jdk",
+        "jre",
         "Program Files\\Java",
         "Program Files (x86)\\Java",
         "Program Files\\Eclipse Adoptium",
@@ -110,7 +132,9 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
         for name in &known_names {
             let base = format!("{}:\\{}", drive, name);
             let base_path = Path::new(&base);
-            if !base_path.exists() { continue; }
+            if !base_path.exists() {
+                continue;
+            }
             try_java(format!("{}\\bin\\java.exe", base));
             if let Ok(entries) = std::fs::read_dir(base_path) {
                 for entry in entries.flatten() {
@@ -120,7 +144,13 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
                         if let Ok(inner) = std::fs::read_dir(&p) {
                             for ie in inner.flatten() {
                                 if ie.path().is_dir() {
-                                    try_java(ie.path().join("bin").join("java.exe").to_string_lossy().to_string());
+                                    try_java(
+                                        ie.path()
+                                            .join("bin")
+                                            .join("java.exe")
+                                            .to_string_lossy()
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -134,12 +164,20 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if !p.is_dir() { continue; }
+                if !p.is_dir() {
+                    continue;
+                }
                 try_java(p.join("bin").join("java.exe").to_string_lossy().to_string());
                 if let Ok(inner) = std::fs::read_dir(&p) {
                     for ie in inner.flatten() {
                         if ie.path().is_dir() {
-                            try_java(ie.path().join("bin").join("java.exe").to_string_lossy().to_string());
+                            try_java(
+                                ie.path()
+                                    .join("bin")
+                                    .join("java.exe")
+                                    .to_string_lossy()
+                                    .to_string(),
+                            );
                         }
                     }
                 }
@@ -151,11 +189,19 @@ pub fn find_java(game_dir: Option<String>) -> Vec<JavaInfo> {
 }
 
 fn get_java_info(path: &str) -> Option<JavaInfo> {
-    let output = Command::new(path).arg("-version").creation_flags(0x08000000).output().ok()?;
+    let output = Command::new(path)
+        .arg("-version")
+        .creation_flags(0x08000000)
+        .output()
+        .ok()?;
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let version = parse_java_version(&stderr)?;
     let major = extract_major(&version);
-    Some(JavaInfo { path: path.to_string(), version, major })
+    Some(JavaInfo {
+        path: path.to_string(),
+        version,
+        major,
+    })
 }
 
 fn parse_java_version(output: &str) -> Option<String> {
@@ -172,8 +218,12 @@ fn parse_java_version(output: &str) -> Option<String> {
 }
 
 fn extract_major(version: &str) -> u32 {
-    if version.starts_with("1.8") { return 8; }
-    version.split('.').next()
+    if version.starts_with("1.8") {
+        return 8;
+    }
+    version
+        .split('.')
+        .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
 }

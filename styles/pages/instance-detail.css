@@ -110,6 +110,101 @@
   transform: translateY(-1px);
 }
 
+.instance-settings-panel {
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(var(--blur-radius, 16px));
+  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.instance-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(130px, 0.8fr) minmax(180px, 1.5fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.instance-setting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.instance-setting-wide {
+  grid-column: 1 / -1;
+}
+
+.instance-setting-field span {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--pink-600);
+}
+
+.instance-setting-field input,
+.instance-setting-field select {
+  height: 30px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--pink-700);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  padding: 0 10px;
+}
+
+.instance-setting-field input:focus,
+.instance-setting-field select:focus {
+  border-color: color-mix(in srgb, var(--pink-600) calc(0.55 * 100%), transparent);
+}
+
+.instance-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.instance-path-row button,
+.instance-settings-actions button {
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--pink-700);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 12px;
+}
+
+.instance-path-row button:hover,
+.instance-settings-actions button:hover {
+  background: color-mix(in srgb, var(--pink-200) calc(0.75 * 100%), transparent);
+}
+
+.instance-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#instanceSettingsSave {
+  color: white;
+  border-color: transparent;
+  background: var(--rose-gradient);
+}
+
+#instanceSettingsHint {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pink-600);
+}
+
 /* Mod 管理区域 */
 .mod-manager-section {
   background: rgba(255, 255, 255, 0.45);

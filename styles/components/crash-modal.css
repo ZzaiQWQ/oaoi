@@ -1,5 +1,3 @@
-/* ============ AI 崩溃分析弹窗 ============ */
-
 .crash-modal-overlay {
   position: fixed;
   inset: 0;
@@ -14,12 +12,12 @@
 
 @keyframes crashFadeIn {
   from { opacity: 0; }
-  to   { opacity: 1; }
+  to { opacity: 1; }
 }
 
 @keyframes crashSlideUp {
   from { transform: translateY(20px); opacity: 0; }
-  to   { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 .crash-modal {
@@ -134,81 +132,16 @@
   box-shadow: 0 6px 16px rgba(232, 69, 116, 0.4);
 }
 
-/* AI 分析加载动画 */
 .crash-loading-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #f472b6, #e84574);
-  animation: crashPulse 1s ease-in-out infinite;
-  box-shadow: -20px 0 0 #f9a8d4, 20px 0 0 #f9a8d4;
+  background: var(--pink-700, #be185d);
+  animation: crashDotPulse 1s infinite;
+  display: inline-block;
 }
 
-@keyframes crashPulse {
-  0%, 100% { transform: scale(1); opacity: 1; box-shadow: -20px 0 0 rgba(249,168,212,0.4), 20px 0 0 rgba(249,168,212,0.4); }
-  50% { transform: scale(1.3); opacity: 0.7; box-shadow: -20px 0 0 rgba(249,168,212,1), 20px 0 0 rgba(249,168,212,1); }
-}
-
-/* ============ 整合包拖拽蒙层 ============ */
-
-#modpackDropOverlay {
-  display: flex;
-  visibility: hidden;
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  background: rgba(255, 182, 200, 0.18);
-  backdrop-filter: blur(4px);
-  border: 3px dashed #e88fa8;
-  pointer-events: none;
-  transition: 0.2s;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 12px;
-  opacity: 0;
-}
-
-#modpackDropOverlay .drop-icon {
-  font-size: 48px;
-}
-
-#modpackDropOverlay .drop-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #c0426b;
-}
-
-#modpackDropOverlay .drop-desc {
-  font-size: 12px;
-  color: #a0607a;
-}
-
-/* ============ 设置页输入框通用样式 ============ */
-
-.set-text-input {
-  width: 100%;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1.5px solid rgba(255, 200, 215, 0.3);
-  border-radius: 10px;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--text-dark);
-  outline: none;
-}
-
-.set-mem-input {
-  width: 70px;
-  text-align: right;
-  background: transparent;
-  border: none;
-  border-bottom: 1.5px solid rgba(255, 120, 160, 0.4);
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--pink-700);
-  font-family: inherit;
-  outline: none;
-  padding: 2px 0;
+@keyframes crashDotPulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
 }

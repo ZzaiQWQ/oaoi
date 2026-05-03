@@ -1,10 +1,12 @@
 use serde::Serialize;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-fn ms_client_id() -> String { crate::secrets::get_ms_client_id() }
+fn ms_client_id() -> String {
+    crate::secrets::get_ms_client_id()
+}
 
 /// 登录取消标志
 static LOGIN_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -134,9 +136,11 @@ pub async fn refresh_ms_login(refresh_token: String) -> Result<McProfile, String
             ])
             .send()
             .map_err(|e| format!("刷新Token失败: {}", e))?;
-        let token_json: serde_json::Value = token_resp.json()
+        let token_json: serde_json::Value = token_resp
+            .json()
             .map_err(|e| format!("Token解析失败: {}", e))?;
-        let ms_token = token_json["access_token"].as_str()
+        let ms_token = token_json["access_token"]
+            .as_str()
             .ok_or_else(|| format!("刷新失败: {}", token_json))?;
         let new_refresh = token_json["refresh_token"].as_str().map(|s| s.to_string());
 
@@ -161,19 +165,32 @@ fn exchange_to_mc_profile(
             "Properties": { "AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": format!("d={}", ms_token) },
             "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"
         })).send().map_err(|e| format!("Xbox失败: {}", e))?;
-    let xbox_json: serde_json::Value = xbox_resp.json().map_err(|e| format!("Xbox解析失败: {}", e))?;
-    let xbox_token = xbox_json["Token"].as_str().ok_or(format!("Xbox Token空: {}", xbox_json))?;
-    let user_hash = xbox_json["DisplayClaims"]["xui"][0]["uhs"].as_str().ok_or(format!("UserHash空: {}", xbox_json))?;
+    let xbox_json: serde_json::Value = xbox_resp
+        .json()
+        .map_err(|e| format!("Xbox解析失败: {}", e))?;
+    let xbox_token = xbox_json["Token"]
+        .as_str()
+        .ok_or(format!("Xbox Token空: {}", xbox_json))?;
+    let user_hash = xbox_json["DisplayClaims"]["xui"][0]["uhs"]
+        .as_str()
+        .ok_or(format!("UserHash空: {}", xbox_json))?;
 
     // XSTS
-    let xsts_resp = client.post("https://xsts.auth.xboxlive.com/xsts/authorize")
+    let xsts_resp = client
+        .post("https://xsts.auth.xboxlive.com/xsts/authorize")
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbox_token] },
             "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"
-        })).send().map_err(|e| format!("XSTS失败: {}", e))?;
-    let xsts_json: serde_json::Value = xsts_resp.json().map_err(|e| format!("XSTS解析失败: {}", e))?;
-    let xsts_token = xsts_json["Token"].as_str().ok_or(format!("XSTS Token空: {}", xsts_json))?;
+        }))
+        .send()
+        .map_err(|e| format!("XSTS失败: {}", e))?;
+    let xsts_json: serde_json::Value = xsts_resp
+        .json()
+        .map_err(|e| format!("XSTS解析失败: {}", e))?;
+    let xsts_token = xsts_json["Token"]
+        .as_str()
+        .ok_or(format!("XSTS Token空: {}", xsts_json))?;
 
     // Minecraft 认证
     let mc_resp = client.post("https://api.minecraftservices.com/authentication/login_with_xbox")
@@ -183,19 +200,35 @@ fn exchange_to_mc_profile(
     let mc_status = mc_resp.status().as_u16();
     let mc_json: serde_json::Value = mc_resp.json().map_err(|e| format!("MC解析失败: {}", e))?;
     if mc_status != 200 {
-        let err = mc_json.get("error").map(|e| e.to_string()).unwrap_or_default();
-        let msg = mc_json.get("errorMessage").and_then(|m| m.as_str()).unwrap_or("未知错误");
+        let err = mc_json
+            .get("error")
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        let msg = mc_json
+            .get("errorMessage")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
         return Err(format!("MC登录失败({}): {} - {}", mc_status, err, msg));
     }
-    let mc_token = mc_json["access_token"].as_str().ok_or(format!("MC Token空: {}", mc_json))?;
+    let mc_token = mc_json["access_token"]
+        .as_str()
+        .ok_or(format!("MC Token空: {}", mc_json))?;
 
     // 玩家档案
-    let profile_resp = client.get("https://api.minecraftservices.com/minecraft/profile")
+    let profile_resp = client
+        .get("https://api.minecraftservices.com/minecraft/profile")
         .header("Authorization", format!("Bearer {}", mc_token))
-        .send().map_err(|e| format!("档案失败: {}", e))?;
-    let profile_json: serde_json::Value = profile_resp.json().map_err(|e| format!("档案解析失败: {}", e))?;
-    let name = profile_json["name"].as_str().ok_or(format!("无玩家名: {}", profile_json))?;
-    let uuid = profile_json["id"].as_str().ok_or(format!("无UUID: {}", profile_json))?;
+        .send()
+        .map_err(|e| format!("档案失败: {}", e))?;
+    let profile_json: serde_json::Value = profile_resp
+        .json()
+        .map_err(|e| format!("档案解析失败: {}", e))?;
+    let name = profile_json["name"]
+        .as_str()
+        .ok_or(format!("无玩家名: {}", profile_json))?;
+    let uuid = profile_json["id"]
+        .as_str()
+        .ok_or(format!("无UUID: {}", profile_json))?;
 
     Ok(McProfile {
         name: name.to_string(),

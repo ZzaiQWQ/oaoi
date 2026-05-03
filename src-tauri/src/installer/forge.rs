@@ -1,4 +1,7 @@
-use super::{download_file_if_needed, make_emitter, FORGE_LOCK, maven_name_to_path, build_data_map, resolve_data_arg, get_jar_main_class, merge_libraries};
+use super::{
+    build_data_map, download_file_if_needed, get_jar_main_class, make_emitter, maven_name_to_path,
+    merge_libraries, resolve_data_arg, FORGE_LOCK,
+};
 
 /// 安装 Forge loader（解压 installer.jar，自行下载库 + 执行 processors）
 pub fn install_forge(
@@ -38,7 +41,7 @@ pub fn install_forge(
         )
     };
     let installer_path = inst_dir.join("forge-installer.jar");
-    
+
     emit("forge", 5, 100, "下载 Forge 安装器...");
     download_file_if_needed(http, &installer_url, &installer_path, None, use_mirror)
         .map_err(|e| format!("下载 Forge 安装器失败: {}", e))?;
@@ -56,7 +59,9 @@ pub fn install_forge(
             if let Ok(mut entry) = archive.by_index(i) {
                 let out_path = temp_dir.join(entry.name());
                 // 防止 ZipSlip 路径穿越攻击
-                if !out_path.starts_with(&temp_dir) { continue; }
+                if !out_path.starts_with(&temp_dir) {
+                    continue;
+                }
                 if entry.is_dir() {
                     std::fs::create_dir_all(&out_path).ok();
                 } else {
@@ -79,7 +84,8 @@ pub fn install_forge(
         return Err("Forge installer 中未找到 version.json".to_string());
     }
     let forge_data = std::fs::read_to_string(&version_json_path).map_err(|e| e.to_string())?;
-    let parsed_forge: serde_json::Value = serde_json::from_str(&forge_data).map_err(|e| e.to_string())?;
+    let parsed_forge: serde_json::Value =
+        serde_json::from_str(&forge_data).map_err(|e| e.to_string())?;
 
     // 4. 读取 install_profile.json（processors 和依赖信息）
     let install_profile_path = temp_dir.join("install_profile.json");
@@ -114,24 +120,40 @@ pub fn install_forge(
         let lib_name = lib["name"].as_str().unwrap_or("");
 
         // 解析 Maven 坐标 → 文件路径
-        let (rel_path, artifact_url) = if let Some(artifact) = lib["downloads"]["artifact"].as_object() {
-            let path = artifact.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
-            let url = artifact.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-            (path, url)
-        } else if !lib_name.is_empty() {
-            // 没有 downloads，从 name 推导路径
-            let path = maven_name_to_path(lib_name);
-            let url_base = lib.get("url").and_then(|u| u.as_str()).unwrap_or("https://maven.minecraftforge.net");
-            let url = format!("{}/{}", url_base.trim_end_matches('/'), path);
-            (path, url)
-        } else {
-            continue;
-        };
+        let (rel_path, artifact_url) =
+            if let Some(artifact) = lib["downloads"]["artifact"].as_object() {
+                let path = artifact
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let url = artifact
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (path, url)
+            } else if !lib_name.is_empty() {
+                // 没有 downloads，从 name 推导路径
+                let path = maven_name_to_path(lib_name);
+                let url_base = lib
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("https://maven.minecraftforge.net");
+                let url = format!("{}/{}", url_base.trim_end_matches('/'), path);
+                (path, url)
+            } else {
+                continue;
+            };
 
-        if rel_path.is_empty() { continue; }
+        if rel_path.is_empty() {
+            continue;
+        }
         let dest = libs_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
-        if dest.exists() { continue; }
+        if dest.exists() {
+            continue;
+        }
 
         // 先检查 installer.jar 里的 maven/ 目录是否有本地副本
         let local_maven = temp_dir.join("maven").join(&rel_path);
@@ -140,20 +162,28 @@ pub fn install_forge(
                 std::fs::create_dir_all(parent).ok();
             }
             std::fs::copy(&local_maven, &dest).ok();
-            emit("forge", 30 + (downloaded * 40 / total_libs.max(1)), 100,
-                &format!("复制本地库 {}/{}", downloaded, total_libs));
+            emit(
+                "forge",
+                30 + (downloaded * 40 / total_libs.max(1)),
+                100,
+                &format!("复制本地库 {}/{}", downloaded, total_libs),
+            );
             continue;
         }
 
         // 下载
         if !artifact_url.is_empty() {
-            emit("forge", 30 + (downloaded * 40 / total_libs.max(1)), 100,
-                &format!("下载库 {}/{}", downloaded, total_libs));
+            emit(
+                "forge",
+                30 + (downloaded * 40 / total_libs.max(1)),
+                100,
+                &format!("下载库 {}/{}", downloaded, total_libs),
+            );
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
             match download_file_if_needed(http, &artifact_url, &dest, None, use_mirror) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[forge] 库下载失败(非致命): {} - {}", lib_name, e);
                 }
@@ -164,7 +194,8 @@ pub fn install_forge(
     // 6. 执行 Processors（运行 install_profile 定义的处理器链）
     if let Some(ref profile) = install_profile {
         if let Some(processors) = profile["processors"].as_array() {
-            let client_processors: Vec<&serde_json::Value> = processors.iter()
+            let client_processors: Vec<&serde_json::Value> = processors
+                .iter()
                 .filter(|p| {
                     if let Some(sides) = p["sides"].as_array() {
                         sides.iter().any(|s| s.as_str() == Some("client"))
@@ -177,13 +208,20 @@ pub fn install_forge(
             let total_proc = client_processors.len();
 
             for (i, proc) in client_processors.iter().enumerate() {
-                emit("forge", 70 + (i * 25 / total_proc.max(1)), 100,
-                    &format!("执行处理器 {}/{}...", i + 1, total_proc));
+                emit(
+                    "forge",
+                    70 + (i * 25 / total_proc.max(1)),
+                    100,
+                    &format!("执行处理器 {}/{}...", i + 1, total_proc),
+                );
 
                 let jar_name = proc["jar"].as_str().unwrap_or("");
-                if jar_name.is_empty() { continue; }
+                if jar_name.is_empty() {
+                    continue;
+                }
 
-                let jar_path = libs_dir.join(maven_name_to_path(jar_name).replace('/', std::path::MAIN_SEPARATOR_STR));
+                let jar_path = libs_dir
+                    .join(maven_name_to_path(jar_name).replace('/', std::path::MAIN_SEPARATOR_STR));
                 if !jar_path.exists() {
                     eprintln!("[forge] processor jar 不存在: {}", jar_path.display());
                     continue;
@@ -194,7 +232,10 @@ pub fn install_forge(
                 if let Some(classpath) = proc["classpath"].as_array() {
                     for cp in classpath {
                         if let Some(cp_name) = cp.as_str() {
-                            let cp_path = libs_dir.join(maven_name_to_path(cp_name).replace('/', std::path::MAIN_SEPARATOR_STR));
+                            let cp_path = libs_dir.join(
+                                maven_name_to_path(cp_name)
+                                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+                            );
                             if cp_path.exists() {
                                 proc_cp.push(cp_path.to_string_lossy().to_string());
                             }
@@ -204,7 +245,15 @@ pub fn install_forge(
 
                 // 构建参数，替换 data 变量
                 let client_jar = inst_dir.join("client.jar");
-                let data_map = build_data_map(profile, &libs_dir, &client_jar, &version_json_path, &installer_path, &temp_dir, mc_version);
+                let data_map = build_data_map(
+                    profile,
+                    &libs_dir,
+                    &client_jar,
+                    &version_json_path,
+                    &installer_path,
+                    &temp_dir,
+                    mc_version,
+                );
 
                 let mut proc_args: Vec<String> = Vec::new();
                 if let Some(args) = proc["args"].as_array() {
@@ -222,7 +271,10 @@ pub fn install_forge(
                     continue;
                 }
 
-                eprintln!("[forge] processor: {} main={} args={:?}", jar_name, main_class, proc_args);
+                eprintln!(
+                    "[forge] processor: {} main={} args={:?}",
+                    jar_name, main_class, proc_args
+                );
 
                 #[cfg(windows)]
                 use std::os::windows::process::CommandExt;
@@ -242,7 +294,11 @@ pub fn install_forge(
                     Ok(o) => {
                         if !o.status.success() {
                             let stderr = String::from_utf8_lossy(&o.stderr);
-                            eprintln!("[forge] processor 失败: {} - {}", jar_name, stderr.chars().take(300).collect::<String>());
+                            eprintln!(
+                                "[forge] processor 失败: {} - {}",
+                                jar_name,
+                                stderr.chars().take(300).collect::<String>()
+                            );
                         }
                     }
                     Err(e) => {
