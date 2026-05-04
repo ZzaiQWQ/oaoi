@@ -210,9 +210,3 @@ cargo build --release
 ```text
 src-tauri/target/release/oaoi.exe
 ```
-
-## 协议
-
-ARR / All Rights Reserved。
-
-未经授权，不允许复制、修改、分发或用于其他项目。

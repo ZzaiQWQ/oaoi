@@ -2,10 +2,27 @@ All Rights Reserved (ARR)
 
 Copyright (c) 2026 ZzaiQWQ
 
-All rights reserved. No part of this software, including source code, 
-documentation, and associated files, may be reproduced, distributed, 
-modified, or used in any form without the express written permission 
-of the copyright holder.
+This software and its associated source code, assets, documentation,
+images, interface design, and related files are protected by copyright.
+All rights are reserved by the copyright holder.
 
-Unauthorized copying, modification, distribution, or use of this 
-software is strictly prohibited.
+Permission is granted only to view this repository and its contents on
+the hosting platform. No other rights are granted unless explicit written
+permission is provided by the copyright holder.
+
+Without prior written permission, you may not:
+
+- copy, reproduce, mirror, or redistribute this project;
+- modify, adapt, fork for reuse, or create derivative works from this project;
+- publish, repackage, sell, sublicense, or commercially use this project;
+- use this project as the base of another launcher, client, product, or service;
+- remove, hide, or alter copyright notices or ownership information;
+- use the source code, assets, screenshots, documentation, or interface design
+  for another project;
+- use this project or its contents for model training, dataset creation, scraping,
+  or automated collection.
+
+Any unauthorized use, copying, modification, distribution, or commercial use is
+strictly prohibited.
+
+For permission requests, contact the copyright holder.
