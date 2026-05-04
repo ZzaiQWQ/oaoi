@@ -12,6 +12,17 @@ static MODCN_CACHE: std::sync::OnceLock<Vec<ModCnEntry>> = std::sync::OnceLock::
 /// 编译时嵌入的 gzip 压缩 modcn 数据
 const MODCN_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/modcn_data.gz"));
 
+fn clean_modcn_field(value: &str) -> String {
+    value
+        .replace('\u{1f50d}', "")
+        .replace('\u{fe0f}', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
 /// 加载 modcn 数据（从嵌入的 gzip 解压），使用 OnceLock 全局缓存
 pub fn load_modcn() -> &'static Vec<ModCnEntry> {
     MODCN_CACHE.get_or_init(|| {
@@ -28,9 +39,9 @@ pub fn load_modcn() -> &'static Vec<ModCnEntry> {
             let parts: Vec<&str> = line.splitn(3, '|').collect();
             if parts.len() >= 2 {
                 entries.push(ModCnEntry {
-                    abbr: parts.first().unwrap_or(&"").to_string(),
-                    cn_name: parts.get(1).unwrap_or(&"").to_string(),
-                    en_name: parts.get(2).unwrap_or(&"").to_string(),
+                    abbr: clean_modcn_field(parts.first().unwrap_or(&"")),
+                    cn_name: clean_modcn_field(parts.get(1).unwrap_or(&"")),
+                    en_name: clean_modcn_field(parts.get(2).unwrap_or(&"")),
                 });
             }
         }
@@ -102,7 +113,7 @@ pub fn search_modcn_fuzzy(query: &str, entries: &[ModCnEntry]) -> Vec<(String, S
     }
 
     matches.sort_by(|a, b| b.2.cmp(&a.2));
-    matches.truncate(10);
+    matches.truncate(20);
     eprintln!(
         "[fuzzy] '{}' -> {} 个匹配: {:?}",
         query,

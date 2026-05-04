@@ -32,3 +32,75 @@
   background: #4ade80;
   border-radius: 50%;
 }
+
+/* Java 下载进度弹窗 */
+.java-download-modal {
+  background: color-mix(in srgb, var(--pink-300) calc(0.18 * 100%), transparent);
+}
+
+.java-download-card {
+  width: 360px;
+  max-width: calc(100vw - 48px);
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.35 * 100%), transparent);
+  box-shadow: 0 16px 46px color-mix(in srgb, var(--pink-600) calc(0.22 * 100%), transparent);
+}
+
+.java-download-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.java-download-title {
+  font-size: 18px;
+  font-weight: 900;
+  color: var(--pink-700);
+}
+
+.java-download-subtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pink-600);
+}
+
+.java-download-percent {
+  min-width: 64px;
+  text-align: right;
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--pink-600);
+}
+
+.java-download-bar-wrap {
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--pink-200) calc(0.6 * 100%), transparent);
+}
+
+.java-download-bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--rose-gradient);
+  transition: width 0.18s ease;
+}
+
+.java-download-bar.error {
+  background: linear-gradient(135deg, #fb7185 0%, #ef4444 100%);
+}
+
+.java-download-detail {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-mid);
+  min-height: 18px;
+  word-break: break-word;
+}

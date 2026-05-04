@@ -63,6 +63,53 @@ function initSettings() {
   function setActiveIdx(idx) { localStorage.setItem('activeAccountIdx', String(idx)); }
 
   const _escHtml = escapeHtml; // 使用全局 utils.js 中的 escapeHtml
+  function avatarFallbackDataUrl(size) {
+    const s = size;
+    const u = s / 8;
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 ${s} ${s}" shape-rendering="crispEdges">
+        <rect width="${s}" height="${s}" fill="#2d1f2a"/>
+        <rect x="${u}" y="${u}" width="${u * 6}" height="${u * 6}" fill="#c68655"/>
+        <rect x="${u}" y="${u}" width="${u * 6}" height="${u}" fill="#5b3724"/>
+        <rect x="${u}" y="${u * 2}" width="${u}" height="${u}" fill="#5b3724"/>
+        <rect x="${u * 6}" y="${u * 2}" width="${u}" height="${u}" fill="#5b3724"/>
+        <rect x="${u * 2}" y="${u * 3}" width="${u}" height="${u}" fill="#ffffff"/>
+        <rect x="${u * 5}" y="${u * 3}" width="${u}" height="${u}" fill="#ffffff"/>
+        <rect x="${u * 2}" y="${u * 3}" width="${u * 0.5}" height="${u}" fill="#4a8ad4"/>
+        <rect x="${u * 5}" y="${u * 3}" width="${u * 0.5}" height="${u}" fill="#4a8ad4"/>
+        <rect x="${u * 3}" y="${u * 5}" width="${u * 2}" height="${u}" fill="#7a3f36"/>
+        <rect x="${u * 2}" y="${u * 6}" width="${u * 4}" height="${u}" fill="#8fd0dc"/>
+      </svg>`;
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  }
+
+  function avatarSources(id, size) {
+    const safeId = encodeURIComponent(id || 'MHF_Steve');
+    return [
+      `https://mc-heads.net/avatar/${safeId}/${size}`,
+      `https://crafatar.com/avatars/${safeId}?size=${size}&overlay`,
+      `https://crafthead.net/avatar/${safeId}/${size}`,
+      `https://minotar.net/avatar/${safeId}/${size}.png`,
+    ];
+  }
+
+  function installAvatarFallback(img, id, name, size) {
+    if (!img) return;
+    const sources = avatarSources(id, size);
+    let index = 0;
+    img.classList.remove('avatar-fallback');
+    img.onerror = () => {
+      index += 1;
+      if (index < sources.length) {
+        img.src = sources[index];
+      } else {
+        img.onerror = null;
+        img.classList.add('avatar-fallback');
+        img.src = avatarFallbackDataUrl(size);
+      }
+    };
+    img.src = sources[index];
+  }
 
   function renderAccountList() {
     if (!accountListEl) return;
@@ -74,7 +121,7 @@ function initSettings() {
     }
     accountListEl.innerHTML = accounts.map((acc, i) => `
       <div class="account-card ${i === activeIdx ? 'active' : ''}" data-idx="${i}">
-        <img class="account-card-avatar" src="https://mc-heads.net/avatar/${_escHtml(acc.uuid)}/28" alt="${_escHtml(acc.name)}" onerror="this.onerror=null;this.src='https://crafthead.net/avatar/${_escHtml(acc.uuid)}/28'">
+        <img class="account-card-avatar" data-avatar-id="${_escHtml(acc.uuid || acc.name || 'MHF_Steve')}" data-avatar-name="${_escHtml(acc.name || '')}" alt="${_escHtml(acc.name)}">
         <div class="account-card-info">
           <div class="account-card-name">${_escHtml(acc.name)}</div>
           <div class="account-card-uuid">${_escHtml(acc.uuid)}</div>
@@ -83,6 +130,10 @@ function initSettings() {
         <button class="account-card-del" data-idx="${i}" title="删除此账号">✕</button>
       </div>
     `).join('');
+
+    accountListEl.querySelectorAll('.account-card-avatar').forEach(img => {
+      installAvatarFallback(img, img.dataset.avatarId, img.dataset.avatarName, 28);
+    });
 
     accountListEl.querySelectorAll('.account-card').forEach(card => {
       card.addEventListener('click', (e) => {
@@ -221,12 +272,7 @@ function initSettings() {
     if (sidebarPlayerName) sidebarPlayerName.textContent = name || '未登录';
     if (playerAvatar) {
       const id = uuid || name || 'MHF_Steve';
-      playerAvatar.src = `https://mc-heads.net/avatar/${id}/40`;
-      playerAvatar.onerror = () => {
-        // mc-heads 挂了，用 crafthead 备用
-        playerAvatar.onerror = null; // 防止无限循环
-        playerAvatar.src = `https://crafthead.net/avatar/${id}/40`;
-      };
+      installAvatarFallback(playerAvatar, id, name, 40);
     }
   }
 

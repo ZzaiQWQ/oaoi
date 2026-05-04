@@ -44,6 +44,7 @@
   border-radius: 4px;
   image-rendering: pixelated;
   flex-shrink: 0;
+  object-fit: cover;
 }
 
 .account-card-info {

@@ -16,6 +16,10 @@ pub struct OnlineModResult {
     pub cf_url: String,
 }
 
+const MAX_CN_SEARCH_TERMS: usize = 12;
+const MAX_ONLINE_RESULTS: usize = 120;
+const RELAX_RESULT_TARGET: usize = 24;
+
 /// 搜索在线 Mod/材质包/光影包（Modrinth + CurseForge + MCIM 中文翻译）
 #[tauri::command]
 pub async fn search_online_mods(
@@ -45,100 +49,71 @@ fn search_online_mods_blocking(
         .build()
         .map_err(|e| e.to_string())?;
 
+    let query = query.trim();
+
     // 加载 modcn 数据
     let modcn = load_modcn();
 
-    // 中文查询 → 模糊匹配 → 拿到英文名去搜
+    // 中文查询 -> 模糊匹配 -> 拿到英文名去搜
     let fuzzy_matches = if contains_chinese(query) {
         search_modcn_fuzzy(query, modcn)
     } else {
         vec![]
     };
-
-    // 提取英文搜索词（去重，最多5个）
-    let en_queries: Vec<String> = fuzzy_matches
-        .iter()
-        .map(|(en, _, _)| en.clone())
-        .take(5)
-        .collect();
+    let search_terms = build_search_terms(query, &fuzzy_matches);
 
     eprintln!(
-        "[search] 原始查询: '{}', 英文搜索词: {:?}",
-        query, en_queries
+        "[search] 原始查询: '{}', 实际搜索词: {:?}",
+        query, search_terms
     );
 
     let mut all: Vec<OnlineModResult> = Vec::new();
+    let mut batches: Vec<(usize, Vec<OnlineModResult>, Vec<OnlineModResult>)> = Vec::new();
 
-    // 全部并发搜索
+    // 全部并发搜索；每个搜索词内部会在结果过少时自动放宽版本/loader 条件。
     std::thread::scope(|s| {
-        // 1. 用原始查询搜 Modrinth + CurseForge
-        let h_mr = s.spawn(|| {
-            do_modrinth_search(&http, query, mc_version, loader, project_type)
-                .or_else(|_| do_modrinth_search(&http, query, mc_version, "", project_type))
-                .unwrap_or_default()
-        });
-        let h_cf = s.spawn(|| {
-            do_curseforge_search(&http, query, mc_version, loader, project_type).unwrap_or_default()
-        });
-
-        // 2. 用英文名搜 Modrinth + CurseForge
-        let en_handles: Vec<_> = en_queries
+        let handles: Vec<_> = search_terms
             .iter()
-            .map(|en| {
-                s.spawn(|| {
-                    let mr = do_modrinth_search(&http, en, mc_version, loader, project_type)
-                        .or_else(|_| do_modrinth_search(&http, en, mc_version, "", project_type))
-                        .unwrap_or_default();
-                    let cf = do_curseforge_search(&http, en, mc_version, loader, project_type)
-                        .unwrap_or_default();
-                    (mr, cf)
+            .enumerate()
+            .map(|(idx, term)| {
+                let http = http.clone();
+                s.spawn(move || {
+                    let mr = search_modrinth_with_fallbacks(
+                        &http,
+                        term,
+                        mc_version,
+                        loader,
+                        project_type,
+                    );
+                    let cf = search_curseforge_with_fallbacks(
+                        &http,
+                        term,
+                        mc_version,
+                        loader,
+                        project_type,
+                    );
+                    (idx, mr, cf)
                 })
             })
             .collect();
 
-        // === 合并去重 ===
-
-        // 英文搜索结果优先（从词典匹配的，精确度高）
-        for h in en_handles {
-            if let Ok((mr_res, cf_res)) = h.join() {
-                for r in mr_res {
-                    let slug_lower = r.slug.to_lowercase();
-                    if !all.iter().any(|e| e.slug.to_lowercase() == slug_lower) {
-                        all.push(r);
-                    }
-                }
-                for cf in cf_res {
-                    let cf_slug = cf.slug.to_lowercase();
-                    if let Some(existing) =
-                        all.iter_mut().find(|r| r.slug.to_lowercase() == cf_slug)
-                    {
-                        if existing.cf_url.is_empty() {
-                            existing.cf_url = cf.cf_url;
-                        }
-                    } else {
-                        all.push(cf);
-                    }
-                }
-            }
-        }
-        // 原始查询结果
-        for r in h_mr.join().unwrap_or_default() {
-            let slug_lower = r.slug.to_lowercase();
-            if !all.iter().any(|e| e.slug.to_lowercase() == slug_lower) {
-                all.push(r);
-            }
-        }
-        for cf in h_cf.join().unwrap_or_default() {
-            let cf_slug = cf.slug.to_lowercase();
-            if let Some(existing) = all.iter_mut().find(|r| r.slug.to_lowercase() == cf_slug) {
-                if existing.cf_url.is_empty() {
-                    existing.cf_url = cf.cf_url;
-                }
-            } else {
-                all.push(cf);
+        for h in handles {
+            if let Ok(batch) = h.join() {
+                batches.push(batch);
             }
         }
     });
+
+    // 搜索词按优先级合并：原始词优先，中文词库命中的英文名继续补全。
+    batches.sort_by_key(|(idx, _, _)| *idx);
+    for (_, mr_res, cf_res) in batches {
+        for r in mr_res {
+            merge_result(&mut all, r);
+        }
+        for r in cf_res {
+            merge_result(&mut all, r);
+        }
+    }
 
     // 用 modcn 数据填充中文名
     // 构建快速查找表（英文名小写 → 中文名）
@@ -193,8 +168,200 @@ fn search_online_mods_blocking(
     if project_type != "mod" || query.is_empty() {
         all.sort_by(|a, b| b.downloads.cmp(&a.downloads));
     }
+    if all.len() > MAX_ONLINE_RESULTS {
+        all.truncate(MAX_ONLINE_RESULTS);
+    }
     eprintln!("[search] 返回 {} 个结果 (type={})", all.len(), project_type);
     Ok(all)
+}
+
+fn build_search_terms(query: &str, fuzzy_matches: &[(String, String, i32)]) -> Vec<String> {
+    let mut terms = Vec::new();
+    push_search_term(&mut terms, query);
+    for (en, _, _) in fuzzy_matches.iter().take(MAX_CN_SEARCH_TERMS) {
+        push_search_term(&mut terms, en);
+    }
+    if terms.is_empty() {
+        terms.push(String::new());
+    }
+    terms
+}
+
+fn push_search_term(terms: &mut Vec<String>, term: &str) {
+    let trimmed = term.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let normalized = trimmed.to_lowercase();
+    if !terms.iter().any(|t| t.to_lowercase() == normalized) {
+        terms.push(trimmed.to_string());
+    }
+}
+
+fn should_relax_results(count: usize, query: &str) -> bool {
+    count < RELAX_RESULT_TARGET || (!query.is_empty() && count < 40)
+}
+
+fn merge_result(all: &mut Vec<OnlineModResult>, incoming: OnlineModResult) {
+    if incoming.slug.is_empty() && incoming.title.is_empty() {
+        return;
+    }
+
+    if let Some(existing) = all.iter_mut().find(|r| is_same_result(r, &incoming)) {
+        merge_result_fields(existing, incoming);
+    } else {
+        all.push(incoming);
+    }
+}
+
+fn is_same_result(a: &OnlineModResult, b: &OnlineModResult) -> bool {
+    let a_slug = a.slug.to_lowercase();
+    let b_slug = b.slug.to_lowercase();
+    if !a_slug.is_empty() && a_slug == b_slug {
+        return true;
+    }
+    if !a.project_id.is_empty() && a.project_id == b.project_id {
+        return true;
+    }
+    if !a.mr_url.is_empty() && a.mr_url == b.mr_url {
+        return true;
+    }
+    if !a.cf_url.is_empty() && a.cf_url == b.cf_url {
+        return true;
+    }
+    false
+}
+
+fn merge_result_fields(existing: &mut OnlineModResult, incoming: OnlineModResult) {
+    if existing.cn_title.is_empty() {
+        existing.cn_title = incoming.cn_title;
+    }
+    if existing.description.is_empty() {
+        existing.description = incoming.description;
+    }
+    if existing.author.is_empty() {
+        existing.author = incoming.author;
+    }
+    if existing.icon_url.is_empty() {
+        existing.icon_url = incoming.icon_url;
+    }
+    if existing.mr_url.is_empty() {
+        existing.mr_url = incoming.mr_url;
+    }
+    if existing.cf_url.is_empty() {
+        existing.cf_url = incoming.cf_url;
+    }
+    if existing.downloads < incoming.downloads {
+        existing.downloads = incoming.downloads;
+    }
+
+    let existing_is_cf = existing.project_id.starts_with("cf_");
+    let incoming_is_mr = !incoming.project_id.is_empty() && !incoming.project_id.starts_with("cf_");
+    if existing.project_id.is_empty() || (existing_is_cf && incoming_is_mr) {
+        existing.project_id = incoming.project_id;
+    }
+}
+
+fn search_modrinth_with_fallbacks(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    mc_version: &str,
+    loader: &str,
+    project_type: &str,
+) -> Vec<OnlineModResult> {
+    let mut results = Vec::new();
+    append_results(
+        &mut results,
+        run_modrinth_search(http, query, mc_version, loader, project_type),
+    );
+
+    let can_relax_loader = project_type == "mod" && !loader.is_empty() && loader != "vanilla";
+    if can_relax_loader && should_relax_results(results.len(), query) {
+        append_results(
+            &mut results,
+            run_modrinth_search(http, query, mc_version, "", project_type),
+        );
+    }
+
+    if project_type == "mod" && !mc_version.is_empty() && should_relax_results(results.len(), query)
+    {
+        append_results(
+            &mut results,
+            run_modrinth_search(http, query, "", "", project_type),
+        );
+    }
+
+    results
+}
+
+fn search_curseforge_with_fallbacks(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    mc_version: &str,
+    loader: &str,
+    project_type: &str,
+) -> Vec<OnlineModResult> {
+    let mut results = Vec::new();
+    append_results(
+        &mut results,
+        run_curseforge_search(http, query, mc_version, loader, project_type),
+    );
+
+    let can_relax_loader = project_type == "mod" && !loader.is_empty() && loader != "vanilla";
+    if can_relax_loader && should_relax_results(results.len(), query) {
+        append_results(
+            &mut results,
+            run_curseforge_search(http, query, mc_version, "", project_type),
+        );
+    }
+
+    if project_type == "mod" && !mc_version.is_empty() && should_relax_results(results.len(), query)
+    {
+        append_results(
+            &mut results,
+            run_curseforge_search(http, query, "", "", project_type),
+        );
+    }
+
+    results
+}
+
+fn append_results(all: &mut Vec<OnlineModResult>, incoming: Vec<OnlineModResult>) {
+    for item in incoming {
+        merge_result(all, item);
+    }
+}
+
+fn run_modrinth_search(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    mc_version: &str,
+    loader: &str,
+    project_type: &str,
+) -> Vec<OnlineModResult> {
+    match do_modrinth_search(http, query, mc_version, loader, project_type) {
+        Ok(results) => results,
+        Err(err) => {
+            eprintln!("[search] Modrinth 搜索失败: {}", err);
+            Vec::new()
+        }
+    }
+}
+
+fn run_curseforge_search(
+    http: &reqwest::blocking::Client,
+    query: &str,
+    mc_version: &str,
+    loader: &str,
+    project_type: &str,
+) -> Vec<OnlineModResult> {
+    match do_curseforge_search(http, query, mc_version, loader, project_type) {
+        Ok(results) => results,
+        Err(err) => {
+            eprintln!("[search] CurseForge 搜索失败: {}", err);
+            Vec::new()
+        }
+    }
 }
 
 /// 直接按 slug 精确查询 Modrinth 项目（不走搜索API）
@@ -264,7 +431,7 @@ fn do_modrinth_search(
     };
 
     let url = format!(
-        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=40&index={}",
+        "https://api.modrinth.com/v2/search?query={}&facets={}&limit=80&index={}",
         urlencoding::encode(query),
         urlencoding::encode(&facets_str),
         sort_index,
@@ -274,6 +441,9 @@ fn do_modrinth_search(
         .get(&url)
         .send()
         .map_err(|e| format!("搜索请求失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Modrinth HTTP {}", resp.status()));
+    }
     let json: serde_json::Value = resp.json().map_err(|e| format!("解析响应失败: {}", e))?;
 
     let mut results = Vec::new();
@@ -343,6 +513,9 @@ fn do_curseforge_search(
         .header("Accept", "application/json")
         .send()
         .map_err(|e| format!("CurseForge 请求失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("CurseForge HTTP {}", resp.status()));
+    }
 
     let json: serde_json::Value = resp
         .json()

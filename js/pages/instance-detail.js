@@ -42,13 +42,13 @@ function showInstanceDetail(instanceName) {
   // 切换实例后刷新在线列表（用缓存或清空）
   const onlineList = document.getElementById('onlineModList');
   if (onlineList) {
-    const cacheKey = `${instance.mc_version || ''}:${instance.loader_type || ''}:${currentOnlineCategory}:`;
+    const cacheKey = `all:${instance.loader_type || ''}:${currentOnlineCategory}:`;
     const cached = onlineSearchCache[cacheKey];
     if (cached) {
       renderOnlineResults(cached._data || cached, '');
     } else {
       const typeLabel = { mod: 'Mod', resourcepack: '材质包', shader: '光影包' }[currentOnlineCategory] || 'Mod';
-      onlineList.innerHTML = `<div class="mod-list-empty">输入关键词搜索 Modrinth + CurseForge 上的 ${typeLabel}</div>`;
+      onlineList.innerHTML = `<div class="mod-list-empty">输入关键词搜索 Modrinth + CurseForge 上的全部 ${typeLabel} 版本</div>`;
     }
   }
 
@@ -150,7 +150,7 @@ function switchModTab(tab) {
   // 切到在线搜索时自动加载热门
   if (tab === 'online') {
     const listEl = document.getElementById('onlineModList');
-    const cacheKey = `${currentDetailInfo?.mc_version || ''}:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:`;
+    const cacheKey = `all:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:`;
     if (listEl && listEl.querySelector('.mod-list-empty') && !onlineSearchCache[cacheKey]) {
       searchOnlineMods();
     }
@@ -302,7 +302,7 @@ let currentOnlineCategory = 'mod';
 let _onlineSearchId = 0; // 防止异步竞态
 
 // 持久化缓存（localStorage，3天过期，新的覆盖旧的）
-const CACHE_KEY = 'onlineSearchCache';
+const CACHE_KEY = 'onlineSearchCache_v2';
 const CACHE_TTL = 3 * 24 * 60 * 60 * 1000; // 3天
 
 function _loadCache() {
@@ -353,9 +353,10 @@ function _saveCache(cache) {
 
 function clearInstanceCache(mcVersion, loader) {
   const prefix = `${mcVersion || ''}:${loader || ''}:`;
+  const allVersionPrefix = `all:${loader || ''}:`;
   let changed = false;
   for (const key of Object.keys(onlineSearchCache)) {
-    if (key.startsWith(prefix)) {
+    if (key.startsWith(prefix) || key.startsWith(allVersionPrefix)) {
       delete onlineSearchCache[key];
       changed = true;
     }
@@ -393,7 +394,7 @@ async function searchOnlineMods() {
   if (!listEl) return;
 
   // 检查缓存
-  const cacheKey = `${currentDetailInfo?.mc_version || ''}:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:${query}`;
+  const cacheKey = `all:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:${query}`;
   const cached = onlineSearchCache[cacheKey];
   if (cached) {
     renderOnlineResults(cached._data || cached, query);
@@ -406,7 +407,7 @@ async function searchOnlineMods() {
 
   try {
     const tauri = await waitForTauri();
-    const mcVersion = currentDetailInfo?.mc_version || '';
+    const mcVersion = '';
     const loader = currentDetailInfo?.loader_type || '';
     const projectType = currentOnlineCategory;
     const results = await tauri.core.invoke('search_online_mods', { query, mcVersion, loader, projectType });
@@ -419,6 +420,138 @@ async function searchOnlineMods() {
     if (searchId !== _onlineSearchId) return;
     listEl.innerHTML = `<div class="mod-list-empty">搜索失败: ${err}</div>`;
   }
+}
+
+function ensureOnlineModVersionModal() {
+  let modal = document.getElementById('onlineModVersionModal');
+  if (modal) return modal;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-overlay hidden online-mod-version-modal" id="onlineModVersionModal">
+      <div class="modal-content" data-no-drag style="max-width: 620px;">
+        <div class="modal-header">
+          <h2 id="onlineModVersionTitle">选择版本</h2>
+        </div>
+        <div class="modal-body">
+          <input class="mod-search-input online-mod-version-filter" id="onlineModVersionFilter" placeholder="筛选 Minecraft 版本或文件名">
+          <div id="onlineModVersionList" class="online-mod-version-list">
+            <div class="mod-list-empty">加载中...</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="onlineModVersionCancel" class="btn btn-secondary">取消</button>
+        </div>
+      </div>
+    </div>
+  `);
+  return document.getElementById('onlineModVersionModal');
+}
+
+async function showOnlineModVersionModal(mod) {
+  const modal = ensureOnlineModVersionModal();
+  const titleEl = document.getElementById('onlineModVersionTitle');
+  const filterEl = document.getElementById('onlineModVersionFilter');
+  const listEl = document.getElementById('onlineModVersionList');
+  const cancelBtn = document.getElementById('onlineModVersionCancel');
+  if (!modal || !listEl) return null;
+
+  const title = mod.cn_title ? `${mod.cn_title} (${mod.title})` : mod.title;
+  if (titleEl) titleEl.textContent = `${title} - 选择下载版本`;
+  if (filterEl) filterEl.value = '';
+  listEl.innerHTML = '<div class="mod-list-empty">正在加载版本列表...</div>';
+  modal.classList.remove('hidden');
+
+  const tauri = await waitForTauri();
+  let versions = [];
+  let loadError = '';
+  try {
+    versions = await tauri.core.invoke('get_online_mod_versions', {
+      projectId: mod.project_id,
+      loader: currentDetailInfo?.loader_type || '',
+      projectType: currentOnlineCategory,
+    });
+  } catch (err) {
+    loadError = String(err);
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+
+    const close = (value) => {
+      if (resolved) return;
+      resolved = true;
+      modal.classList.add('hidden');
+      cancelBtn?.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onOverlayClick);
+      filterEl?.removeEventListener('input', render);
+      resolve(value);
+    };
+
+    const onCancel = () => close(null);
+    const onOverlayClick = (e) => {
+      if (e.target === modal) close(null);
+    };
+
+    const render = () => {
+      if (loadError) {
+        listEl.innerHTML = `<div class="mod-list-empty">加载失败: ${escapeHtml(loadError)}</div>`;
+        return;
+      }
+
+      const term = (filterEl?.value || '').trim().toLowerCase();
+      const currentMc = currentDetailInfo?.mc_version || '';
+      const filtered = term
+        ? versions.filter(v => {
+            const text = `${v.version_name} ${v.mc_versions} ${v.loaders} ${v.file_name}`.toLowerCase();
+            return text.includes(term);
+          })
+        : versions;
+
+      if (filtered.length === 0) {
+        listEl.innerHTML = '<div class="mod-list-empty">暂无可用版本</div>';
+        return;
+      }
+
+      listEl.innerHTML = filtered.map((v, idx) => {
+        const mcList = String(v.mc_versions || '').split(',').map(s => s.trim()).filter(Boolean);
+        const isCurrent = currentMc && mcList.includes(currentMc);
+        const size = formatFileSize(v.file_size || 0);
+        return `
+          <div class="online-mod-version-row ${isCurrent ? 'recommended' : ''}">
+            <div class="online-mod-version-info">
+              <div class="online-mod-version-name" title="${escapeHtml(v.version_name || v.file_name || '')}">
+                ${escapeHtml(v.version_name || v.file_name || '未命名版本')}
+              </div>
+              <div class="online-mod-version-meta">
+                <span>MC ${escapeHtml(v.mc_versions || '未知')}</span>
+                ${v.loaders ? `<span>${escapeHtml(v.loaders)}</span>` : ''}
+                ${size ? `<span>${size}</span>` : ''}
+                ${v.date ? `<span>${escapeHtml(v.date)}</span>` : ''}
+                ${isCurrent ? '<span class="online-mod-version-current">当前实例</span>' : ''}
+              </div>
+              <div class="online-mod-version-file" title="${escapeHtml(v.file_name || '')}">
+                ${escapeHtml(v.file_name || '')}
+              </div>
+            </div>
+            <button class="online-mod-version-pick" data-index="${idx}">下载</button>
+          </div>
+        `;
+      }).join('');
+
+      listEl.querySelectorAll('.online-mod-version-pick').forEach(btn => {
+        btn.addEventListener('click', () => {
+          close(filtered[Number(btn.dataset.index)]);
+        });
+      });
+    };
+
+    cancelBtn?.addEventListener('click', onCancel);
+    modal.addEventListener('click', onOverlayClick);
+    filterEl?.addEventListener('input', render);
+
+    render();
+    filterEl?.focus();
+  });
 }
 
 function renderOnlineResults(results, query) {
@@ -461,8 +594,8 @@ function renderOnlineResults(results, query) {
         </div>
         <div class="online-mod-actions">
           <div class="mod-link-row">
-            ${hasMR ? `<button class="mod-link-btn mr" data-url="${mod.mr_url}" title="在 Modrinth 查看">MR</button>` : ''}
-            ${hasCF ? `<button class="mod-link-btn cf" data-url="${mod.cf_url}" title="在 CurseForge 查看">CF</button>` : ''}
+            ${hasMR ? `<button class="mod-link-btn mr" data-url="${mod.mr_url}" aria-label="在 Modrinth 查看">MR</button>` : ''}
+            ${hasCF ? `<button class="mod-link-btn cf" data-url="${mod.cf_url}" aria-label="在 CurseForge 查看">CF</button>` : ''}
           </div>
           <button class="online-mod-dl-btn" data-project="${mod.project_id}" data-title="${mod.title}">下载</button>
         </div>
@@ -485,18 +618,30 @@ function renderOnlineResults(results, query) {
       e.stopPropagation();
       if (btn.disabled) return;
       btn.disabled = true;
-      btn.textContent = '下载中...';
+      const originalText = btn.textContent;
+      btn.textContent = '选择版本...';
 
       try {
+        const mod = results.find(item => item.project_id === btn.dataset.project);
+        if (!mod) throw new Error('未找到 Mod 信息');
+        const selectedVersion = await showOnlineModVersionModal(mod);
+        if (!selectedVersion) {
+          btn.disabled = false;
+          btn.textContent = originalText;
+          return;
+        }
+
+        btn.textContent = '下载中...';
         const tauri = await waitForTauri();
         const gameDir = localStorage.getItem('gameDir') || '';
         const result = await tauri.core.invoke('download_online_mod', {
           gameDir,
           name: currentDetailInstance,
           projectId: btn.dataset.project,
-          mcVersion: currentDetailInfo?.mc_version || '',
-          loader: currentDetailInfo?.loader_type || '',
+          mcVersion: selectedVersion.mc_version || currentDetailInfo?.mc_version || '',
+          loader: selectedVersion.loader || currentDetailInfo?.loader_type || '',
           projectType: currentOnlineCategory,
+          versionId: selectedVersion.version_id || '',
         });
         btn.textContent = '已下载';
         btn.classList.add('done');

@@ -374,7 +374,15 @@
   cursor: pointer;
   transition: all 0.2s;
   color: #fff;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
 }
+
+.mod-link-btn:focus,
+.mod-link-btn:focus-visible {
+  outline: none;
+}
+
 .mod-link-btn.mr {
   background: #1bd96a;
 }
@@ -402,10 +410,17 @@
   white-space: nowrap;
   transition: all 0.2s;
   flex-shrink: 0;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .online-mod-dl-btn:hover {
   transform: translateY(-1px);
+}
+
+.online-mod-dl-btn:focus,
+.online-mod-dl-btn:focus-visible {
+  outline: none;
 }
 
 .online-mod-dl-btn:disabled {
@@ -416,6 +431,116 @@
 
 .online-mod-dl-btn.done {
   background: #5cb85c;
+}
+
+.online-mod-version-modal {
+  background: color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  backdrop-filter: blur(var(--blur-radius, 8px));
+}
+
+.online-mod-version-modal .modal-content {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(var(--blur-radius, 12px));
+  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  border-radius: 18px;
+  box-shadow: 0 12px 40px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent), 0 0 0 1px rgba(255,255,255,0.6) inset;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.online-mod-version-modal .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.online-mod-version-filter {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.online-mod-version-list {
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+}
+
+.online-mod-version-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.48);
+  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.22 * 100%), transparent);
+  border-radius: 10px;
+  transition: all 0.16s ease;
+}
+
+.online-mod-version-row:hover,
+.online-mod-version-row.recommended {
+  background: color-mix(in srgb, var(--pink-200) calc(0.55 * 100%), transparent);
+  border-color: color-mix(in srgb, var(--pink-500) calc(0.45 * 100%), transparent);
+}
+
+.online-mod-version-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.online-mod-version-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--pink-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.online-mod-version-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--pink-600);
+}
+
+.online-mod-version-current {
+  color: white;
+  background: var(--rose-gradient);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.online-mod-version-file {
+  margin-top: 2px;
+  font-size: 9px;
+  color: #b98395;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.online-mod-version-pick {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 7px;
+  background: var(--rose-gradient);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.online-mod-version-pick:hover {
+  transform: translateY(-1px);
 }
 
 .mod-source-tag {
