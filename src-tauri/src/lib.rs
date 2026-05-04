@@ -288,6 +288,7 @@ pub fn run() {
             mod_manager::delete_mod,
             mod_manager::lookup_mod_urls,
             mod_search::search_online_mods,
+            mod_download::get_online_mod_versions,
             mod_download::download_online_mod,
             java_download::download_java,
             modpack::import_modpack,

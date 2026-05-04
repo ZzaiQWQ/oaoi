@@ -98,6 +98,10 @@
   transition: transform 0.3s, border-color 0.3s;
 }
 
+.player-avatar.avatar-fallback {
+  object-fit: cover;
+}
+
 .player-avatar:hover {
   transform: scale(1.1);
   border-color: var(--pink-500);

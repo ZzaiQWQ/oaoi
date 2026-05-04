@@ -113,6 +113,108 @@ function getRequiredJavaMajor(mcVersion) {
 // 实例缓存（供启动时查 mc_version 用）
 let instancesCache = [];
 let isLaunching = false;
+let javaDownloadModalTimer = null;
+
+function ensureJavaDownloadModal() {
+  let modal = document.getElementById('javaDownloadModal');
+  if (modal) return modal;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-overlay hidden java-download-modal" id="javaDownloadModal" data-no-drag>
+      <div class="java-download-card">
+        <div class="java-download-header">
+          <div>
+            <div class="java-download-title" id="javaDownloadTitle">下载 Java</div>
+            <div class="java-download-subtitle" id="javaDownloadSubtitle">准备中...</div>
+          </div>
+          <div class="java-download-percent" id="javaDownloadPercent">0%</div>
+        </div>
+        <div class="java-download-bar-wrap">
+          <div class="java-download-bar" id="javaDownloadBar"></div>
+        </div>
+        <div class="java-download-detail" id="javaDownloadDetail">正在连接下载源...</div>
+      </div>
+    </div>
+  `);
+  return document.getElementById('javaDownloadModal');
+}
+
+function showJavaDownloadModal(major) {
+  if (javaDownloadModalTimer) {
+    clearTimeout(javaDownloadModalTimer);
+    javaDownloadModalTimer = null;
+  }
+  const modal = ensureJavaDownloadModal();
+  modal.classList.remove('hidden');
+  document.getElementById('javaDownloadTitle').textContent = `下载 Java ${major}`;
+  document.getElementById('javaDownloadSubtitle').textContent = '准备下载运行环境';
+  document.getElementById('javaDownloadPercent').textContent = '0%';
+  document.getElementById('javaDownloadBar').style.width = '0%';
+  document.getElementById('javaDownloadDetail').textContent = '正在连接下载源...';
+}
+
+function updateJavaDownloadModal(payload) {
+  const modal = ensureJavaDownloadModal();
+  if (modal.classList.contains('hidden')) modal.classList.remove('hidden');
+
+  const major = payload.major || '';
+  const titleEl = document.getElementById('javaDownloadTitle');
+  const subtitleEl = document.getElementById('javaDownloadSubtitle');
+  const percentEl = document.getElementById('javaDownloadPercent');
+  const barEl = document.getElementById('javaDownloadBar');
+  const detailEl = document.getElementById('javaDownloadDetail');
+
+  if (titleEl) titleEl.textContent = `下载 Java ${major}`;
+
+  if (payload.stage === 'extracting') {
+    if (subtitleEl) subtitleEl.textContent = '正在解压';
+    if (percentEl) percentEl.textContent = '100%';
+    if (barEl) barEl.style.width = '100%';
+    if (detailEl) detailEl.textContent = '下载完成，正在解压 Java 文件...';
+    return;
+  }
+
+  if (payload.stage === 'done') {
+    if (subtitleEl) subtitleEl.textContent = '安装完成';
+    if (percentEl) percentEl.textContent = '100%';
+    if (barEl) barEl.style.width = '100%';
+    if (detailEl) detailEl.textContent = 'Java 已安装完成，准备启动游戏。';
+    return;
+  }
+
+  const downloaded = Number(payload.downloaded || 0);
+  const total = Number(payload.total || 0);
+  const source = payload.source ? `${payload.source}源` : '下载源';
+  if (subtitleEl) subtitleEl.textContent = `正在从${source}下载`;
+
+  if (downloaded > 0 && total > 0) {
+    const percent = Math.min(100, Math.round(downloaded / total * 100));
+    if (percentEl) percentEl.textContent = `${percent}%`;
+    if (barEl) barEl.style.width = `${percent}%`;
+    if (detailEl) detailEl.textContent = `${formatFileSize(downloaded)} / ${formatFileSize(total)}`;
+  } else if (downloaded > 0) {
+    if (percentEl) percentEl.textContent = '--';
+    if (barEl) barEl.style.width = '12%';
+    if (detailEl) detailEl.textContent = `已下载 ${formatFileSize(downloaded)}`;
+  } else if (detailEl && payload.detail) {
+    detailEl.textContent = String(payload.detail);
+  }
+}
+
+function finishJavaDownloadModal(success, message) {
+  const modal = ensureJavaDownloadModal();
+  modal.classList.remove('hidden');
+  document.getElementById('javaDownloadSubtitle').textContent = success ? '安装完成' : '下载失败';
+  document.getElementById('javaDownloadPercent').textContent = success ? '100%' : '失败';
+  document.getElementById('javaDownloadBar').style.width = success ? '100%' : '100%';
+  document.getElementById('javaDownloadBar').classList.toggle('error', !success);
+  document.getElementById('javaDownloadDetail').textContent = message;
+
+  javaDownloadModalTimer = setTimeout(() => {
+    modal.classList.add('hidden');
+    document.getElementById('javaDownloadBar')?.classList.remove('error');
+  }, success ? 900 : 3500);
+}
 
 function parseMemoryMb(value) {
   const memory = parseInt(value, 10);
@@ -460,22 +562,70 @@ function initLaunchButton() {
           // 2. 没找到 → 自动下载
           console.log(`[java] 未找到 Java ${requiredMajor}，自动下载...`);
           btn.innerHTML = `<span class="launch-icon">⏳</span><span>下载 Java ${requiredMajor}...</span>`;
-          const result = await tauri.core.invoke('download_java', { major: requiredMajor, gameDir });
+          showJavaDownloadModal(requiredMajor);
+          let progressUnlisten = null;
+          let doneUnlisten = null;
+
+          let resolveJavaDownload;
+          let rejectJavaDownload;
+          const donePromise = new Promise((resolve, reject) => {
+            resolveJavaDownload = resolve;
+            rejectJavaDownload = reject;
+          });
+          doneUnlisten = await tauri.event.listen('java-download-done', (event) => {
+            const d = event.payload;
+            if (d.major === requiredMajor) {
+              if (doneUnlisten) doneUnlisten();
+              if (progressUnlisten) progressUnlisten();
+              if (d.success) {
+                finishJavaDownloadModal(true, 'Java 已安装完成，正在继续启动。');
+                resolveJavaDownload(d.path);
+              } else {
+                finishJavaDownloadModal(false, d.error || '下载失败');
+                rejectJavaDownload(d.error || '下载失败');
+              }
+            }
+          });
+
+          progressUnlisten = await tauri.event.listen('java-download-progress', (event) => {
+            const d = event.payload;
+            if (d.major !== requiredMajor) return;
+            updateJavaDownloadModal(d);
+            if (d.stage === 'extracting') {
+              btn.innerHTML = `<span class="launch-icon">⏳</span><span>解压 Java ${requiredMajor}...</span>`;
+              return;
+            }
+            if (d.stage === 'done') {
+              btn.innerHTML = `<span class="launch-icon">⏳</span><span>准备启动...</span>`;
+              return;
+            }
+            const downloaded = Number(d.downloaded || 0);
+            const total = Number(d.total || 0);
+            if (downloaded > 0 && total > 0) {
+              const percent = Math.min(100, Math.round(downloaded / total * 100));
+              btn.innerHTML = `<span class="launch-icon">⏳</span><span>下载 Java ${requiredMajor} ${percent}%</span>`;
+            } else if (d.detail) {
+              btn.innerHTML = `<span class="launch-icon">⏳</span><span>${escapeHtml(String(d.detail)).slice(0, 24)}</span>`;
+            }
+          });
+
+          let result;
+          try {
+            result = await tauri.core.invoke('download_java', { major: requiredMajor, gameDir });
+          } catch (e) {
+            if (doneUnlisten) doneUnlisten();
+            if (progressUnlisten) progressUnlisten();
+            finishJavaDownloadModal(false, String(e));
+            throw e;
+          }
           if (result && result !== 'downloading') {
+            if (doneUnlisten) doneUnlisten();
+            if (progressUnlisten) progressUnlisten();
+            finishJavaDownloadModal(true, 'Java 已存在，正在继续启动。');
             javaPath = result;
             console.log(`[java] 已存在: ${javaPath}`);
           } else {
-            javaPath = await new Promise((resolve, reject) => {
-              let unlisten = null;
-              tauri.event.listen('java-download-done', (event) => {
-                const d = event.payload;
-                if (d.major === requiredMajor) {
-                  if (unlisten) unlisten();
-                  if (d.success) resolve(d.path);
-                  else reject(d.error || '下载失败');
-                }
-              }).then(fn => { unlisten = fn; }).catch(reject);
-            });
+            javaPath = await donePromise;
             console.log(`[java] 下载完成: ${javaPath}`);
           }
         }
