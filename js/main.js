@@ -58,7 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
   requestAnimationFrame(() => { try { initDiyPage(); } catch (e) { console.error('DIY页初始化失败:', e); } });
 
   // 实例详情页
-  try { initInstanceDetailPage(); } catch (e) { console.error('实例详情初始化失败:', e); }
+  try { initInstanceDetailPage(); } catch (e) { console.error('版本详情初始化失败:', e); }
 
   // 首次启动：选择游戏目录
   try { checkFirstLaunch(); } catch (e) { console.error('首次启动检查失败:', e); }

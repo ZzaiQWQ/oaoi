@@ -1,3 +1,4 @@
+use crate::instance::safe_join;
 use tauri::Emitter;
 
 /// 根据 Java 大版本号自动下载对应 JRE（Adoptium）
@@ -255,7 +256,7 @@ fn do_download_java(
             continue;
         }
 
-        let out_path = java_dir.join(&relative);
+        let out_path = safe_join(&java_dir, &relative)?;
         if file.is_dir() {
             let _ = std::fs::create_dir_all(&out_path);
         } else {
@@ -394,7 +395,7 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
             continue;
         }
 
-        let out = java_dir.join(&relative);
+        let out = safe_join(&java_dir, &relative)?;
         if entry.is_dir() {
             std::fs::create_dir_all(&out).ok();
         } else {

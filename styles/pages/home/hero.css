@@ -155,12 +155,11 @@
 /* 启动按钮与在线信息 */
 .hero-actions {
   position: absolute;
-  bottom: 20px;
+  bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 20px;
   z-index: 10;
 }
 
@@ -168,6 +167,14 @@
   display: flex;
   align-items: center;
   gap: 12px;
+  padding: 12px 14px;
+  border-radius: 28px;
+  background: rgba(255, 239, 246, 0.78);
+  border: none;
+  backdrop-filter: blur(var(--blur-radius, 14px));
+  box-shadow:
+    0 14px 42px rgba(132, 52, 83, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.42) inset;
 }
 
 .version-selector {
@@ -221,7 +228,7 @@
   backdrop-filter: blur(var(--blur-radius, 10px));
   border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
   border-radius: 22px;
-  color: #fff;
+  color: #252835;
   font-size: 14px;
   font-family: inherit;
   cursor: pointer;
@@ -230,7 +237,7 @@
   gap: 10px;
   transition: all 0.3s ease;
   user-select: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23fff' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23252835' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px center;
 }
@@ -260,11 +267,17 @@
   max-width: 320px;
   max-height: 175px;
   overflow-y: auto;
-  background: #1a0d1e;
-  border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.35 * 100%), transparent);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 221, 233, 0.7), transparent 38%),
+    rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(var(--blur-radius, 12px));
+  border: 1px solid rgba(255, 128, 170, 0.38);
   border-radius: 14px;
-  padding: 4px;
+  padding: 5px;
   z-index: 999;
+  box-shadow:
+    0 14px 34px rgba(132, 52, 83, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.72) inset;
 }
 
 .vd-list.hidden {
@@ -276,13 +289,13 @@
 }
 
 .vd-list::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--pink-600) calc(0.5 * 100%), transparent);
+  background: rgba(255, 111, 158, 0.45);
   border-radius: 3px;
 }
 
 .vd-item {
-  padding: 7px 14px;
-  color: #fff;
+  padding: 8px 13px;
+  color: #252835;
   font-size: 13px;
   border-radius: 10px;
   cursor: pointer;
@@ -298,11 +311,42 @@
 }
 
 .vd-item:hover {
-  background: color-mix(in srgb, var(--pink-600) calc(0.25 * 100%), transparent);
+  background: rgba(255, 111, 158, 0.12);
+  color: #f04480;
 }
 
 .vd-item.active {
-  background: color-mix(in srgb, var(--pink-600) calc(0.45 * 100%), transparent);
+  background: rgba(255, 111, 158, 0.18);
+  color: #f04480;
+  font-weight: 800;
+}
+
+.open-instance-pill {
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.28 * 100%), transparent);
+  background: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(var(--blur-radius, 10px));
+  color: #252835;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  white-space: nowrap;
+}
+
+.open-instance-pill:hover:not(:disabled) {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.26);
+  border-color: color-mix(in srgb, var(--pink-600) calc(0.55 * 100%), transparent);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--pink-600) calc(0.22 * 100%), transparent);
+}
+
+.open-instance-pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .launch-btn {

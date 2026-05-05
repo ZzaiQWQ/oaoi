@@ -7,6 +7,9 @@ function initDownloadPage() {
   let allVersions = [];
   let dlFilter = 'release';
   let dlSource = localStorage.getItem('downloadSource') || 'official';
+  if (!['official', 'bmcl'].includes(dlSource)) dlSource = 'official';
+  let activeManifestSource = dlSource;
+  let versionFetchToken = 0;
 
   // 下载源切换按钮
   const sourceFilters = document.getElementById('dlSourceFilters');
@@ -26,21 +29,35 @@ function initDownloadPage() {
   }
 
   async function fetchVersions() {
+    const fetchToken = ++versionFetchToken;
     try {
-      const officialUrl = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
-      const mirrorUrl = 'https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json';
-      let resp;
+      const primarySource = dlSource === 'bmcl' ? 'bmcl' : 'official';
+      const fallbackSource = primarySource === 'bmcl' ? 'official' : 'bmcl';
+      let result;
       try {
-        resp = await fetch(dlSource === 'bmcl' ? mirrorUrl : officialUrl);
+        result = await loadVersionManifest(primarySource);
       } catch (_) {
-        resp = await fetch(dlSource === 'bmcl' ? officialUrl : mirrorUrl);
+        result = await loadVersionManifest(fallbackSource);
       }
-      const data = await resp.json();
-      allVersions = data.versions;
+      if (fetchToken !== versionFetchToken) return;
+      activeManifestSource = result.source;
+      allVersions = Array.isArray(result.data.versions) ? result.data.versions : [];
       renderVersions();
     } catch (e) {
+      if (fetchToken !== versionFetchToken) return;
+      activeManifestSource = dlSource;
       if (dlList) dlList.innerHTML = '<div class="dl-loading">❌ 加载失败，请检查网络</div>';
     }
+  }
+
+  async function loadVersionManifest(source) {
+    const manifestUrls = {
+      official: 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json',
+      bmcl: 'https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json'
+    };
+    const resp = await fetch(manifestUrls[source] || manifestUrls.official);
+    if (!resp.ok) throw new Error(`版本清单请求失败: ${resp.status}`);
+    return { source, data: await resp.json() };
   }
 
   // 愚人节版本检测（日期在3/31~4/2 且为 snapshot 类型）
@@ -105,7 +122,7 @@ function initDownloadPage() {
             ${dateStr}
           </div>
         </div>
-        <button class="dl-install-btn" data-version="${v.id}" data-url="${v.url}">安装</button>
+        <button class="dl-install-btn" data-version="${v.id}" data-url="${v.url}" data-source="${activeManifestSource}">安装</button>
       </div>
     `;
   }
@@ -138,9 +155,16 @@ function initDownloadPage() {
         const ver = btn.dataset.version;
         const url = btn.dataset.url;
 
-        document.getElementById('instMcVersion').value = ver;
+        const modal = document.getElementById('newInstanceModal');
+        if (modal) {
+          modal.dataset.mcVersion = ver;
+          modal.dataset.downloadSource = btn.dataset.source || dlSource;
+        }
         document.getElementById('instNameInput').value = `${ver}`;
         document.getElementById('instMetaUrl').value = url;
+        modal
+          ?.querySelector('.modal-header')
+          ?.setAttribute('data-subtitle', '取个名，选个 Loader，就可以开整。');
 
         document.querySelectorAll('input[name="loader"]').forEach(el => {
           if (el.value === 'vanilla') el.checked = true;
@@ -153,7 +177,7 @@ function initDownloadPage() {
         createBtn.disabled = false;
         createBtn.textContent = '确认创建';
 
-        document.getElementById('newInstanceModal').classList.remove('hidden');
+        modal?.classList.remove('hidden');
       });
     });
   }
@@ -191,7 +215,7 @@ function initDownloadPage() {
         e.target.parentElement.classList.add('active');
 
         const loader = e.target.value;
-        const mcVer = document.getElementById('instMcVersion').value;
+        const mcVer = modal.dataset.mcVersion || '';
         const nameInput = document.getElementById('instNameInput');
 
         nameInput.value = loader === 'vanilla' ? mcVer : `${mcVer}-${loader}`;
@@ -237,9 +261,10 @@ function initDownloadPage() {
 
     // 确认创建实例
     createBtn.addEventListener('click', async () => {
-      const name = document.getElementById('instNameInput').value.trim() || document.getElementById('instMcVersion').value;
-      const mcVer = document.getElementById('instMcVersion').value;
+      const mcVer = modal.dataset.mcVersion || '';
+      const name = document.getElementById('instNameInput').value.trim() || mcVer;
       const metaUrl = document.getElementById('instMetaUrl').value;
+      const downloadSource = modal.dataset.downloadSource || dlSource;
       const loaderType = document.querySelector('input[name="loader"]:checked').value;
       const loaderVer = loaderSelect.value || '';
 
@@ -462,7 +487,7 @@ function initDownloadPage() {
           loaderType: loaderType,
           loaderVersion: loaderVer,
           javaPath: javaPath,
-          useMirror: (localStorage.getItem('downloadSource') || 'official') === 'bmcl'
+          useMirror: downloadSource === 'bmcl'
         });
       } catch (e) {
         console.error('创建失败:', e);

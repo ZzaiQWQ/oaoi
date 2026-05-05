@@ -421,7 +421,7 @@ pub fn create_instance(
     let name_clone = name.clone();
     std::thread::spawn(move || {
         eprintln!(
-            "[install] 开始创建实例: {} (mc={}, loader={} {}, java={})",
+            "[install] 开始创建版本: {} (mc={}, loader={} {}, java={})",
             name, mc_version, loader_type, loader_version, java_path
         );
         if let Err(e) = do_create_instance(
@@ -449,7 +449,7 @@ pub fn create_instance(
             );
         }
     });
-    Ok(format!("开始创建实例: {}", name_clone))
+    Ok(format!("开始创建版本: {}", name_clone))
 }
 
 fn do_create_instance(
@@ -476,14 +476,14 @@ fn do_create_instance(
         || name.contains('>')
         || name.contains('|')
     {
-        return Err(format!("实例名 '{}' 包含非法字符", name));
+        return Err(format!("版本名 '{}' 包含非法字符", name));
     }
     let game_dir = resolve_game_dir(game_dir_input);
     let emit = make_emitter(app_handle, name);
 
     let inst_dir = game_dir.join("instances").join(name);
     if inst_dir.exists() {
-        return Err(format!("实例 '{}' 已存在，请换一个名称！", name));
+        return Err(format!("版本 '{}' 已存在，请换一个名称！", name));
     }
     std::fs::create_dir_all(&inst_dir).map_err(|e| e.to_string())?;
     let inst_json_path = inst_dir.join("instance.json");
@@ -599,8 +599,8 @@ fn do_create_instance(
         &inst_json_path,
         serde_json::to_string_pretty(&ver_json).unwrap(),
     )
-    .map_err(|e| format!("保存实例配置失败: {}", e))?;
+    .map_err(|e| format!("保存版本配置失败: {}", e))?;
 
-    emit("done", 1, 1, &format!("实例 '{}' 创建完成！", name));
-    Ok(format!("实例 {} 创建成功", name))
+    emit("done", 1, 1, &format!("版本 '{}' 创建完成！", name));
+    Ok(format!("版本 {} 创建成功", name))
 }

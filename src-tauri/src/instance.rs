@@ -226,13 +226,13 @@ pub async fn delete_version(game_dir: String, name: String) -> Result<String, St
     std::thread::spawn(move || {
         let _ = tx.send((|| {
             let dir = resolve_game_dir(&game_dir);
-            let safe_name = safe_path_name(&name, "实例名")?;
+            let safe_name = safe_path_name(&name, "版本名")?;
             let inst_path = dir.join("instances").join(&safe_name);
             if !inst_path.exists() {
-                return Err(format!("实例 {} 不存在", name));
+                return Err(format!("版本 {} 不存在", name));
             }
             std::fs::remove_dir_all(&inst_path).map_err(|e| format!("删除失败: {}", e))?;
-            Ok(format!("已删除实例: {}", name))
+            Ok(format!("已删除版本: {}", name))
         })());
     });
     rx.recv().map_err(|_| "线程通信失败".to_string())?
@@ -242,7 +242,7 @@ pub async fn delete_version(game_dir: String, name: String) -> Result<String, St
 #[tauri::command]
 pub fn open_folder(game_dir: String, name: String, sub_dir: String) -> Result<String, String> {
     let dir = resolve_game_dir(&game_dir);
-    let safe_name = safe_path_name(&name, "实例名")?;
+    let safe_name = safe_path_name(&name, "版本名")?;
     let mut target = dir.join("instances").join(&safe_name);
     let safe_sub = match sub_dir.as_str() {
         "" => "",

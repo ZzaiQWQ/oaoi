@@ -172,7 +172,7 @@ fn download_online_mod_blocking(
     // 检查并下载前置依赖
     let mut dep_names: Vec<String> = Vec::new();
     if let Some(deps) = version["dependencies"].as_array() {
-        let safe_name = safe_path_name(name, "实例名")?;
+        let safe_name = safe_path_name(name, "版本名")?;
         let mods_dir = resolve_game_dir(game_dir)
             .join("instances")
             .join(&safe_name)
@@ -315,10 +315,18 @@ fn get_modrinth_versions(
 
         let game_versions = json_string_array(&item["game_versions"]);
         let first_mc = game_versions.first().cloned().unwrap_or_default();
-        let first_loader = loaders
-            .first()
-            .cloned()
-            .unwrap_or_else(|| loader.to_string());
+        let selected_loader = if project_type == "mod"
+            && !loader.is_empty()
+            && loader != "vanilla"
+            && loaders.iter().any(|l| l.eq_ignore_ascii_case(loader))
+        {
+            loader.to_string()
+        } else {
+            loaders
+                .first()
+                .cloned()
+                .unwrap_or_else(|| loader.to_string())
+        };
         let date = item["date_published"]
             .as_str()
             .map(short_date)
@@ -333,7 +341,7 @@ fn get_modrinth_versions(
             mc_versions: game_versions.join(", "),
             mc_version: first_mc,
             loaders: loaders.join(", "),
-            loader: first_loader.to_lowercase(),
+            loader: selected_loader.to_lowercase(),
             file_name: file["filename"].as_str().unwrap_or("").to_string(),
             file_size: file["size"].as_u64().unwrap_or(0),
             date,
@@ -573,7 +581,7 @@ fn download_from_curseforge(
     // 检查 CurseForge 前置依赖
     let mut dep_names: Vec<String> = Vec::new();
     if let Some(deps) = file["dependencies"].as_array() {
-        let safe_name = safe_path_name(name, "实例名")?;
+        let safe_name = safe_path_name(name, "版本名")?;
         let mods_dir = resolve_game_dir(game_dir)
             .join("instances")
             .join(&safe_name)
@@ -652,7 +660,7 @@ fn do_download_to_dir(
     sub_dir: &str,
 ) -> Result<String, String> {
     let dir = resolve_game_dir(game_dir);
-    let safe_name = safe_path_name(name, "实例名")?;
+    let safe_name = safe_path_name(name, "版本名")?;
     let safe_file_name = safe_path_name(file_name, "文件名")?;
     let safe_sub_dir = match sub_dir {
         "mods" => "mods",
