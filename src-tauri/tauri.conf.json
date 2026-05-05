@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' asset: http://asset.localhost https://launchercontent.mojang.com https://cdn.modrinth.com https://media.forgecdn.net https://mc-heads.net https://crafthead.net data:; connect-src 'self' https: http://localhost; font-src 'self' https://fonts.gstatic.com"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' asset: http://asset.localhost https://launchercontent.mojang.com https://cdn.modrinth.com https://media.forgecdn.net https://mc-heads.net https://crafthead.net https://crafatar.com https://minotar.net data:; connect-src 'self' https: http://localhost; font-src 'self' https://fonts.gstatic.com"
     }
   },
   "bundle": {

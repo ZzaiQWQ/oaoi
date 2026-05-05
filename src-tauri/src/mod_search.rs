@@ -17,6 +17,7 @@ pub struct OnlineModResult {
 }
 
 const MAX_CN_SEARCH_TERMS: usize = 12;
+const MAX_PARALLEL_SEARCH_TERMS: usize = 3;
 const MAX_ONLINE_RESULTS: usize = 120;
 const RELAX_RESULT_TARGET: usize = 24;
 
@@ -70,39 +71,42 @@ fn search_online_mods_blocking(
     let mut all: Vec<OnlineModResult> = Vec::new();
     let mut batches: Vec<(usize, Vec<OnlineModResult>, Vec<OnlineModResult>)> = Vec::new();
 
-    // 全部并发搜索；每个搜索词内部会在结果过少时自动放宽版本/loader 条件。
-    std::thread::scope(|s| {
-        let handles: Vec<_> = search_terms
-            .iter()
-            .enumerate()
-            .map(|(idx, term)| {
-                let http = http.clone();
-                s.spawn(move || {
-                    let mr = search_modrinth_with_fallbacks(
-                        &http,
-                        term,
-                        mc_version,
-                        loader,
-                        project_type,
-                    );
-                    let cf = search_curseforge_with_fallbacks(
-                        &http,
-                        term,
-                        mc_version,
-                        loader,
-                        project_type,
-                    );
-                    (idx, mr, cf)
+    // 分批并发搜索，避免中文模糊词一次性把 Modrinth/CurseForge 打爆。
+    for (chunk_idx, chunk) in search_terms.chunks(MAX_PARALLEL_SEARCH_TERMS).enumerate() {
+        let base_idx = chunk_idx * MAX_PARALLEL_SEARCH_TERMS;
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(offset, term)| {
+                    let http = http.clone();
+                    s.spawn(move || {
+                        let mr = search_modrinth_with_fallbacks(
+                            &http,
+                            term,
+                            mc_version,
+                            loader,
+                            project_type,
+                        );
+                        let cf = search_curseforge_with_fallbacks(
+                            &http,
+                            term,
+                            mc_version,
+                            loader,
+                            project_type,
+                        );
+                        (base_idx + offset, mr, cf)
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for h in handles {
-            if let Ok(batch) = h.join() {
-                batches.push(batch);
+            for h in handles {
+                if let Ok(batch) = h.join() {
+                    batches.push(batch);
+                }
             }
-        }
-    });
+        });
+    }
 
     // 搜索词按优先级合并：原始词优先，中文词库命中的英文名继续补全。
     batches.sort_by_key(|(idx, _, _)| *idx);

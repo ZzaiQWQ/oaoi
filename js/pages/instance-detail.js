@@ -191,14 +191,17 @@ function renderModList(mods) {
   }
 
   listEl.innerHTML = filtered.map(mod => {
-    const baseName = mod.file_name.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '');
+    const fileName = mod.file_name || '';
+    const safeFileName = escapeHtml(fileName);
+    const baseName = fileName.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '');
     const displayName = mod.cn_name ? `${mod.cn_name} (${baseName})` : baseName;
+    const actionId = fileName.replace(/[^a-zA-Z0-9]/g, '_');
     return `
-      <div class="mod-item ${mod.enabled ? '' : 'disabled'}" data-file="${mod.file_name}">
-        <button class="mod-toggle ${mod.enabled ? 'active' : ''}" data-file="${mod.file_name}" title="${mod.enabled ? '点击禁用' : '点击启用'}"></button>
-        <span class="mod-name" title="${mod.file_name}">${displayName}</span>
-        <span class="mod-actions" id="mod-actions-${mod.file_name.replace(/[^a-zA-Z0-9]/g, '_')}">
-          <button class="mod-delete-btn" data-file="${mod.file_name}" title="删除">🗑</button>
+      <div class="mod-item ${mod.enabled ? '' : 'disabled'}" data-file="${safeFileName}">
+        <button class="mod-toggle ${mod.enabled ? 'active' : ''}" data-file="${safeFileName}" title="${mod.enabled ? '点击禁用' : '点击启用'}"></button>
+        <span class="mod-name" title="${safeFileName}">${escapeHtml(displayName)}</span>
+        <span class="mod-actions" id="mod-actions-${actionId}">
+          <button class="mod-delete-btn" data-file="${safeFileName}" title="删除">🗑</button>
         </span>
         <span class="mod-size">${mod.size_kb > 1024 ? (mod.size_kb / 1024).toFixed(1) + ' MB' : mod.size_kb + ' KB'}</span>
       </div>
@@ -418,7 +421,7 @@ async function searchOnlineMods() {
     renderOnlineResults(results, query);
   } catch (err) {
     if (searchId !== _onlineSearchId) return;
-    listEl.innerHTML = `<div class="mod-list-empty">搜索失败: ${err}</div>`;
+    listEl.innerHTML = `<div class="mod-list-empty">搜索失败: ${escapeHtml(err)}</div>`;
   }
 }
 
@@ -527,7 +530,7 @@ async function showOnlineModVersionModal(mod) {
                 ${v.loaders ? `<span>${escapeHtml(v.loaders)}</span>` : ''}
                 ${size ? `<span>${size}</span>` : ''}
                 ${v.date ? `<span>${escapeHtml(v.date)}</span>` : ''}
-                ${isCurrent ? '<span class="online-mod-version-current">当前实例</span>' : ''}
+                ${isCurrent ? '<span class="online-mod-version-current">当前版本</span>' : ''}
               </div>
               <div class="online-mod-version-file" title="${escapeHtml(v.file_name || '')}">
                 ${escapeHtml(v.file_name || '')}
@@ -575,16 +578,21 @@ function renderOnlineResults(results, query) {
   // escapeHtml 使用全局 utils.js
 
   listEl.innerHTML = results.map(mod => {
-    const dlCount = formatDownloads(mod.downloads);
+    const dlCount = escapeHtml(formatDownloads(mod.downloads));
     const src = getSourceInfo(mod);
-    const sourceLabel = src.label;
-    const sourceClass = src.cssClass;
+    const sourceLabel = escapeHtml(src.label);
+    const sourceClass = src.cssClass === 'both' || src.cssClass === 'cf' ? src.cssClass : 'mr';
     const hasMR = src.hasMR;
     const hasCF = src.hasCF;
     const displayTitle = mod.cn_title ? `${mod.cn_title} (${mod.title})` : mod.title;
+    const iconUrl = escapeHtml(mod.icon_url || '');
+    const mrUrl = escapeHtml(mod.mr_url || '');
+    const cfUrl = escapeHtml(mod.cf_url || '');
+    const projectId = escapeHtml(mod.project_id || '');
+    const title = escapeHtml(mod.title || '');
     return `
       <div class="online-mod-card">
-        <img class="online-mod-icon" src="${mod.icon_url || ''}" alt="" onerror="this.style.display='none'">
+        <img class="online-mod-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">
         <div class="online-mod-info">
           <div class="online-mod-title" title="${escapeHtml(displayTitle)}">
             <span class="mod-source-tag ${sourceClass}">${sourceLabel}</span> ${escapeHtml(displayTitle)}
@@ -594,10 +602,10 @@ function renderOnlineResults(results, query) {
         </div>
         <div class="online-mod-actions">
           <div class="mod-link-row">
-            ${hasMR ? `<button class="mod-link-btn mr" data-url="${mod.mr_url}" aria-label="在 Modrinth 查看">MR</button>` : ''}
-            ${hasCF ? `<button class="mod-link-btn cf" data-url="${mod.cf_url}" aria-label="在 CurseForge 查看">CF</button>` : ''}
+            ${hasMR ? `<button class="mod-link-btn mr" data-url="${mrUrl}" aria-label="在 Modrinth 查看">MR</button>` : ''}
+            ${hasCF ? `<button class="mod-link-btn cf" data-url="${cfUrl}" aria-label="在 CurseForge 查看">CF</button>` : ''}
           </div>
-          <button class="online-mod-dl-btn" data-project="${mod.project_id}" data-title="${mod.title}">下载</button>
+          <button class="online-mod-dl-btn" data-project="${projectId}" data-title="${title}">下载</button>
         </div>
       </div>
     `;
@@ -742,7 +750,7 @@ function initInstanceDetailPage() {
     try {
       const gameDir = localStorage.getItem('gameDir') || '';
       const confirmed = await showConfirm(
-        `确定删除实例 ${currentDetailInstance} 吗？此操作不可恢复。`,
+        `确定删除版本 ${currentDetailInstance} 吗？此操作不可恢复。`,
         { title: '删除确认', kind: 'danger' }
       );
       if (!confirmed) return;

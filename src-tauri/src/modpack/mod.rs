@@ -436,7 +436,7 @@ pub fn do_import_modpack_named(
     emit_progress(app, name, "detecting", 1, 1, "识别完成");
 
     if inst_dir.exists() {
-        return Err(format!("实例 '{}' 已存在", inst_name));
+        return Err(format!("版本 '{}' 已存在", inst_name));
     }
 
     // 包装安装，失败时自动清理目录

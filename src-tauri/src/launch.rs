@@ -41,15 +41,15 @@ fn do_launch_minecraft(
     let version_name = &options.version_name;
     let ver_dir = game_dir.join("instances").join(version_name);
     if !ver_dir.exists() {
-        return Err(format!("实例 {} 未安装", version_name));
+        return Err(format!("版本 {} 未安装", version_name));
     }
 
     // 读取实例 JSON
     let version_json_path = ver_dir.join("instance.json");
     let json_str = std::fs::read_to_string(&version_json_path)
-        .map_err(|e| format!("读取实例配置失败: {}", e))?;
+        .map_err(|e| format!("读取版本配置失败: {}", e))?;
     let json: serde_json::Value =
-        serde_json::from_str(&json_str).map_err(|e| format!("解析实例 JSON 失败: {}", e))?;
+        serde_json::from_str(&json_str).map_err(|e| format!("解析版本 JSON 失败: {}", e))?;
 
     // 获取主类
     let main_class = json["mainClass"]
@@ -838,7 +838,7 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
         ("fml.common.loader", "⚠️ Forge 加载出错。\n请检查 Forge 版本是否与游戏版本匹配。"),
         // natives 问题
         ("no lwjgl", "❌ 缺少 LWJGL 本地库！\n请重新安装此版本。"),
-        ("unsatisfiedlinkerror", "❌ 本地库加载失败！\n可能是 natives 文件缺失或损坏。\n请删除实例的 natives 文件夹后重试。"),
+        ("unsatisfiedlinkerror", "❌ 本地库加载失败！\n可能是 natives 文件缺失或损坏。\n请删除版本的 natives 文件夹后重试。"),
         // 显卡/OpenGL 问题
         ("pixel format not accelerated", "❌ 显卡不支持 OpenGL！\n请更新显卡驱动或检查是否使用了核显。\n笔记本用户请确保游戏使用独立显卡运行。"),
         ("opengl", "⚠️ OpenGL 相关错误！\n请更新显卡驱动，或尝试降低游戏画质设置。"),
@@ -859,7 +859,7 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
         // 世界损坏
         ("corrupt", "⚠️ 文件可能已损坏！\n游戏文件或存档可能损坏。\n请尝试恢复备份或重新安装。"),
         // 端口占用
-        ("address already in use", "❌ 端口被占用！\n可能有其他 Minecraft 实例正在运行。\n请关闭后重试。"),
+        ("address already in use", "❌ 端口被占用！\n可能有其他 Minecraft 版本正在运行。\n请关闭后重试。"),
         // Java 进程崩溃（JVM crash）
         ("exception_access_violation", "❌ Java 进程崩溃（严重错误）！\n可能是显卡驱动或 Java 版本问题。\n请更新显卡驱动和 Java 版本。"),
         ("sigsegv", "❌ Java 进程崩溃（段错误）！\n请更新 Java 版本和显卡驱动。"),

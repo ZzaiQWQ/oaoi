@@ -655,7 +655,7 @@ pub fn do_install_modpack_inner(
         &inst_json_path,
         serde_json::to_string_pretty(&ver_json).unwrap(),
     )
-    .map_err(|e| format!("保存实例配置失败: {}", e))?;
+    .map_err(|e| format!("保存版本配置失败: {}", e))?;
 
     emit("done", 1, 1, &format!("整合包 '{}' 安装完成！", meta.name));
     Ok(format!("整合包 {} 安装成功", inst_name))

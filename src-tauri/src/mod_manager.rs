@@ -14,7 +14,7 @@ pub struct ModInfo {
 #[tauri::command]
 pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String> {
     let dir = resolve_game_dir(&game_dir);
-    let safe_name = safe_path_name(&name, "实例名")?;
+    let safe_name = safe_path_name(&name, "版本名")?;
     let mods_dir = dir.join("instances").join(&safe_name).join("mods");
     if !mods_dir.exists() {
         return Ok(vec![]);
@@ -109,7 +109,7 @@ pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String>
 #[tauri::command]
 pub fn toggle_mod(game_dir: String, name: String, file_name: String) -> Result<bool, String> {
     let dir = resolve_game_dir(&game_dir);
-    let safe_name = safe_path_name(&name, "实例名")?;
+    let safe_name = safe_path_name(&name, "版本名")?;
     let safe_file_name = safe_path_name(&file_name, "文件名")?;
     let mods_dir = dir.join("instances").join(&safe_name).join("mods");
     let src = mods_dir.join(&safe_file_name);
@@ -138,7 +138,7 @@ pub fn toggle_mod(game_dir: String, name: String, file_name: String) -> Result<b
 #[tauri::command]
 pub fn delete_mod(game_dir: String, name: String, file_name: String) -> Result<bool, String> {
     let dir = resolve_game_dir(&game_dir);
-    let safe_name = safe_path_name(&name, "实例名")?;
+    let safe_name = safe_path_name(&name, "版本名")?;
     let safe_file_name = safe_path_name(&file_name, "文件名")?;
     let mods_dir = dir.join("instances").join(&safe_name).join("mods");
     let target = mods_dir.join(&safe_file_name);

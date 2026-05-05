@@ -434,26 +434,62 @@
 }
 
 .online-mod-version-modal {
-  background: color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  background: rgba(255, 223, 234, 0.42);
   backdrop-filter: blur(var(--blur-radius, 8px));
 }
 
 .online-mod-version-modal .modal-content {
-  background: rgba(255, 255, 255, 0.95);
+  background:
+    radial-gradient(circle at 10% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
+    radial-gradient(circle at 92% 96%, rgba(255, 110, 154, 0.14), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97));
   backdrop-filter: blur(var(--blur-radius, 12px));
-  border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
+  border: 1px solid rgba(255, 128, 170, 0.34);
   border-radius: 18px;
-  box-shadow: 0 12px 40px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent), 0 0 0 1px rgba(255,255,255,0.6) inset;
+  box-shadow:
+    0 24px 60px rgba(132, 52, 83, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.82) inset;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
+.online-mod-version-modal .modal-header {
+  padding: 22px 24px 18px;
+  background: transparent;
+  border-bottom: 1px solid rgba(38, 42, 55, 0.08);
+}
+
+.online-mod-version-modal .modal-header h2 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: #202330;
+  letter-spacing: 0;
+}
+
 .online-mod-version-modal .modal-body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  padding: 18px 24px 14px;
+}
+
+.online-mod-version-modal .modal-footer {
+  padding: 14px 24px 20px;
+  background: transparent;
+  border-top: 1px solid rgba(38, 42, 55, 0.06);
+}
+
+.online-mod-version-modal .btn-secondary {
+  min-width: 92px;
+  height: 40px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #f04480;
+  border: 1px solid rgba(255, 95, 145, 0.34);
 }
 
 .online-mod-version-filter {
@@ -475,16 +511,16 @@
   align-items: center;
   gap: 10px;
   padding: 9px 10px;
-  background: rgba(255, 255, 255, 0.48);
-  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.22 * 100%), transparent);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(32, 35, 48, 0.08);
   border-radius: 10px;
   transition: all 0.16s ease;
 }
 
 .online-mod-version-row:hover,
 .online-mod-version-row.recommended {
-  background: color-mix(in srgb, var(--pink-200) calc(0.55 * 100%), transparent);
-  border-color: color-mix(in srgb, var(--pink-500) calc(0.45 * 100%), transparent);
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(255, 112, 158, 0.30);
 }
 
 .online-mod-version-info {
@@ -495,7 +531,7 @@
 .online-mod-version-name {
   font-size: 12px;
   font-weight: 800;
-  color: var(--pink-700);
+  color: #252835;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -508,7 +544,7 @@
   margin-top: 3px;
   font-size: 10px;
   font-weight: 600;
-  color: var(--pink-600);
+  color: #858897;
 }
 
 .online-mod-version-current {

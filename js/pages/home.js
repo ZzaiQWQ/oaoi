@@ -368,6 +368,35 @@ function resetLaunchBtn(btn) {
   btn.style.background = '';
   btn.innerHTML = `<span>启动游戏</span>`;
 }
+
+function getSelectedInstanceName() {
+  const sel = document.getElementById('versionSelector');
+  return (sel?.value || '').trim();
+}
+
+function updateOpenInstanceButton() {
+  const btn = document.getElementById('openSelectedInstanceBtn');
+  if (!btn) return;
+  btn.disabled = !getSelectedInstanceName();
+}
+
+function initOpenSelectedInstanceButton() {
+  const btn = document.getElementById('openSelectedInstanceBtn');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', () => {
+    const selectedVersion = getSelectedInstanceName();
+    if (!selectedVersion) {
+      showToast('先选一个版本，再打开设置', 'warn');
+      return;
+    }
+    if (typeof showInstanceDetail === 'function') {
+      showInstanceDetail(selectedVersion);
+    }
+  });
+  updateOpenInstanceButton();
+}
+
 async function loadInstalledVersions() {
   const sel = document.getElementById('versionSelector');
   const installedList = document.getElementById('installedList');
@@ -386,7 +415,7 @@ async function loadInstalledVersions() {
     // 更新主页版本选择器（隐藏的 select + 自定义下拉）
     if (sel) {
       const prev = sel.value;
-      sel.innerHTML = '<option value="">-- 选择实例 --</option>';
+      sel.innerHTML = '<option value="">-- 选择版本 --</option>';
       instances.forEach(v => {
         const opt = document.createElement('option');
         opt.value = opt.textContent = v.name;
@@ -404,7 +433,7 @@ async function loadInstalledVersions() {
     if (installedList) {
       if (installedCount) installedCount.textContent = instances.length;
       if (instances.length === 0) {
-        installedList.innerHTML = '<div class="installed-empty">暂无已安装实例，请在下方下载</div>';
+        installedList.innerHTML = '<div class="installed-empty">暂无已安装版本，请在下方下载</div>';
       } else {
         installedList.innerHTML = instances.map(v => `
           <div class="installed-card" data-ver="${v.name}">
@@ -412,7 +441,7 @@ async function loadInstalledVersions() {
               <span class="ver-name">${v.name}</span>
               <span style="font-size:9px; color:#b0506e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">MC ${v.mc_version} <span style="text-transform:capitalize;">${v.loader_type !== 'vanilla' ? '| ' + v.loader_type : ''}</span></span>
             </div>
-            <button class="ver-delete" title="删除此实例" data-ver="${v.name}">🗑️</button>
+            <button class="ver-delete" title="删除此版本" data-ver="${v.name}">🗑️</button>
           </div>
         `).join('');
         // 绑定删除事件
@@ -420,7 +449,7 @@ async function loadInstalledVersions() {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
             const ver = btn.dataset.ver;
-            const confirmed = await showConfirm(`确定删除实例 ${ver} 吗？`, { title: '删除确认', kind: 'danger' });
+            const confirmed = await showConfirm(`确定删除版本 ${ver} 吗？`, { title: '删除确认', kind: 'danger' });
             if (!confirmed) return;
             try {
               const tauri = await waitForTauri();
@@ -444,7 +473,7 @@ async function loadInstalledVersions() {
       }
     }
   } catch (e) {
-    console.warn('加载实例列表失败:', e);
+    console.warn('加载版本列表失败:', e);
   }
 }
 
@@ -471,7 +500,11 @@ function initLaunchButton() {
   if (!btn) return;
 
   // 保存选择
-  if (sel) sel.addEventListener('change', () => localStorage.setItem('selectedVersion', sel.value));
+  if (sel) sel.addEventListener('change', () => {
+    localStorage.setItem('selectedVersion', sel.value);
+    updateOpenInstanceButton();
+  });
+  initOpenSelectedInstanceButton();
 
   // 初始加载版本列表
   loadInstalledVersions();
@@ -492,7 +525,7 @@ function initLaunchButton() {
       const instMemOverride = localStorage.getItem(`mem_${selectedVersion}`);
       if (instMemOverride) {
         memAlloc = parseInt(instMemOverride) || memAlloc;
-        console.log(`[launch] 使用实例内存: ${memAlloc}MB`);
+        console.log(`[launch] 使用版本内存: ${memAlloc}MB`);
       } else if (memoryMode === 'auto') {
         const autoMemory = getInstanceAutoMemory(inst);
         if (autoMemory) {
@@ -637,7 +670,7 @@ function initLaunchButton() {
       }
     } else {
       javaPath = localStorage.getItem(`javaPath_${selectedVersion}`) || localStorage.getItem('selectedJavaPath');
-      if (!javaPath) { showToast('请先在实例设置或设置页选择 Java 路径', 'warn'); isLaunching = false; return; }
+      if (!javaPath) { showToast('请先在版本设置或设置页选择 Java 路径', 'warn'); isLaunching = false; return; }
     }
 
     btn.style.pointerEvents = 'none';
@@ -737,7 +770,7 @@ function syncVersionDropdown(instances, selectedValue) {
   const defItem = document.createElement('button');
   defItem.type = 'button';
   defItem.className = 'vd-item' + (!selectedValue ? ' active' : '');
-  defItem.textContent = '-- 选择实例 --';
+  defItem.textContent = '-- 选择版本 --';
   defItem.dataset.value = '';
   list.appendChild(defItem);
 
@@ -750,7 +783,8 @@ function syncVersionDropdown(instances, selectedValue) {
     list.appendChild(item);
   });
 
-  text.textContent = selectedValue || '-- 选择实例 --';
+  text.textContent = selectedValue || '-- 选择版本 --';
+  updateOpenInstanceButton();
 }
 
 function initVersionDropdown() {
@@ -776,6 +810,7 @@ function initVersionDropdown() {
     if (sel) sel.value = value;
     if (text) text.textContent = item.textContent;
     if (value) localStorage.setItem('selectedVersion', value);
+    updateOpenInstanceButton();
     list.classList.add('hidden');
   });
 
