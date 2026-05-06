@@ -132,6 +132,83 @@ pub fn safe_join(base: &std::path::Path, relative: &str) -> Result<std::path::Pa
     Ok(base.join(out))
 }
 
+pub fn set_minecraft_language(instance_dir: &std::path::Path, lang: &str) -> Result<(), String> {
+    let safe_lang = safe_path_name(lang, "语言代码")?;
+    let options_path = instance_dir.join("options.txt");
+    let mut lines = if options_path.exists() {
+        std::fs::read_to_string(&options_path)
+            .map_err(|e| format!("读取语言配置失败: {}", e))?
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut found = false;
+    for line in &mut lines {
+        if line.trim_start().starts_with("lang:") {
+            *line = format!("lang:{}", safe_lang);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        lines.push(format!("lang:{}", safe_lang));
+    }
+
+    std::fs::write(&options_path, format!("{}\n", lines.join("\n")))
+        .map_err(|e| format!("写入语言配置失败: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_minecraft_language;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("oaoi_test_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn set_minecraft_language_only_replaces_lang_line() {
+        let dir = temp_dir("replace_lang");
+        let options = dir.join("options.txt");
+        std::fs::write(
+            &options,
+            "fov:0.0\nlang:en_us\nrenderDistance:12\nkey_key.attack:key.mouse.left\n",
+        )
+        .unwrap();
+
+        set_minecraft_language(&dir, "zh_cn").unwrap();
+
+        let updated = std::fs::read_to_string(&options).unwrap();
+        assert!(updated.contains("fov:0.0\n"));
+        assert!(updated.contains("lang:zh_cn\n"));
+        assert!(updated.contains("renderDistance:12\n"));
+        assert!(updated.contains("key_key.attack:key.mouse.left\n"));
+        assert!(!updated.contains("lang:en_us"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_minecraft_language_appends_lang_when_missing() {
+        let dir = temp_dir("append_lang");
+        let options = dir.join("options.txt");
+        std::fs::write(&options, "fov:0.0\nrenderDistance:12\n").unwrap();
+
+        set_minecraft_language(&dir, "zh_cn").unwrap();
+
+        let updated = std::fs::read_to_string(&options).unwrap();
+        assert!(updated.contains("fov:0.0\n"));
+        assert!(updated.contains("renderDistance:12\n"));
+        assert!(updated.contains("lang:zh_cn\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn count_instance_mods(instance_dir: &std::path::Path) -> u32 {
     let mods_dir = instance_dir.join("mods");
     if !mods_dir.exists() {

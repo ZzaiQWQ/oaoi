@@ -630,6 +630,7 @@ pub fn do_install_modpack_inner(
             extract_overrides_cf(zip_file, inst_dir, override_path)?;
         }
     }
+    crate::instance::set_minecraft_language(inst_dir, "zh_cn")?;
 
     // 自动内存：先使用整合包内部给出的值，没有再按 Mod 数量估算。
     let mods_dir = inst_dir.join("mods");

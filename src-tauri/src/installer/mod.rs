@@ -900,6 +900,7 @@ fn do_create_instance(
     if crate::instance::is_cancelled(name) {
         return Err("用户取消安装".to_string());
     }
+    crate::instance::set_minecraft_language(&inst_dir, "zh_cn")?;
 
     // 写回最终配置到 instance.json
     std::fs::write(
