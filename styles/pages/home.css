@@ -82,6 +82,29 @@
   color: #f04480;
 }
 
+.java-download-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.java-download-cancel {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 103, 151, 0.42);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #e83f78;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.java-download-cancel:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
 .java-download-bar-wrap {
   height: 8px;
   border-radius: 999px;

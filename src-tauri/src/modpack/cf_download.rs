@@ -1,32 +1,36 @@
 use super::detect_target_dir;
-use crate::installer::download_file_if_needed;
+use crate::installer::download_file_if_needed_cancelable;
 use crate::instance::{cf_api_key, safe_path_name};
 
 /// 根据 fileId 构造 CurseForge CDN URL（fileId 拆分为 id/1000 和 id%1000 路径）
 pub fn cf_cdn_urls(file_id: u32, file_name: &str) -> Vec<String> {
     let id1 = file_id / 1000;
     let id2 = file_id % 1000;
+    let encoded_name = urlencoding::encode(file_name);
     vec![
         format!(
             "https://edge.forgecdn.net/files/{}/{}/{}",
-            id1, id2, file_name
+            id1, id2, encoded_name
         ),
         format!(
             "https://mediafilez.forgecdn.net/files/{}/{}/{}",
-            id1, id2, file_name
+            id1, id2, encoded_name
         ),
     ]
 }
 
-/// 单文件下载：先通过 CurseForge API 获取下载链接，失败则回退 CDN
-pub fn cf_download_mod(
+pub fn cf_download_mod_cancelable(
     http: &reqwest::blocking::Client,
     project_id: u32,
     file_id: u32,
     inst_dir: &std::path::Path,
+    cancel_name: Option<&str>,
 ) -> Result<bool, String> {
     let mods_dir = inst_dir.join("mods");
     std::fs::create_dir_all(&mods_dir).map_err(|e| e.to_string())?;
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
+    }
 
     let api_client = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(8))
@@ -40,6 +44,9 @@ pub fn cf_download_mod(
         "https://api.curseforge.com/v1/mods/{}/files/{}",
         project_id, file_id
     );
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
+    }
     if let Ok(resp) = api_client
         .get(&api_url)
         .header("x-api-key", &cf_api_key())
@@ -73,7 +80,14 @@ pub fn cf_download_mod(
                     // 1a) 有 downloadUrl
                     if !dl_url.is_empty() {
                         eprintln!("[cf] API downloadUrl: {}", fname);
-                        return download_file_if_needed(http, &dl_url, &dest, None, false);
+                        return download_file_if_needed_cancelable(
+                            http,
+                            &dl_url,
+                            &dest,
+                            None,
+                            false,
+                            cancel_name,
+                        );
                     }
                     // 1b) 尝试 download-url 端点
                     let dl_api = format!(
@@ -90,8 +104,13 @@ pub fn cf_download_mod(
                                 if let Some(url) = json2["data"].as_str() {
                                     if !url.is_empty() {
                                         eprintln!("[cf] download-url端点: {}", fname);
-                                        return download_file_if_needed(
-                                            http, url, &dest, None, false,
+                                        return download_file_if_needed_cancelable(
+                                            http,
+                                            url,
+                                            &dest,
+                                            None,
+                                            false,
+                                            cancel_name,
                                         );
                                     }
                                 }
@@ -101,8 +120,18 @@ pub fn cf_download_mod(
                     // 1c) CDN + 文件名
                     let cdn_urls = cf_cdn_urls(file_id, &fname);
                     for cdn in &cdn_urls {
+                        if is_cancelled(cancel_name) {
+                            return Err("用户取消下载".to_string());
+                        }
                         eprintln!("[cf] CDN: {}", cdn);
-                        match download_file_if_needed(http, cdn, &dest, None, false) {
+                        match download_file_if_needed_cancelable(
+                            http,
+                            cdn,
+                            &dest,
+                            None,
+                            false,
+                            cancel_name,
+                        ) {
                             Ok(r) => return Ok(r),
                             Err(e) => {
                                 eprintln!("[cf] CDN失败: {}", e);
@@ -140,6 +169,9 @@ pub fn cf_download_mod(
         format!("https://mediafilez.forgecdn.net/files/{}/{}", p1, p2),
     ];
     for base_url in &base_urls {
+        if is_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
         eprintln!("[cf] CDN盲猜: {} p={} f={}", base_url, project_id, file_id);
         match http.get(base_url).send() {
             Ok(mut resp) => {
@@ -184,10 +216,13 @@ pub fn cf_download_mod(
                     );
                 }
                 let dest = target_dir.join(&safe_filename);
-                let mut file =
-                    std::fs::File::create(&dest).map_err(|e| format!("创建文件失败: {}", e))?;
-                let written =
-                    std::io::copy(&mut resp, &mut file).map_err(|e| format!("写入失败: {}", e))?;
+                let tmp_path = dest.with_extension("tmp");
+                let written = write_response_cancelable(&mut resp, &tmp_path, cancel_name)
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        e
+                    })?;
+                std::fs::rename(&tmp_path, &dest).map_err(|e| format!("重命名失败: {}", e))?;
                 eprintln!("[cf] CDN成功: {} ({} bytes)", filename, written);
                 return Ok(true);
             }
@@ -201,6 +236,33 @@ pub fn cf_download_mod(
         "CurseForge下载失败: p={} f={}",
         project_id, file_id
     ))
+}
+
+fn is_cancelled(cancel_name: Option<&str>) -> bool {
+    cancel_name.is_some_and(crate::instance::is_cancelled)
+}
+
+fn write_response_cancelable(
+    resp: &mut reqwest::blocking::Response,
+    dest: &std::path::Path,
+    cancel_name: Option<&str>,
+) -> Result<u64, String> {
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut written = 0u64;
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        if is_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
+        let read = std::io::Read::read(resp, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buf[..read])
+            .map_err(|e| format!("写入失败: {}", e))?;
+        written += read as u64;
+    }
+    Ok(written)
 }
 
 /// 简单的 URL percent-decode

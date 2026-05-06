@@ -100,6 +100,9 @@ function initDownloadPage() {
     const date = new Date(v.releaseTime);
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const aprilFools = isAprilFools(v);
+    const versionId = escapeHtml(v.id || '');
+    const metaUrl = escapeHtml(v.url || '');
+    const source = escapeHtml(activeManifestSource);
     let icon, typeName, typeClass;
     if (aprilFools) {
       icon = '🎃'; typeName = '愚人节'; typeClass = 'april-fools';
@@ -113,16 +116,16 @@ function initDownloadPage() {
       icon = '🧪'; typeName = '快照'; typeClass = 'snapshot';
     }
     return `
-      <div class="dl-item">
-        <div class="dl-item-icon ${typeClass}">${icon}</div>
-        <div class="dl-item-info">
-          <div class="dl-item-name">${v.id}</div>
+        <div class="dl-item">
+          <div class="dl-item-icon ${typeClass}">${icon}</div>
+          <div class="dl-item-info">
+          <div class="dl-item-name">${versionId}</div>
           <div class="dl-item-meta">
             <span class="dl-item-type ${typeClass}">${typeName}</span>
             ${dateStr}
           </div>
         </div>
-        <button class="dl-install-btn" data-version="${v.id}" data-url="${v.url}" data-source="${activeManifestSource}">安装</button>
+        <button class="dl-install-btn" data-version="${versionId}" data-url="${metaUrl}" data-source="${source}">安装</button>
       </div>
     `;
   }
@@ -291,7 +294,7 @@ function initDownloadPage() {
           dlActiveList.insertAdjacentHTML('beforeend', `
             <div class="dl-progress-card" id="${dlId}">
               <div class="dl-progress-card-header">
-                <div class="dl-progress-name">📦 ${name}</div>
+                <div class="dl-progress-name">📦 ${escapeHtml(name)}</div>
                 <button class="dl-cancel-btn" id="${dlId}-cancel" title="取消安装">✕</button>
               </div>
               <div class="dl-progress-summary" id="${dlId}-summary">
@@ -405,7 +408,7 @@ function initDownloadPage() {
             const msg = stage === 'cancelled' ? '已取消' : detail;
             if (summaryText) summaryText.textContent = `${icon} ${msg}`;
             if (mainBar) mainBar.style.width = '0%';
-            if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${msg}</span></div>`;
+            if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
             const modalStages = document.getElementById('dlDetailStages');
             if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
             const cancelBtn = document.getElementById(`${dlId}-cancel`);
@@ -425,12 +428,7 @@ function initDownloadPage() {
           } else if (stagesContainer) {
             const label = STAGE_LABELS[stage] || stage;
             if (total > 0) {
-              let progressText;
-              if (stage === 'downloading') {
-                progressText = `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`;
-              } else {
-                progressText = `${current}/${total}`;
-              }
+              const progressText = formatStageProgress(current, total, stage);
               if (summaryText) summaryText.textContent = `${label} ${progressText}`;
               if (mainBar) mainBar.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
             } else {
@@ -456,11 +454,9 @@ function initDownloadPage() {
             const countEl = document.getElementById(`${stageId}-count`);
             const barEl = document.getElementById(`${stageId}-bar`);
             if (total > 0) {
-              const pct = Math.min(100, Math.round((current / total) * 100));
-              if (countEl) {
-                countEl.textContent = stage === 'downloading'
-                  ? `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
-                  : `${current}/${total}`;
+            const pct = Math.min(100, Math.round((current / total) * 100));
+            if (countEl) {
+                countEl.textContent = formatStageProgress(current, total, stage);
               }
               if (barEl) barEl.style.width = pct + '%';
               if (pct >= 100 && barEl) barEl.style.opacity = '0.5';

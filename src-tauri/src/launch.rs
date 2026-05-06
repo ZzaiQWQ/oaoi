@@ -1,4 +1,5 @@
-use crate::instance::resolve_game_dir;
+use crate::installer::{download_file_if_needed, maven_name_to_path, safe_maven_path};
+use crate::instance::{resolve_game_dir, safe_path_name};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tauri::Emitter;
@@ -38,8 +39,8 @@ fn do_launch_minecraft(
     }
 
     // 实例目录
-    let version_name = &options.version_name;
-    let ver_dir = game_dir.join("instances").join(version_name);
+    let version_name = safe_path_name(&options.version_name, "版本名")?;
+    let ver_dir = game_dir.join("instances").join(&version_name);
     if !ver_dir.exists() {
         return Err(format!("版本 {} 未安装", version_name));
     }
@@ -93,36 +94,24 @@ fn do_launch_minecraft(
             // 解析库路径
             let lib_path_opt = if let Some(artifact) = lib["downloads"]["artifact"]["path"].as_str()
             {
-                let p = libs_dir.join(artifact.replace('/', "\\"));
-                if p.exists() {
-                    Some(p.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            } else if let Some(name) = lib["name"].as_str() {
-                let parts: Vec<&str> = name.split(':').collect();
-                if parts.len() >= 3 {
-                    let group_path = parts[0].replace('.', "\\");
-                    let artifact_name = parts[1];
-                    let version = parts[2];
-                    let jar_name = if parts.len() >= 4 {
-                        format!("{}-{}-{}.jar", artifact_name, version, parts[3])
-                    } else {
-                        format!("{}-{}.jar", artifact_name, version)
-                    };
-                    let p = libs_dir
-                        .join(&group_path)
-                        .join(artifact_name)
-                        .join(version)
-                        .join(&jar_name);
+                safe_maven_path(artifact).ok().and_then(|path| {
+                    let p = libs_dir.join(path);
                     if p.exists() {
                         Some(p.to_string_lossy().to_string())
                     } else {
                         None
                     }
-                } else {
-                    None
-                }
+                })
+            } else if let Some(name) = lib["name"].as_str() {
+                let rel_path = maven_name_to_path(name);
+                safe_maven_path(&rel_path).ok().and_then(|path| {
+                    let p = libs_dir.join(path);
+                    if p.exists() {
+                        Some(p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             };
@@ -194,7 +183,10 @@ fn do_launch_minecraft(
                 let native_jar_path = if let Some(cl) =
                     lib["downloads"]["classifiers"][&classifier_key]["path"].as_str()
                 {
-                    libs_dir.join(cl.replace('/', "\\"))
+                    let Ok(path) = safe_maven_path(cl) else {
+                        continue;
+                    };
+                    libs_dir.join(path)
                 } else {
                     continue;
                 };
@@ -207,10 +199,16 @@ fn do_launch_minecraft(
                             let _ = std::fs::create_dir_all(parent);
                         }
                         eprintln!("[launch] 下载 native: {}", url);
-                        if let Ok(mut resp) = reqwest::blocking::get(url) {
-                            if let Ok(mut file) = std::fs::File::create(&native_jar_path) {
-                                let _ = std::io::copy(&mut resp, &mut file);
-                            }
+                        let sha1 =
+                            lib["downloads"]["classifiers"][&classifier_key]["sha1"].as_str();
+                        if let Ok(http) = reqwest::blocking::Client::builder()
+                            .connect_timeout(std::time::Duration::from_secs(15))
+                            .timeout(std::time::Duration::from_secs(60))
+                            .user_agent("OAOI-Launcher/1.0")
+                            .build()
+                        {
+                            let _ =
+                                download_file_if_needed(&http, url, &native_jar_path, sha1, false);
                         }
                     }
                 }
@@ -225,7 +223,13 @@ fn do_launch_minecraft(
                                         || name.ends_with(".so")
                                         || name.ends_with(".dylib")
                                     {
-                                        let filename = name.rsplit('/').next().unwrap_or(&name);
+                                        let Some(filename) = name.rsplit('/').next() else {
+                                            continue;
+                                        };
+                                        let Ok(filename) = safe_path_name(filename, "native文件名")
+                                        else {
+                                            continue;
+                                        };
                                         let out_path = natives_dir.join(filename);
                                         if !out_path.exists() {
                                             if let Ok(mut out) = std::fs::File::create(&out_path) {
@@ -353,7 +357,7 @@ fn do_launch_minecraft(
                 .replace("${launcher_version}", "1.0")
                 .replace("${classpath}", &classpath_str)
                 .replace("${classpath_separator}", ";")
-                .replace("${version_name}", version_name)
+                .replace("${version_name}", &version_name)
                 .replace("${primary_jar_name}", "client.jar");
             // NeoForge: ignoreList 引用 ${version_name}.jar，但我们的是 client.jar
             if r.starts_with("-DignoreList=") {
@@ -441,7 +445,7 @@ fn do_launch_minecraft(
         let mc_args_str = json["minecraftArguments"].as_str().unwrap();
         let replaced = mc_args_str
             .replace("${auth_player_name}", &options.player_name)
-            .replace("${version_name}", version_name)
+            .replace("${version_name}", &version_name)
             .replace("${game_directory}", &ver_dir.to_string_lossy())
             .replace("${assets_root}", &game_dir.join("res").to_string_lossy())
             .replace("${assets_index_name}", asset_index)

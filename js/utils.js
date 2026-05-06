@@ -40,6 +40,20 @@ function formatFileSize(bytes) {
   return '';
 }
 
+function formatProgressSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value >= 1048576) return `${(value / 1048576).toFixed(1)}MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)}KB`;
+  return `${value}B`;
+}
+
+function formatStageProgress(current, total, stage = '') {
+  const cur = Number(current || 0);
+  const tot = Number(total || 0);
+  const looksLikeBytes = stage === 'downloading' || cur >= 1048576 || tot >= 1048576;
+  return looksLikeBytes ? `${formatProgressSize(cur)} / ${formatProgressSize(tot)}` : `${cur}/${tot}`;
+}
+
 /**
  * 判断来源标签 (MR/CF/MR+CF)
  */

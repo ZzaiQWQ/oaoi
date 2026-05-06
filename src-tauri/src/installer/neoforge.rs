@@ -1,7 +1,8 @@
 use super::{
-    build_data_map, download_file_if_needed, get_jar_main_class, make_emitter, maven_name_to_path,
-    merge_libraries, resolve_data_arg, FORGE_LOCK,
+    build_data_map, download_file_if_needed_cancelable, get_jar_main_class, make_emitter,
+    maven_name_to_path, merge_libraries, resolve_data_arg, safe_maven_path, FORGE_LOCK,
 };
+use crate::instance::safe_join;
 
 /// 安装 NeoForge loader（解压 installer.jar，自行下载库 + 执行 processors）
 pub fn install_neoforge(
@@ -47,8 +48,15 @@ pub fn install_neoforge(
     let installer_path = inst_dir.join("neoforge-installer.jar");
 
     emit("neoforge", 5, 100, "下载 NeoForge 安装器...");
-    download_file_if_needed(http, &installer_url, &installer_path, None, use_mirror)
-        .map_err(|e| format!("下载 NeoForge 安装器失败: {}", e))?;
+    download_file_if_needed_cancelable(
+        http,
+        &installer_url,
+        &installer_path,
+        None,
+        use_mirror,
+        Some(name),
+    )
+    .map_err(|e| format!("下载 NeoForge 安装器失败: {}", e))?;
 
     // 2. 解压 installer.jar
     emit("neoforge", 15, 100, "解压 NeoForge 安装器...");
@@ -61,11 +69,9 @@ pub fn install_neoforge(
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         for i in 0..archive.len() {
             if let Ok(mut entry) = archive.by_index(i) {
-                let out_path = temp_dir.join(entry.name());
-                // 防止 ZipSlip 路径穿越攻击
-                if !out_path.starts_with(&temp_dir) {
+                let Ok(out_path) = safe_join(&temp_dir, entry.name()) else {
                     continue;
-                }
+                };
                 if entry.is_dir() {
                     std::fs::create_dir_all(&out_path).ok();
                 } else {
@@ -152,7 +158,11 @@ pub fn install_neoforge(
         if rel_path.is_empty() {
             continue;
         }
-        let dest = libs_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let Ok(rel_path_buf) = safe_maven_path(&rel_path) else {
+            eprintln!("[neoforge] skip unsafe library path: {}", rel_path);
+            continue;
+        };
+        let dest = libs_dir.join(&rel_path_buf);
 
         if dest.exists() {
             continue;
@@ -160,7 +170,7 @@ pub fn install_neoforge(
 
         // 先检查 installer.jar 里的 maven/ 目录是否有本地副本
         // 优先从 installer 内置的 maven/ 目录复制本地库
-        let local_maven = temp_dir.join("maven").join(&rel_path);
+        let local_maven = temp_dir.join("maven").join(&rel_path_buf);
         if local_maven.exists() {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -186,7 +196,14 @@ pub fn install_neoforge(
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            match download_file_if_needed(http, &artifact_url, &dest, None, use_mirror) {
+            match download_file_if_needed_cancelable(
+                http,
+                &artifact_url,
+                &dest,
+                None,
+                use_mirror,
+                Some(name),
+            ) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("[neoforge] 库下载失败(非致命): {} - {}", lib_name, e);
@@ -225,8 +242,12 @@ pub fn install_neoforge(
                     continue;
                 }
 
-                let jar_path = libs_dir
-                    .join(maven_name_to_path(jar_name).replace('/', std::path::MAIN_SEPARATOR_STR));
+                let jar_rel_path = maven_name_to_path(jar_name);
+                let Ok(jar_rel_path) = safe_maven_path(&jar_rel_path) else {
+                    eprintln!("[neoforge] skip unsafe processor jar path: {}", jar_name);
+                    continue;
+                };
+                let jar_path = libs_dir.join(jar_rel_path);
                 if !jar_path.exists() {
                     eprintln!("[neoforge] processor jar 不存在: {}", jar_path.display());
                     continue;
@@ -237,10 +258,15 @@ pub fn install_neoforge(
                 if let Some(classpath) = proc["classpath"].as_array() {
                     for cp in classpath {
                         if let Some(cp_name) = cp.as_str() {
-                            let cp_path = libs_dir.join(
-                                maven_name_to_path(cp_name)
-                                    .replace('/', std::path::MAIN_SEPARATOR_STR),
-                            );
+                            let cp_rel_path = maven_name_to_path(cp_name);
+                            let Ok(cp_rel_path) = safe_maven_path(&cp_rel_path) else {
+                                eprintln!(
+                                    "[neoforge] skip unsafe processor classpath: {}",
+                                    cp_name
+                                );
+                                continue;
+                            };
+                            let cp_path = libs_dir.join(cp_rel_path);
                             if cp_path.exists() {
                                 proc_cp.push(cp_path.to_string_lossy().to_string());
                             }

@@ -1,4 +1,4 @@
-use super::{download_file_if_needed, make_emitter, merge_libraries};
+use super::{download_file_if_needed_cancelable, make_emitter, merge_libraries, safe_maven_path};
 
 /// 安装 Quilt loader
 pub fn install_quilt(
@@ -59,29 +59,37 @@ pub fn install_quilt(
             } else {
                 format!("{}-{}.jar", artifact, version)
             };
-            let url = format!(
-                "{}{}/{}/{}/{}",
-                maven_url, group_path, artifact, version, jar_name
-            );
-            let dest = game_dir
-                .join("libs")
-                .join(&group_path)
-                .join(artifact)
-                .join(version)
-                .join(&jar_name);
+            let relative_path = format!("{}/{}/{}/{}", group_path, artifact, version, jar_name);
+            let url = format!("{}{}", maven_url, relative_path);
+            let Ok(relative_path) = safe_maven_path(&relative_path) else {
+                continue;
+            };
+            let dest = game_dir.join("libs").join(relative_path);
             quilt_tasks.push((url, dest, sha1.map(|s| s.to_string())));
         }
         let total = quilt_tasks.len();
         emit("quilt", 0, total, &format!("下载 Quilt 库 0/{}", total));
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let handles: Vec<_> = quilt_tasks
             .into_iter()
             .map(|(url, dest, sha1)| {
                 let done = done.clone();
+                let errors = errors.clone();
                 let h = http.clone();
+                let cancel_name = name.to_string();
                 std::thread::spawn(move || {
-                    let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
+                    if let Err(e) = download_file_if_needed_cancelable(
+                        &h,
+                        &url,
+                        &dest,
+                        sha1.as_deref(),
+                        use_mirror,
+                        Some(&cancel_name),
+                    ) {
+                        errors.lock().unwrap().push(format!("{} -> {}", url, e));
+                    }
                     done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 })
             })
@@ -101,7 +109,22 @@ pub fn install_quilt(
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         for h in handles {
-            let _ = h.join();
+            if h.join().is_err() {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push("quilt download worker panicked".to_string());
+            }
+        }
+        let errors = errors.lock().unwrap();
+        if !errors.is_empty() {
+            let sample = errors
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("Quilt libraries failed: {}", sample));
         }
         emit("quilt", total, total, "Quilt 库下载完成");
     }

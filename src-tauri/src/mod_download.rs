@@ -41,7 +41,10 @@ pub async fn download_online_mod(
     version_id: Option<String>,
 ) -> Result<String, String> {
     let ptype = project_type.unwrap_or_else(|| "mod".to_string());
-    let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+    let cancel_name = online_mod_cancel_name(&name, &project_id, version_id.as_deref());
+    let unregister_name = cancel_name.clone();
+    crate::instance::register_cancel(&cancel_name);
+    let result = tokio::task::spawn_blocking(move || {
         download_online_mod_blocking(
             &game_dir,
             &name,
@@ -50,11 +53,12 @@ pub async fn download_online_mod(
             &loader,
             &ptype,
             version_id.as_deref(),
+            &cancel_name,
         )
     })
-    .await
-    .map_err(|e| format!("任务失败: {}", e))?;
-    result
+    .await;
+    crate::instance::unregister_cancel(&unregister_name);
+    result.map_err(|e| format!("任务失败: {}", e))?
 }
 
 fn get_online_mod_versions_blocking(
@@ -82,6 +86,7 @@ fn download_online_mod_blocking(
     loader: &str,
     project_type: &str,
     version_id: Option<&str>,
+    cancel_name: &str,
 ) -> Result<String, String> {
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -100,6 +105,7 @@ fn download_online_mod_blocking(
             loader,
             project_type,
             version_id,
+            cancel_name,
         );
     }
 
@@ -167,7 +173,15 @@ fn download_online_mod_blocking(
         "shader" => "shaderpacks",
         _ => "mods",
     };
-    let main_result = do_download_to_dir(&http, game_dir, name, download_url, file_name, sub_dir)?;
+    let main_result = do_download_to_dir(
+        &http,
+        game_dir,
+        name,
+        download_url,
+        file_name,
+        sub_dir,
+        Some(cancel_name),
+    )?;
 
     // 检查并下载前置依赖
     let mut dep_names: Vec<String> = Vec::new();
@@ -240,7 +254,13 @@ fn download_online_mod_blocking(
                                     // 检查是否已安装
                                     if !mods_dir.join(&safe_dep_fname).exists() {
                                         match do_download_to_dir(
-                                            &http, game_dir, name, dep_url, dep_fname, "mods",
+                                            &http,
+                                            game_dir,
+                                            name,
+                                            dep_url,
+                                            dep_fname,
+                                            "mods",
+                                            Some(cancel_name),
                                         ) {
                                             Ok(_) => {
                                                 eprintln!("[dep] 已下载前置: {}", dep_fname);
@@ -518,6 +538,7 @@ fn download_from_curseforge(
     loader: &str,
     project_type: &str,
     version_id: Option<&str>,
+    cancel_name: &str,
 ) -> Result<String, String> {
     let loader_type = curseforge_loader_type(loader);
     let file = if let Some(file_id) = version_id.filter(|v| !v.is_empty()) {
@@ -576,7 +597,15 @@ fn download_from_curseforge(
         "shader" => "shaderpacks",
         _ => "mods",
     };
-    let main_result = do_download_to_dir(http, game_dir, name, &download_url, file_name, sub_dir)?;
+    let main_result = do_download_to_dir(
+        http,
+        game_dir,
+        name,
+        &download_url,
+        file_name,
+        sub_dir,
+        Some(cancel_name),
+    )?;
 
     // 检查 CurseForge 前置依赖
     let mut dep_names: Vec<String> = Vec::new();
@@ -622,7 +651,13 @@ fn download_from_curseforge(
                                 && !mods_dir.join(&safe_dep_fname).exists()
                             {
                                 match do_download_to_dir(
-                                    http, game_dir, name, dep_dl_url, dep_fname, "mods",
+                                    http,
+                                    game_dir,
+                                    name,
+                                    dep_dl_url,
+                                    dep_fname,
+                                    "mods",
+                                    Some(cancel_name),
                                 ) {
                                     Ok(_) => {
                                         eprintln!("[cf_dep] 已下载前置: {}", dep_fname);
@@ -658,7 +693,11 @@ fn do_download_to_dir(
     download_url: &str,
     file_name: &str,
     sub_dir: &str,
+    cancel_name: Option<&str>,
 ) -> Result<String, String> {
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
+    }
     let dir = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let safe_file_name = safe_path_name(file_name, "文件名")?;
@@ -675,6 +714,9 @@ fn do_download_to_dir(
     if dest.exists() {
         return Ok(format!("已存在: {}", safe_file_name));
     }
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
+    }
 
     let mut response = http
         .get(download_url)
@@ -687,10 +729,24 @@ fn do_download_to_dir(
     {
         let mut out =
             std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败: {}", e))?;
-        std::io::copy(&mut response, &mut out).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("写入失败: {}", e)
-        })?;
+        let mut buf = [0u8; 128 * 1024];
+        loop {
+            if is_cancelled(cancel_name) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err("用户取消下载".to_string());
+            }
+            let read = std::io::Read::read(&mut response, &mut buf).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("读取失败: {}", e)
+            })?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut out, &buf[..read]).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("写入失败: {}", e)
+            })?;
+        }
     }
     std::fs::rename(&tmp, &dest).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -698,4 +754,17 @@ fn do_download_to_dir(
     })?;
 
     Ok(safe_file_name)
+}
+
+pub fn online_mod_cancel_name(name: &str, project_id: &str, version_id: Option<&str>) -> String {
+    format!(
+        "online-mod:{}:{}:{}",
+        name,
+        project_id,
+        version_id.unwrap_or("")
+    )
+}
+
+fn is_cancelled(cancel_name: Option<&str>) -> bool {
+    cancel_name.is_some_and(crate::instance::is_cancelled)
 }

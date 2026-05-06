@@ -285,8 +285,8 @@ function _applyModUrls(info) {
 
   const deleteBtn = actionsEl.querySelector('.mod-delete-btn');
   let linksHtml = '';
-  if (info.mr_url) linksHtml += `<a href="#" class="mod-link mr" data-url="${info.mr_url}" title="Modrinth">MR</a>`;
-  if (info.cf_url) linksHtml += `<a href="#" class="mod-link cf" data-url="${info.cf_url}" title="CurseForge">CF</a>`;
+  if (info.mr_url) linksHtml += `<a href="#" class="mod-link mr" data-url="${escapeHtml(info.mr_url)}" title="Modrinth">MR</a>`;
+  if (info.cf_url) linksHtml += `<a href="#" class="mod-link cf" data-url="${escapeHtml(info.cf_url)}" title="CurseForge">CF</a>`;
 
   if (linksHtml && deleteBtn) {
     deleteBtn.insertAdjacentHTML('beforebegin', linksHtml);
@@ -639,8 +639,27 @@ function renderOnlineResults(results, query) {
           return;
         }
 
-        btn.textContent = '下载中...';
+        const versionId = selectedVersion.version_id || '';
+        const taskName = `online-mod:${currentDetailInstance}:${btn.dataset.project}:${versionId}`;
+        let downloading = true;
         const tauri = await waitForTauri();
+        const onCancelDownload = async (event) => {
+          event.stopPropagation();
+          event.preventDefault();
+          if (!downloading) return;
+          btn.disabled = true;
+          btn.textContent = '取消中...';
+          try {
+            await tauri.core.invoke('cancel_modpack_install', { fileName: taskName });
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = '取消';
+            console.warn('取消下载失败:', err);
+          }
+        };
+        btn.disabled = false;
+        btn.textContent = '取消';
+        btn.addEventListener('click', onCancelDownload);
         const gameDir = localStorage.getItem('gameDir') || '';
         const result = await tauri.core.invoke('download_online_mod', {
           gameDir,
@@ -649,7 +668,10 @@ function renderOnlineResults(results, query) {
           mcVersion: selectedVersion.mc_version || currentDetailInfo?.mc_version || '',
           loader: selectedVersion.loader || currentDetailInfo?.loader_type || '',
           projectType: currentOnlineCategory,
-          versionId: selectedVersion.version_id || '',
+          versionId,
+        }).finally(() => {
+          downloading = false;
+          btn.removeEventListener('click', onCancelDownload);
         });
         btn.textContent = '已下载';
         btn.classList.add('done');

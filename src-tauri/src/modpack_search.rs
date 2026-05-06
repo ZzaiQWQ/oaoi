@@ -1,4 +1,6 @@
-use crate::instance::{cf_api_key, is_cancelled, register_cancel, unregister_cancel};
+use crate::instance::{
+    cf_api_key, is_cancelled, register_cancel, safe_path_name, unregister_cancel,
+};
 use std::sync::atomic::Ordering;
 
 // ===== 整合包在线搜索 =====
@@ -188,11 +190,9 @@ pub async fn get_modpack_versions(
     project_id: String,
     source: String,
 ) -> Result<Vec<ModpackVersionInfo>, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(do_get_modpack_versions(&project_id, &source));
-    });
-    rx.recv().map_err(|_| "线程通信失败".to_string())?
+    tokio::task::spawn_blocking(move || do_get_modpack_versions(&project_id, &source))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn do_get_modpack_versions(
@@ -239,12 +239,11 @@ fn get_mr_modpack_versions(
                 .find(|f| f["primary"].as_bool().unwrap_or(false))
                 .or(files.first())
             {
+                let raw_name = f["filename"].as_str().unwrap_or("modpack.mrpack");
                 (
                     f["url"].as_str().unwrap_or("").to_string(),
-                    f["filename"]
-                        .as_str()
-                        .unwrap_or("modpack.mrpack")
-                        .to_string(),
+                    safe_path_name(raw_name, "文件名")
+                        .unwrap_or_else(|_| "modpack.mrpack".to_string()),
                     f["size"].as_u64().unwrap_or(0),
                 )
             } else {
@@ -303,6 +302,9 @@ fn get_cf_modpack_versions(
                     .join(", ")
             })
             .unwrap_or_default();
+        let raw_file_name = file["fileName"].as_str().unwrap_or("modpack.zip");
+        let safe_file_name =
+            safe_path_name(raw_file_name, "文件名").unwrap_or_else(|_| "modpack.zip".to_string());
         let dl_url = file["downloadUrl"].as_str().unwrap_or("").to_string();
         // CF 有时 downloadUrl 为 null，需要用 fileId 构造 CDN URL
         let dl_url = if dl_url.is_empty() {
@@ -312,7 +314,7 @@ fn get_cf_modpack_versions(
                     "https://edge.forgecdn.net/files/{}/{}/{}",
                     fid / 1000,
                     fid % 1000,
-                    file["fileName"].as_str().unwrap_or("file.zip")
+                    urlencoding::encode(&safe_file_name)
                 )
             } else {
                 continue;
@@ -325,10 +327,7 @@ fn get_cf_modpack_versions(
             version_name: file["displayName"].as_str().unwrap_or("").to_string(),
             mc_versions: game_versions,
             download_url: dl_url,
-            file_name: file["fileName"]
-                .as_str()
-                .unwrap_or("modpack.zip")
-                .to_string(),
+            file_name: safe_file_name,
             file_size: file["fileLength"].as_u64().unwrap_or(0),
             date: file["fileDate"]
                 .as_str()
@@ -351,6 +350,7 @@ pub fn install_modpack_direct(
     java_path: String,
     use_mirror: bool,
 ) -> Result<String, String> {
+    let file_name = safe_path_name(&file_name, "文件名")?;
     let cancel_flag = register_cancel(&file_name);
     std::thread::spawn(move || {
         let result = do_install_modpack_direct(
@@ -402,6 +402,7 @@ fn do_install_modpack_direct(
 
     let http = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
         .user_agent("OAOI-Launcher/1.0")
         .build()
         .map_err(|e| e.to_string())?;

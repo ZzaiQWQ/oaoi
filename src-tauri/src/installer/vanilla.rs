@@ -1,6 +1,8 @@
 use super::{
-    download_file_if_needed, library_allowed, make_emitter, mirror_url, parallel_download,
+    download_file_with_progress, library_allowed, make_emitter, mirror_url, parallel_download,
+    safe_maven_path,
 };
+use crate::instance::safe_path_name;
 use tauri::Emitter;
 
 /// 安装 vanilla 基础（meta + client.jar + libraries + assets）
@@ -40,8 +42,27 @@ pub fn install_vanilla(
         .ok_or("缺少 client url")?;
     let client_sha1 = client_info.get("sha1").and_then(|v| v.as_str());
     let jar_path = inst_dir.join("client.jar");
-    download_file_if_needed(http, client_url, &jar_path, client_sha1, use_mirror)
-        .map_err(|e| format!("下载 client.jar 失败: {}", e))?;
+    download_file_with_progress(
+        http,
+        client_url,
+        &jar_path,
+        client_sha1,
+        use_mirror,
+        Some(name),
+        |downloaded, total| {
+            let total = total
+                .unwrap_or_else(|| downloaded.max(1))
+                .max(downloaded)
+                .max(1);
+            emit(
+                "client",
+                progress_usize(downloaded),
+                progress_usize(total),
+                "下载 client.jar...",
+            );
+        },
+    )
+    .map_err(|e| format!("下载 client.jar 失败: {}", e))?;
     emit("client", 1, 1, "client.jar 完成");
 
     // 3. 下载 libraries
@@ -60,7 +81,8 @@ pub fn install_vanilla(
                 let url = artifact.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
                 if !path.is_empty() && !url.is_empty() {
-                    let dest = game_dir.join("libs").join(path);
+                    let rel_path = safe_maven_path(path)?;
+                    let dest = game_dir.join("libs").join(rel_path);
                     tasks.push((url.to_string(), dest, sha1.map(|s| s.to_string())));
                 }
             }
@@ -88,8 +110,9 @@ pub fn install_vanilla(
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
-        parallel_download(http, tasks, &done, 32, use_mirror);
+        let download_result = parallel_download(http, tasks, &done, 32, use_mirror, Some(name));
         let _ = reporter.join();
+        download_result.map_err(|e| format!("libraries: {}", e))?;
         emit("libraries", total, total, "依赖库下载完成");
     }
 
@@ -105,12 +128,17 @@ pub fn install_vanilla(
             .unwrap_or("unknown");
         let index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str());
 
-        let index_path = game_dir
-            .join("res")
-            .join("indexes")
-            .join(format!("{}.json", index_id));
+        let index_file = safe_path_name(&format!("{}.json", index_id), "资源索引")?;
+        let index_path = game_dir.join("res").join("indexes").join(index_file);
         emit("assets", 0, 1, "下载资源索引...");
-        download_file_if_needed(http, index_url, &index_path, index_sha1, use_mirror)?;
+        super::download_file_if_needed_cancelable(
+            http,
+            index_url,
+            &index_path,
+            index_sha1,
+            use_mirror,
+            Some(name),
+        )?;
 
         if let Ok(index_content) = std::fs::read_to_string(&index_path) {
             if let Ok(index_json) = serde_json::from_str::<serde_json::Value>(&index_content) {
@@ -118,7 +146,7 @@ pub fn install_vanilla(
                     let mut asset_tasks: Vec<(String, std::path::PathBuf, String)> = Vec::new();
                     for (_name, info) in objects.iter() {
                         let hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                        if hash.len() < 2 {
+                        if !is_valid_sha1(hash) {
                             continue;
                         }
                         let prefix = &hash[..2];
@@ -154,8 +182,10 @@ pub fn install_vanilla(
                             .into_iter()
                             .map(|(url, dest, hash)| (url, dest, Some(hash)))
                             .collect();
-                    parallel_download(http, asset_dl_tasks, &done, 32, use_mirror);
+                    let download_result =
+                        parallel_download(http, asset_dl_tasks, &done, 32, use_mirror, Some(name));
                     let _ = reporter.join();
+                    download_result.map_err(|e| format!("assets: {}", e))?;
                     emit("assets", total, total, "资源下载完成");
                 }
             }
@@ -176,4 +206,12 @@ pub fn install_vanilla(
     });
 
     Ok(ver_json)
+}
+
+fn is_valid_sha1(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn progress_usize(value: u64) -> usize {
+    value.min(usize::MAX as u64) as usize
 }
