@@ -73,7 +73,7 @@ function initModpackTab() {
       appendModpackCards(results);
       if (results.length < MODPACK_PAGE_SIZE) modpackNoMore = true;
     } catch (err) {
-      listEl.innerHTML = `<div class="dl-loading">❌ 搜索失败: ${err}</div>`;
+      listEl.innerHTML = `<div class="dl-loading">❌ 搜索失败: ${escapeHtml(err)}</div>`;
     }
   }
 
@@ -118,25 +118,31 @@ function initModpackTab() {
       const sourceClass = src.cssClass;
       const hasMR = src.hasMR;
       const hasCF = src.hasCF;
+      const iconUrl = esc(mp.icon_url || '');
+      const mrUrl = esc(mp.mr_url || '');
+      const cfUrl = esc(mp.cf_url || '');
+      const projectId = esc(mp.project_id || '');
+      const source = esc(mp.source || '');
+      const title = esc(mp.title || '');
       return `
         <div class="modpack-card">
-          <img class="modpack-icon" src="${mp.icon_url || ''}" alt="" onerror="this.style.display='none'">
+          <img class="modpack-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">
           <div class="modpack-info">
-            <div class="modpack-title" title="${esc(mp.title)}">
-              <span class="mod-source-tag ${sourceClass}">${sourceLabel}</span> ${esc(mp.title)}
+            <div class="modpack-title" title="${title}">
+              <span class="mod-source-tag ${sourceClass}">${esc(sourceLabel)}</span> ${title}
             </div>
             <div class="modpack-desc" title="${esc(mp.description)}">${esc(mp.description)}</div>
             <div class="modpack-meta">
               <span>${esc(mp.author)}</span>
-              <span>⬇ ${dlCount}</span>
+              <span>⬇ ${esc(dlCount)}</span>
             </div>
           </div>
           <div class="modpack-actions">
             <div class="modpack-link-row">
-              ${hasMR ? `<button class="modpack-link-btn mr" data-url="${mp.mr_url}" title="Modrinth">MR</button>` : ''}
-              ${hasCF ? `<button class="modpack-link-btn cf" data-url="${mp.cf_url}" title="CurseForge">CF</button>` : ''}
+              ${hasMR ? `<button class="modpack-link-btn mr" data-url="${mrUrl}" title="Modrinth">MR</button>` : ''}
+              ${hasCF ? `<button class="modpack-link-btn cf" data-url="${cfUrl}" title="CurseForge">CF</button>` : ''}
             </div>
-            <button class="modpack-install-btn" data-project-id="${mp.project_id}" data-source="${mp.source}" data-title="${esc(mp.title)}">安装</button>
+            <button class="modpack-install-btn" data-project-id="${projectId}" data-source="${source}" data-title="${title}">安装</button>
           </div>
         </div>
       `;
@@ -200,7 +206,7 @@ function initModpackTab() {
       }
       renderModpackVersions(versions, title);
     } catch (err) {
-      listEl.innerHTML = `<div class="dl-loading">❌ 加载失败: ${err}</div>`;
+      listEl.innerHTML = `<div class="dl-loading">❌ 加载失败: ${escapeHtml(err)}</div>`;
     }
   }
 
@@ -217,7 +223,7 @@ function initModpackTab() {
             <div class="dl-item-name">${esc(v.version_name)}</div>
             <div class="dl-item-meta">
               <span class="dl-item-type release">🎮 ${esc(v.mc_versions)}</span>
-              ${size ? `📦 ${size}` : ''} ${v.date ? `· ${v.date}` : ''}
+              ${size ? `📦 ${escapeHtml(size)}` : ''} ${v.date ? `· ${escapeHtml(v.date)}` : ''}
             </div>
           </div>
           <button class="dl-install-btn" data-url="${esc(v.download_url)}" data-filename="${esc(v.file_name)}">安装</button>
@@ -254,7 +260,7 @@ function initModpackTab() {
             dlActiveList.insertAdjacentHTML('beforeend', `
               <div class="dl-progress-card" id="${dlId}">
                 <div class="dl-progress-card-header">
-                  <div class="dl-progress-name">📦 ${fileName}</div>
+                  <div class="dl-progress-name">📦 ${escapeHtml(fileName)}</div>
                   <button class="dl-cancel-btn" id="${dlId}-cancel" title="取消下载">✕</button>
                 </div>
                 <div class="dl-progress-summary" id="${dlId}-summary">
@@ -373,7 +379,7 @@ function initModpackTab() {
               const msg = stage === 'cancelled' ? '已取消' : detail;
               if (summaryText) summaryText.textContent = `${icon} ${msg}`;
               if (mainBar) mainBar.style.width = '0%';
-              if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${msg}</span></div>`;
+              if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
               const modalStages = document.getElementById('dlDetailStages');
               if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
               const cancelBtn = document.getElementById(`${dlId}-cancel`);
@@ -394,12 +400,7 @@ function initModpackTab() {
               // 更新总进度摘要文字
               const label = STAGE_LABELS2[stage] || stage;
               if (total > 0) {
-                let progressText;
-                if (stage === 'downloading') {
-                  progressText = `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`;
-                } else {
-                  progressText = `${current}/${total}`;
-                }
+                const progressText = formatStageProgress(current, total, stage);
                 if (summaryText) summaryText.textContent = `${label} ${progressText}`;
                 if (mainBar) mainBar.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
               } else {
@@ -426,11 +427,9 @@ function initModpackTab() {
               const countEl = document.getElementById(`${stageId}-count`);
               const barEl = document.getElementById(`${stageId}-bar`);
               if (total > 0) {
-                const pct = Math.min(100, Math.round((current / total) * 100));
-                if (countEl) {
-                  countEl.textContent = stage === 'downloading'
-                    ? `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
-                    : `${current}/${total}`;
+              const pct = Math.min(100, Math.round((current / total) * 100));
+              if (countEl) {
+                  countEl.textContent = formatStageProgress(current, total, stage);
                 }
                 if (barEl) barEl.style.width = pct + '%';
                 if (pct >= 100 && barEl) barEl.style.opacity = '0.5';

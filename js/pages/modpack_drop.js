@@ -256,7 +256,7 @@ async function initModpackDrop() {
           const msg = stage === 'cancelled' ? '已取消' : detail;
           if (statusEl) statusEl.textContent = `${icon} ${msg}`;
           pill.classList.add('error');
-          stagesData.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${msg}</span></div>`;
+          stagesData.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
           const modalStages = document.getElementById('dlDetailStages');
           if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
           hidePillLater(dlId, 3000, false);
@@ -265,12 +265,7 @@ async function initModpackDrop() {
           // 正常进度更新
           const label = STAGE_LABELS2[stage] || stage;
           if (total > 0) {
-            let progressText;
-            if (stage === 'downloading') {
-              progressText = `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`;
-            } else {
-              progressText = `${current}/${total}`;
-            }
+            const progressText = formatStageProgress(current, total, stage);
             if (statusEl) statusEl.textContent = `${label} ${progressText}`;
             if (barEl) barEl.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
           } else {
@@ -299,9 +294,7 @@ async function initModpackDrop() {
           if (total > 0) {
             const pct = Math.min(100, Math.round((current / total) * 100));
             if (countEl) {
-              countEl.textContent = stage === 'downloading'
-                ? `${(current / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
-                : `${current}/${total}`;
+              countEl.textContent = formatStageProgress(current, total, stage);
             }
             if (stageBarEl) stageBarEl.style.width = pct + '%';
             if (pct >= 100 && stageBarEl) stageBarEl.style.opacity = '0.5';

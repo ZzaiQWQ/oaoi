@@ -127,7 +127,10 @@ function ensureJavaDownloadModal() {
             <div class="java-download-title" id="javaDownloadTitle">下载 Java</div>
             <div class="java-download-subtitle" id="javaDownloadSubtitle">准备中...</div>
           </div>
-          <div class="java-download-percent" id="javaDownloadPercent">0%</div>
+          <div class="java-download-actions">
+            <div class="java-download-percent" id="javaDownloadPercent">0%</div>
+            <button class="java-download-cancel" id="javaDownloadCancel" type="button">取消</button>
+          </div>
         </div>
         <div class="java-download-bar-wrap">
           <div class="java-download-bar" id="javaDownloadBar"></div>
@@ -136,7 +139,29 @@ function ensureJavaDownloadModal() {
       </div>
     </div>
   `);
-  return document.getElementById('javaDownloadModal');
+  modal = document.getElementById('javaDownloadModal');
+  document.getElementById('javaDownloadCancel')?.addEventListener('click', async () => {
+    const btn = document.getElementById('javaDownloadCancel');
+    const detailEl = document.getElementById('javaDownloadDetail');
+    const major = Number(modal?.dataset.major || 0);
+    if (!major) return;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '取消中';
+    }
+    if (detailEl) detailEl.textContent = '正在取消下载...';
+    try {
+      const tauri = await waitForTauri();
+      await tauri.core.invoke('cancel_java_download', { major });
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '取消';
+      }
+      if (detailEl) detailEl.textContent = `取消失败: ${err}`;
+    }
+  });
+  return modal;
 }
 
 function showJavaDownloadModal(major) {
@@ -145,12 +170,19 @@ function showJavaDownloadModal(major) {
     javaDownloadModalTimer = null;
   }
   const modal = ensureJavaDownloadModal();
+  modal.dataset.major = String(major);
   modal.classList.remove('hidden');
   document.getElementById('javaDownloadTitle').textContent = `下载 Java ${major}`;
   document.getElementById('javaDownloadSubtitle').textContent = '准备下载运行环境';
   document.getElementById('javaDownloadPercent').textContent = '0%';
   document.getElementById('javaDownloadBar').style.width = '0%';
   document.getElementById('javaDownloadDetail').textContent = '正在连接下载源...';
+  const cancelBtn = document.getElementById('javaDownloadCancel');
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = '取消';
+    cancelBtn.style.display = '';
+  }
 }
 
 function updateJavaDownloadModal(payload) {
@@ -203,12 +235,15 @@ function updateJavaDownloadModal(payload) {
 
 function finishJavaDownloadModal(success, message) {
   const modal = ensureJavaDownloadModal();
+  const cancelled = !success && String(message || '').includes('取消');
   modal.classList.remove('hidden');
-  document.getElementById('javaDownloadSubtitle').textContent = success ? '安装完成' : '下载失败';
-  document.getElementById('javaDownloadPercent').textContent = success ? '100%' : '失败';
+  document.getElementById('javaDownloadSubtitle').textContent = success ? '安装完成' : (cancelled ? '已取消' : '下载失败');
+  document.getElementById('javaDownloadPercent').textContent = success ? '100%' : (cancelled ? '已取消' : '失败');
   document.getElementById('javaDownloadBar').style.width = success ? '100%' : '100%';
   document.getElementById('javaDownloadBar').classList.toggle('error', !success);
   document.getElementById('javaDownloadDetail').textContent = message;
+  const cancelBtn = document.getElementById('javaDownloadCancel');
+  if (cancelBtn) cancelBtn.style.display = 'none';
 
   javaDownloadModalTimer = setTimeout(() => {
     modal.classList.add('hidden');
@@ -435,15 +470,21 @@ async function loadInstalledVersions() {
       if (instances.length === 0) {
         installedList.innerHTML = '<div class="installed-empty">暂无已安装版本，请在下方下载</div>';
       } else {
-        installedList.innerHTML = instances.map(v => `
-          <div class="installed-card" data-ver="${v.name}">
-            <div style="flex: 1; min-width:0; display:flex; flex-direction:column; gap:1px;">
-              <span class="ver-name">${v.name}</span>
-              <span style="font-size:9px; color:#b0506e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">MC ${v.mc_version} <span style="text-transform:capitalize;">${v.loader_type !== 'vanilla' ? '| ' + v.loader_type : ''}</span></span>
+        installedList.innerHTML = instances.map(v => {
+          const name = escapeHtml(v.name || '');
+          const mcVersion = escapeHtml(v.mc_version || '');
+          const rawLoader = v.loader_type || 'vanilla';
+          const loader = rawLoader !== 'vanilla' ? `| ${escapeHtml(rawLoader)}` : '';
+          return `
+            <div class="installed-card" data-ver="${name}">
+              <div style="flex: 1; min-width:0; display:flex; flex-direction:column; gap:1px;">
+                <span class="ver-name">${name}</span>
+                <span style="font-size:9px; color:#b0506e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">MC ${mcVersion} <span style="text-transform:capitalize;">${loader}</span></span>
+              </div>
+              <button class="ver-delete" title="删除此版本" data-ver="${name}">🗑️</button>
             </div>
-            <button class="ver-delete" title="删除此版本" data-ver="${v.name}">🗑️</button>
-          </div>
-        `).join('');
+          `;
+        }).join('');
         // 绑定删除事件
         installedList.querySelectorAll('.ver-delete').forEach(btn => {
           btn.addEventListener('click', async (e) => {
@@ -613,6 +654,9 @@ function initLaunchButton() {
               if (d.success) {
                 finishJavaDownloadModal(true, 'Java 已安装完成，正在继续启动。');
                 resolveJavaDownload(d.path);
+              } else if (d.cancelled) {
+                finishJavaDownloadModal(false, '已取消下载');
+                rejectJavaDownload('已取消下载');
               } else {
                 finishJavaDownloadModal(false, d.error || '下载失败');
                 rejectJavaDownload(d.error || '下载失败');

@@ -1,9 +1,9 @@
-use super::cf_download::{cf_cdn_urls, cf_download_mod};
+use super::cf_download::{cf_cdn_urls, cf_download_mod_cancelable};
 use super::{
     build_http_client, detect_target_dir, emit_progress, sanitize_name, ModpackKind, ModpackMeta,
 };
-use crate::installer::{download_file_if_needed, mirror_url};
-use crate::instance::{cf_api_key, safe_join};
+use crate::installer::{download_file_if_needed_cancelable, mirror_url};
+use crate::instance::{cf_api_key, safe_join, safe_path_name};
 
 pub fn do_install_modpack_inner(
     app: &tauri::AppHandle,
@@ -23,13 +23,13 @@ pub fn do_install_modpack_inner(
     use crate::installer::quilt;
     use crate::installer::vanilla;
 
-    let inst_name = sanitize_name(&meta.name);
+    let inst_name = safe_path_name(&sanitize_name(&meta.name), "版本名")?;
     if crate::instance::is_cancelled(display_name) {
         return Err("用户取消安装".to_string());
     }
 
     // 1. 安装基础游戏
-    let http = build_http_client(15, 600, 8)?;
+    let http = build_http_client(15, 180, 8)?;
 
     // 整合包安装：基础游戏（client.jar/libs/assets）优先用镜像
     // Mod 下载保持用户原始设置（CurseForge CDN 国内直连就行）
@@ -222,13 +222,26 @@ pub fn do_install_modpack_inner(
                                     if let Some(data) = json["data"].as_array() {
                                         for item in data {
                                             let fid = item["id"].as_u64().unwrap_or(0) as u32;
-                                            let fname =
+                                            let raw_fname =
                                                 item["fileName"].as_str().unwrap_or("").to_string();
                                             let dl = item["downloadUrl"]
                                                 .as_str()
                                                 .unwrap_or("")
                                                 .to_string();
                                             let pid = file_map.get(&fid).map(|x| x.0).unwrap_or(0);
+
+                                            if raw_fname.is_empty() {
+                                                unresolved.push((pid, fid));
+                                                continue;
+                                            }
+                                            let fname = match safe_path_name(&raw_fname, "文件名")
+                                            {
+                                                Ok(name) => name,
+                                                Err(_) => {
+                                                    unresolved.push((pid, fid));
+                                                    continue;
+                                                }
+                                            };
 
                                             if fname.is_empty() {
                                                 unresolved.push((pid, fid));
@@ -391,7 +404,7 @@ pub fn do_install_modpack_inner(
             std::thread::spawn(move || {
                 let _ = sem_r.lock().unwrap().recv();
                 let result = if crate::instance::is_cancelled(&cancel_name) {
-                    Ok(false)
+                    Err("用户取消下载".to_string())
                 } else if url.starts_with("CF:") {
                     let parts: Vec<&str> = url.split(':').collect();
                     let project_id: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -400,12 +413,25 @@ pub fn do_install_modpack_inner(
                         .parent()
                         .and_then(|p| p.parent())
                         .unwrap_or(std::path::Path::new("."));
-                    cf_download_mod(&h, project_id, file_id, inst_dir_fallback)
+                    cf_download_mod_cancelable(
+                        &h,
+                        project_id,
+                        file_id,
+                        inst_dir_fallback,
+                        Some(&cancel_name),
+                    )
                 } else {
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    download_file_if_needed(&h, &url, &dest, sha1.as_deref(), false)
+                    download_file_if_needed_cancelable(
+                        &h,
+                        &url,
+                        &dest,
+                        sha1.as_deref(),
+                        false,
+                        Some(&cancel_name),
+                    )
                 };
                 if let Err(e) = result {
                     errors.lock().unwrap().push(format!("{}: {}", url, e));
@@ -455,6 +481,7 @@ pub fn do_install_modpack_inner(
 
     // 自动解析 java 路径（当前端传入为空时从本地查找）
     let resolved_java: String;
+    let mut java_error: Option<String> = None;
     let effective_java = if !java_path.is_empty() {
         java_path
     } else {
@@ -472,70 +499,81 @@ pub fn do_install_modpack_inner(
                 1,
                 &format!("正在下载 Java {}...", required_major),
             );
-            match crate::java_download::download_java_sync(required_major, game_dir_input) {
+            match crate::java_download::download_java_sync_cancelable(
+                required_major,
+                game_dir_input,
+                Some(display_name),
+            ) {
                 Ok(p) => {
                     resolved_java = p;
                     &resolved_java
                 }
                 Err(e) => {
-                    return Err(format!(
+                    java_error = Some(format!(
                         "找不到 Java {}，自动下载失败: {}",
                         required_major, e
-                    ))
+                    ));
+                    let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+                    resolved_java = String::new();
+                    &resolved_java
                 }
             }
         }
     };
 
     // 安装 loader（失败时先记录错误，等下载线程结束后再返回）
-    let loader_result: Result<(), String> = match meta.loader_type.as_str() {
-        "fabric" if !meta.loader_version.is_empty() => fabric::install_fabric(
-            app,
-            display_name,
-            &meta.mc_version,
-            &meta.loader_version,
-            game_dir,
-            inst_dir,
-            &http,
-            game_mirror,
-            &mut ver_json,
-        ),
-        "quilt" if !meta.loader_version.is_empty() => quilt::install_quilt(
-            app,
-            display_name,
-            &meta.mc_version,
-            &meta.loader_version,
-            game_dir,
-            inst_dir,
-            &http,
-            game_mirror,
-            &mut ver_json,
-        ),
-        "forge" if !meta.loader_version.is_empty() => forge::install_forge(
-            app,
-            display_name,
-            &meta.mc_version,
-            &meta.loader_version,
-            game_dir,
-            inst_dir,
-            &http,
-            effective_java,
-            game_mirror,
-            &mut ver_json,
-        ),
-        "neoforge" if !meta.loader_version.is_empty() => neoforge::install_neoforge(
-            app,
-            display_name,
-            &meta.mc_version,
-            &meta.loader_version,
-            game_dir,
-            inst_dir,
-            &http,
-            effective_java,
-            game_mirror,
-            &mut ver_json,
-        ),
-        _ => Ok(()),
+    let loader_result: Result<(), String> = if let Some(e) = java_error {
+        Err(e)
+    } else {
+        match meta.loader_type.as_str() {
+            "fabric" if !meta.loader_version.is_empty() => fabric::install_fabric(
+                app,
+                display_name,
+                &meta.mc_version,
+                &meta.loader_version,
+                game_dir,
+                inst_dir,
+                &http,
+                game_mirror,
+                &mut ver_json,
+            ),
+            "quilt" if !meta.loader_version.is_empty() => quilt::install_quilt(
+                app,
+                display_name,
+                &meta.mc_version,
+                &meta.loader_version,
+                game_dir,
+                inst_dir,
+                &http,
+                game_mirror,
+                &mut ver_json,
+            ),
+            "forge" if !meta.loader_version.is_empty() => forge::install_forge(
+                app,
+                display_name,
+                &meta.mc_version,
+                &meta.loader_version,
+                game_dir,
+                inst_dir,
+                &http,
+                effective_java,
+                game_mirror,
+                &mut ver_json,
+            ),
+            "neoforge" if !meta.loader_version.is_empty() => neoforge::install_neoforge(
+                app,
+                display_name,
+                &meta.mc_version,
+                &meta.loader_version,
+                game_dir,
+                inst_dir,
+                &http,
+                effective_java,
+                game_mirror,
+                &mut ver_json,
+            ),
+            _ => Ok(()),
+        }
     };
 
     // 注意: instance.json 的写入移到最后（推荐内存计算后一次性写入）

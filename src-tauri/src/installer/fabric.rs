@@ -1,4 +1,5 @@
-use super::{download_file_if_needed, make_emitter, merge_libraries};
+use super::{download_file_if_needed_cancelable, make_emitter, merge_libraries, safe_maven_path};
+use crate::instance::safe_path_name;
 
 /// 安装 Fabric loader
 pub fn install_fabric(
@@ -59,7 +60,10 @@ pub fn install_fabric(
             };
             let relative_path = format!("{}/{}/{}/{}", group_path, artifact, version, jar_name);
             let url = format!("{}/{}", maven_url.trim_end_matches('/'), relative_path);
-            let dest = game_dir.join("libs").join(&relative_path);
+            let Ok(relative_path) = safe_maven_path(&relative_path) else {
+                continue;
+            };
+            let dest = game_dir.join("libs").join(relative_path);
 
             fabric_tasks.push((url, dest, sha1.map(|s| s.to_string())));
         }
@@ -73,13 +77,25 @@ pub fn install_fabric(
         );
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let handles: Vec<_> = fabric_tasks
             .into_iter()
             .map(|(url, dest, sha1)| {
                 let done = done.clone();
+                let errors = errors.clone();
                 let h = http.clone();
+                let cancel_name = name.to_string();
                 std::thread::spawn(move || {
-                    let _ = download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror);
+                    if let Err(e) = download_file_if_needed_cancelable(
+                        &h,
+                        &url,
+                        &dest,
+                        sha1.as_deref(),
+                        use_mirror,
+                        Some(&cancel_name),
+                    ) {
+                        errors.lock().unwrap().push(format!("{} -> {}", url, e));
+                    }
                     done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 })
             })
@@ -99,7 +115,22 @@ pub fn install_fabric(
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         for h in handles {
-            let _ = h.join();
+            if h.join().is_err() {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push("fabric download worker panicked".to_string());
+            }
+        }
+        let errors = errors.lock().unwrap();
+        if !errors.is_empty() {
+            let sample = errors
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("Fabric libraries failed: {}", sample));
         }
         emit("fabric-libs", total, total, "Fabric 组件下载完成");
     }
@@ -150,16 +181,24 @@ pub fn install_fabric(
                                 let filename =
                                     file["filename"].as_str().unwrap_or("fabric-api.jar");
                                 if !dl_url.is_empty() {
-                                    let dest = mods_dir.join(filename);
-                                    let _ = download_file_if_needed(
-                                        http, dl_url, &dest, None, use_mirror,
-                                    );
-                                    emit(
-                                        "fabric-api",
-                                        1,
-                                        1,
-                                        &format!("Fabric API {} 已下载", filename),
-                                    );
+                                    if let Ok(safe_filename) = safe_path_name(filename, "文件名")
+                                    {
+                                        let dest = mods_dir.join(&safe_filename);
+                                        let _ = download_file_if_needed_cancelable(
+                                            http,
+                                            dl_url,
+                                            &dest,
+                                            None,
+                                            use_mirror,
+                                            Some(name),
+                                        );
+                                        emit(
+                                            "fabric-api",
+                                            1,
+                                            1,
+                                            &format!("Fabric API {} 已下载", safe_filename),
+                                        );
+                                    }
                                 }
                             }
                         }

@@ -291,6 +291,7 @@ pub fn run() {
             mod_download::get_online_mod_versions,
             mod_download::download_online_mod,
             java_download::download_java,
+            java_download::cancel_java_download,
             modpack::import_modpack,
             modpack_search::search_modpacks,
             modpack_search::get_modpack_versions,

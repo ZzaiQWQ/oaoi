@@ -1,4 +1,4 @@
-use crate::instance::safe_join;
+use crate::instance::{safe_join, unregister_cancel};
 use tauri::Emitter;
 
 /// 根据 Java 大版本号自动下载对应 JRE（Adoptium）
@@ -20,10 +20,13 @@ pub fn download_java(
         return Ok(java_exe.to_string_lossy().to_string());
     }
 
+    let cancel_name = format!("java-{}", major);
+    let cancel_flag = crate::instance::register_cancel(&cancel_name);
     // 后台线程下载，不阻塞 UI
-    std::thread::spawn(
-        move || match do_download_java(&app_handle, major, &game_dir) {
+    std::thread::spawn(move || {
+        match do_download_java(&app_handle, major, &game_dir, Some(&cancel_name)) {
             Ok(path) => {
+                unregister_cancel(&cancel_name);
                 let _ = app_handle.emit(
                     "java-download-done",
                     serde_json::json!({
@@ -32,24 +35,32 @@ pub fn download_java(
                 );
             }
             Err(e) => {
+                let was_cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+                unregister_cancel(&cancel_name);
                 eprintln!("[java] 下载失败: {}", e);
                 let _ = app_handle.emit(
                     "java-download-done",
                     serde_json::json!({
-                        "major": major, "success": false, "error": e
+                        "major": major, "success": false, "cancelled": was_cancelled, "error": e
                     }),
                 );
             }
-        },
-    );
+        }
+    });
     // 立即返回，前端通过事件监听结果
     Ok("downloading".to_string())
+}
+
+#[tauri::command]
+pub fn cancel_java_download(major: u32) -> Result<String, String> {
+    crate::instance::cancel_modpack_install(format!("java-{}", major))
 }
 
 fn do_download_java(
     app_handle: &tauri::AppHandle,
     major: u32,
     game_dir: &str,
+    cancel_name: Option<&str>,
 ) -> Result<String, String> {
     let java_base = std::path::PathBuf::from(game_dir).join("runtime");
     let java_dir = java_base.join(format!("jre-{}", major));
@@ -59,6 +70,9 @@ fn do_download_java(
     if java_exe.exists() {
         eprintln!("[java] Java {} 已存在: {}", major, java_exe.display());
         return Ok(java_exe.to_string_lossy().to_string());
+    }
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
     }
 
     eprintln!("[java] 开始下载 Java {} ...", major);
@@ -99,7 +113,11 @@ fn do_download_java(
         app_handle: &tauri::AppHandle,
         major: u32,
         source_label: &str,
+        cancel_name: Option<&str>,
     ) -> Result<u64, String> {
+        if is_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
         let mut resp = http
             .get(url)
             .send()
@@ -114,6 +132,10 @@ fn do_download_java(
         let mut last_emit = std::time::Instant::now();
 
         loop {
+            if is_cancelled(cancel_name) {
+                let _ = std::fs::remove_file(dest);
+                return Err("用户取消下载".to_string());
+            }
             let n =
                 std::io::Read::read(&mut resp, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
             if n == 0 {
@@ -201,19 +223,39 @@ fn do_download_java(
                     "detail": format!("正在从清华镜像下载 Java {} ...", major)
                 }),
             );
-            stream_download(&http, &download_url, &tmp_zip, app_handle, major, "镜像")
+            stream_download(
+                &http,
+                &download_url,
+                &tmp_zip,
+                app_handle,
+                major,
+                "镜像",
+                cancel_name,
+            )
         },
     ) {
         Ok(size) => size,
         Err(mirror_err) => {
+            if is_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
             eprintln!("[java] 清华镜像失败: {}，尝试官方源...", mirror_err);
             let _ = app_handle.emit("java-download-progress", serde_json::json!({
                 "major": major, "stage": "downloading", "detail": format!("镜像失败，正在从官方源下载 Java {} ...", major)
             }));
             eprintln!("[java] 尝试官方源: {}", official_url);
-            stream_download(&http, &official_url, &tmp_zip, app_handle, major, "官方").map_err(
-                |official_err| format!("镜像源失败: {}; 官方源失败: {}", mirror_err, official_err),
-            )?
+            stream_download(
+                &http,
+                &official_url,
+                &tmp_zip,
+                app_handle,
+                major,
+                "官方",
+                cancel_name,
+            )
+            .map_err(|official_err| {
+                format!("镜像源失败: {}; 官方源失败: {}", mirror_err, official_err)
+            })?
         }
     };
     eprintln!(
@@ -243,6 +285,11 @@ fn do_download_java(
         .to_string();
 
     for i in 0..archive.len() {
+        if is_cancelled(cancel_name) {
+            let _ = std::fs::remove_file(&tmp_zip);
+            let _ = std::fs::remove_dir_all(&java_dir);
+            return Err("用户取消下载".to_string());
+        }
         let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
         let raw_name = file.name().to_string();
         let relative = if !top_dir.is_empty() && raw_name.starts_with(&top_dir) {
@@ -285,8 +332,11 @@ fn do_download_java(
     }
 }
 
-/// 同步下载 Java，供 modpack 安装等无 AppHandle 的场景调用
-pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> {
+pub fn download_java_sync_cancelable(
+    major: u32,
+    game_dir: &str,
+    cancel_name: Option<&str>,
+) -> Result<String, String> {
     let java_exe = std::path::PathBuf::from(game_dir)
         .join("runtime")
         .join(format!("jre-{}", major))
@@ -294,6 +344,9 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
         .join("java.exe");
     if java_exe.exists() {
         return Ok(java_exe.to_string_lossy().to_string());
+    }
+    if is_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
     }
     let java_dir = std::path::PathBuf::from(game_dir)
         .join("runtime")
@@ -317,14 +370,33 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
     let zip_path = java_dir.join("java.zip");
     let mut downloaded = false;
     // 流式下载辅助函数
-    fn stream_to_file(http: &reqwest::blocking::Client, url: &str, dest: &std::path::Path) -> bool {
-        match http.get(url).send() {
-            Ok(mut resp) if resp.status().is_success() => match std::fs::File::create(dest) {
-                Ok(mut file) => std::io::copy(&mut resp, &mut file).is_ok(),
-                Err(_) => false,
-            },
-            _ => false,
+    fn stream_to_file(
+        http: &reqwest::blocking::Client,
+        url: &str,
+        dest: &std::path::Path,
+        cancel_name: Option<&str>,
+    ) -> Result<(), String> {
+        if is_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
         }
+        let mut resp = http.get(url).send().map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 128 * 1024];
+        loop {
+            if is_cancelled(cancel_name) {
+                let _ = std::fs::remove_file(dest);
+                return Err("用户取消下载".to_string());
+            }
+            let read = std::io::Read::read(&mut resp, &mut buf).map_err(|e| e.to_string())?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut file, &buf[..read]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     // 1. 优先解析清华镜像目录页找到真实文件名
     if let Ok(resp) = http.get(&mirror_base).send() {
@@ -351,7 +423,7 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
             if let Some(zip_name) = zip_name {
                 let download_url = format!("{}{}", mirror_base, zip_name);
                 eprintln!("[java-sync] 镜像下载: {}", download_url);
-                if stream_to_file(&http, &download_url, &zip_path) {
+                if stream_to_file(&http, &download_url, &zip_path, cancel_name).is_ok() {
                     downloaded = true;
                 }
             }
@@ -359,8 +431,11 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
     }
     // 2. 镜像失败 → 官方源回退
     if !downloaded {
+        if is_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
         eprintln!("[java-sync] 镜像源失败，尝试官方源...");
-        if stream_to_file(&http, &official, &zip_path) {
+        if stream_to_file(&http, &official, &zip_path, cancel_name).is_ok() {
             downloaded = true;
         }
     }
@@ -382,6 +457,11 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
         .to_string();
 
     for i in 0..archive.len() {
+        if is_cancelled(cancel_name) {
+            let _ = std::fs::remove_file(&zip_path);
+            let _ = std::fs::remove_dir_all(&java_dir);
+            return Err("用户取消下载".to_string());
+        }
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let raw_name = entry.name().to_string();
         let relative = if !top_dir.is_empty() && raw_name.starts_with(&top_dir) {
@@ -424,4 +504,8 @@ pub fn download_java_sync(major: u32, game_dir: &str) -> Result<String, String> 
     find_exe(&java_dir)
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "解压后未找到 java.exe".to_string())
+}
+
+fn is_cancelled(cancel_name: Option<&str>) -> bool {
+    cancel_name.is_some_and(crate::instance::is_cancelled)
 }

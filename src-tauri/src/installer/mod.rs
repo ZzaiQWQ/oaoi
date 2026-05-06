@@ -49,6 +49,27 @@ pub fn maven_name_to_path(name: &str) -> String {
     }
 }
 
+pub fn safe_maven_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let normalized = path.replace('\\', "/");
+    let mut out = std::path::PathBuf::new();
+    for part in normalized.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(format!("非法 Maven 路径: {}", path));
+        }
+        let valid = part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'));
+        if !valid {
+            return Err(format!("非法 Maven 路径: {}", path));
+        }
+        out.push(part);
+    }
+    if out.as_os_str().is_empty() {
+        return Err("Maven 路径不能为空".to_string());
+    }
+    Ok(out)
+}
+
 /// 构建 data 变量映射（供 Forge/NeoForge processor 使用）
 pub fn build_data_map(
     profile: &serde_json::Value,
@@ -91,16 +112,16 @@ pub fn build_data_map(
             if v.starts_with('[') && v.ends_with(']') {
                 let coord = &v[1..v.len() - 1];
                 let path = maven_name_to_path(coord);
-                map.insert(
-                    key.clone(),
-                    libs_dir
-                        .join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
-                        .to_string_lossy()
-                        .to_string(),
-                );
+                if let Ok(path) = safe_maven_path(&path) {
+                    map.insert(
+                        key.clone(),
+                        libs_dir.join(path).to_string_lossy().to_string(),
+                    );
+                }
             } else if v.starts_with('/') {
-                let real_path = temp_dir.join(&v[1..]);
-                map.insert(key.clone(), real_path.to_string_lossy().to_string());
+                if let Ok(real_path) = safe_join(temp_dir, &v[1..]) {
+                    map.insert(key.clone(), real_path.to_string_lossy().to_string());
+                }
             } else {
                 map.insert(key.clone(), v.to_string());
             }
@@ -121,10 +142,9 @@ pub fn resolve_data_arg(
     } else if s.starts_with('[') && s.ends_with(']') {
         let coord = &s[1..s.len() - 1];
         let path = maven_name_to_path(coord);
-        libs_dir
-            .join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
-            .to_string_lossy()
-            .to_string()
+        safe_maven_path(&path)
+            .map(|path| libs_dir.join(path).to_string_lossy().to_string())
+            .unwrap_or_else(|_| s.to_string())
     } else {
         s.to_string()
     }
@@ -178,7 +198,7 @@ pub fn merge_libraries(existing_libs: &mut Vec<serde_json::Value>, new_libs: &[s
     }
 }
 
-use crate::instance::resolve_game_dir;
+use crate::instance::{resolve_game_dir, safe_join, safe_path_name};
 use std::sync::Mutex;
 use tauri::Emitter;
 
@@ -244,17 +264,19 @@ pub fn download_file_if_needed(
     expected_sha1: Option<&str>,
     use_mirror: bool,
 ) -> Result<bool, String> {
-    if dest.exists() {
-        if let Some(sha1) = expected_sha1 {
-            if let Ok(data) = std::fs::read(dest) {
-                let hash = sha1_smol::Sha1::from(&data).digest().to_string();
-                if hash == sha1 {
-                    return Ok(false);
-                }
-            }
-        } else {
-            return Ok(false);
-        }
+    download_file_if_needed_cancelable(http, url, dest, expected_sha1, use_mirror, None)
+}
+
+pub fn download_file_if_needed_cancelable(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+    use_mirror: bool,
+    cancel_name: Option<&str>,
+) -> Result<bool, String> {
+    if existing_file_ok(dest, expected_sha1) {
+        return Ok(false);
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -267,8 +289,23 @@ pub fn download_file_if_needed(
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
         }
-        match do_download(http, &real_url, dest) {
-            Ok(()) => return Ok(true),
+        if is_download_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
+        match do_download(http, &real_url, dest, cancel_name) {
+            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                Ok(()) => return Ok(true),
+                Err(e) => {
+                    last_err = e;
+                    eprintln!(
+                        "[download] 重试 {}/{}: {} ({})",
+                        attempt + 1,
+                        max_retries,
+                        last_err,
+                        real_url
+                    );
+                }
+            },
             Err(e) => {
                 last_err = e;
                 eprintln!(
@@ -291,8 +328,22 @@ pub fn download_file_if_needed(
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
                 }
-                match do_download(http, &fallback_url, dest) {
-                    Ok(()) => return Ok(true),
+                if is_download_cancelled(cancel_name) {
+                    return Err("用户取消下载".to_string());
+                }
+                match do_download(http, &fallback_url, dest, cancel_name) {
+                    Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                        Ok(()) => return Ok(true),
+                        Err(e) => {
+                            last_err = e;
+                            eprintln!(
+                                "[download] 镜像重试 {}/3: {} ({})",
+                                attempt + 1,
+                                last_err,
+                                fallback_url
+                            );
+                        }
+                    },
                     Err(e) => {
                         last_err = e;
                         eprintln!(
@@ -310,12 +361,170 @@ pub fn download_file_if_needed(
     Err(format!("下载失败(重试后): {} ({})", last_err, real_url))
 }
 
+pub fn download_file_with_progress<F>(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+    use_mirror: bool,
+    cancel_name: Option<&str>,
+    mut on_progress: F,
+) -> Result<bool, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    if existing_file_ok(dest, expected_sha1) {
+        let size = dest.metadata().map(|m| m.len()).unwrap_or(0);
+        on_progress(size, Some(size));
+        return Ok(false);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let real_url = mirror_url(url, use_mirror);
+    let max_retries = 5;
+    let mut last_err = String::new();
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
+        }
+        if is_download_cancelled(cancel_name) {
+            return Err("用户取消下载".to_string());
+        }
+        match do_download_with_progress(http, &real_url, dest, cancel_name, &mut on_progress) {
+            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                Ok(()) => return Ok(true),
+                Err(e) => {
+                    last_err = e;
+                    eprintln!(
+                        "[download] 重试 {}/{}: {} ({})",
+                        attempt + 1,
+                        max_retries,
+                        last_err,
+                        real_url
+                    );
+                }
+            },
+            Err(e) => {
+                last_err = e;
+                eprintln!(
+                    "[download] 重试 {}/{}: {} ({})",
+                    attempt + 1,
+                    max_retries,
+                    last_err,
+                    real_url
+                );
+            }
+        }
+    }
+
+    if !use_mirror {
+        let fallback_url = mirror_url(url, true);
+        if fallback_url != real_url {
+            eprintln!("[download] 官方源失败，回退镜像: {}", fallback_url);
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
+                }
+                if is_download_cancelled(cancel_name) {
+                    return Err("用户取消下载".to_string());
+                }
+                match do_download_with_progress(
+                    http,
+                    &fallback_url,
+                    dest,
+                    cancel_name,
+                    &mut on_progress,
+                ) {
+                    Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                        Ok(()) => return Ok(true),
+                        Err(e) => {
+                            last_err = e;
+                            eprintln!(
+                                "[download] 镜像重试 {}/3: {} ({})",
+                                attempt + 1,
+                                last_err,
+                                fallback_url
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        last_err = e;
+                        eprintln!(
+                            "[download] 镜像重试 {}/3: {} ({})",
+                            attempt + 1,
+                            last_err,
+                            fallback_url
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Err(format!("下载失败(重试后): {} ({})", last_err, real_url))
+}
+
+fn existing_file_ok(dest: &std::path::Path, expected_sha1: Option<&str>) -> bool {
+    if !dest.exists() {
+        return false;
+    }
+    match expected_sha1 {
+        Some(sha1) => file_matches_sha1(dest, sha1),
+        None => true,
+    }
+}
+
+fn file_matches_sha1(dest: &std::path::Path, expected_sha1: &str) -> bool {
+    if let Ok(data) = std::fs::read(dest) {
+        let hash = sha1_smol::Sha1::from(&data).digest().to_string();
+        hash.eq_ignore_ascii_case(expected_sha1)
+    } else {
+        false
+    }
+}
+
+fn verify_downloaded_file(
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+) -> Result<(), String> {
+    if let Some(sha1) = expected_sha1 {
+        if !file_matches_sha1(dest, sha1) {
+            let _ = std::fs::remove_file(dest);
+            return Err("sha1 校验失败".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn is_download_cancelled(cancel_name: Option<&str>) -> bool {
+    cancel_name.is_some_and(crate::instance::is_cancelled)
+}
+
 /// 实际执行单次下载（流式写入，不一次性读到内存）
 fn do_download(
     http: &reqwest::blocking::Client,
     url: &str,
     dest: &std::path::Path,
+    cancel_name: Option<&str>,
 ) -> Result<(), String> {
+    do_download_with_progress(http, url, dest, cancel_name, &mut |_, _| {})
+}
+
+fn do_download_with_progress<F>(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+    cancel_name: Option<&str>,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    if is_download_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
+    }
     let mut resp = http
         .get(url)
         .send()
@@ -323,16 +532,49 @@ fn do_download(
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    // 先写到 .tmp 文件，下载完成后再 rename，防止中断损坏
+
+    let total = resp.content_length();
+    on_progress(0, total);
     let tmp_path = dest.with_extension("tmp");
-    {
+    let result = (|| -> Result<(), String> {
         let mut file =
             std::fs::File::create(&tmp_path).map_err(|e| format!("创建临时文件失败: {}", e))?;
-        std::io::copy(&mut resp, &mut file).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!("写入失败: {}", e)
-        })?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut downloaded = 0u64;
+        let mut last_emit_bytes = 0u64;
+        let mut last_emit_at = std::time::Instant::now();
+
+        loop {
+            if is_download_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
+            let read =
+                std::io::Read::read(&mut resp, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
+            if read == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut file, &buf[..read])
+                .map_err(|e| format!("写入失败: {}", e))?;
+            downloaded += read as u64;
+
+            let should_emit = downloaded == total.unwrap_or(downloaded)
+                || downloaded.saturating_sub(last_emit_bytes) >= 512 * 1024
+                || last_emit_at.elapsed() >= std::time::Duration::from_millis(250);
+            if should_emit {
+                on_progress(downloaded, total);
+                last_emit_bytes = downloaded;
+                last_emit_at = std::time::Instant::now();
+            }
+        }
+        on_progress(downloaded, total);
+        Ok(())
+    })();
+
+    if let Err(err) = result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
     }
+
     std::fs::rename(&tmp_path, dest).map_err(|e| format!("重命名失败: {}", e))?;
     Ok(())
 }
@@ -344,7 +586,10 @@ pub fn parallel_download(
     done: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
     max_workers: usize,
     use_mirror: bool,
-) {
+    cancel_name: Option<&str>,
+) -> Result<(), String> {
+    let errors = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+    let cancel_name = cancel_name.map(|name| name.to_string());
     for chunk in tasks.chunks(max_workers) {
         let handles: Vec<_> = chunk
             .iter()
@@ -353,20 +598,57 @@ pub fn parallel_download(
                 let dest = dest.clone();
                 let sha1 = sha1.clone();
                 let done = done.clone();
+                let errors = errors.clone();
                 let h = http.clone();
+                let cancel_name = cancel_name.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) =
-                        download_file_if_needed(&h, &url, &dest, sha1.as_deref(), use_mirror)
-                    {
+                    if let Err(e) = download_file_if_needed_cancelable(
+                        &h,
+                        &url,
+                        &dest,
+                        sha1.as_deref(),
+                        use_mirror,
+                        cancel_name.as_deref(),
+                    ) {
                         eprintln!("[download] 失败: {} -> {}", url, e);
+                        errors.lock().unwrap().push(format!("{} -> {}", url, e));
                     }
                     done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 })
             })
             .collect();
         for h in handles {
-            let _ = h.join();
+            if h.join().is_err() {
+                errors
+                    .lock()
+                    .unwrap()
+                    .push("download worker panicked".to_string());
+            }
         }
+        if cancel_name
+            .as_deref()
+            .is_some_and(crate::instance::is_cancelled)
+        {
+            break;
+        }
+    }
+    if cancel_name
+        .as_deref()
+        .is_some_and(crate::instance::is_cancelled)
+    {
+        return Err("用户取消下载".to_string());
+    }
+    let errors = errors.lock().unwrap();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        let sample = errors
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(format!("{} files failed: {}", errors.len(), sample))
     }
 }
 
@@ -418,15 +700,17 @@ pub fn create_instance(
     java_path: String,
     use_mirror: bool,
 ) -> Result<String, String> {
-    let name_clone = name.clone();
+    let safe_name = safe_path_name(&name, "版本名")?;
+    let name_clone = safe_name.clone();
+    let cancel_flag = crate::instance::register_cancel(&safe_name);
     std::thread::spawn(move || {
         eprintln!(
             "[install] 开始创建版本: {} (mc={}, loader={} {}, java={})",
-            name, mc_version, loader_type, loader_version, java_path
+            safe_name, mc_version, loader_type, loader_version, java_path
         );
         if let Err(e) = do_create_instance(
             &app_handle,
-            &name,
+            &safe_name,
             &mc_version,
             &meta_url,
             &game_dir,
@@ -435,18 +719,25 @@ pub fn create_instance(
             &java_path,
             use_mirror,
         ) {
+            let was_cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+            crate::instance::unregister_cancel(&safe_name);
             eprintln!("[install] 错误: {}", e);
-            let inst_dir = resolve_game_dir(&game_dir).join("instances").join(&name);
+            let inst_dir = resolve_game_dir(&game_dir)
+                .join("instances")
+                .join(&safe_name);
             if inst_dir.exists() {
                 let _ = std::fs::remove_dir_all(&inst_dir);
                 eprintln!("[install] 已清理残留目录: {}", inst_dir.display());
             }
+            let stage = if was_cancelled { "cancelled" } else { "error" };
             let _ = app_handle.emit(
                 "install-progress",
                 serde_json::json!({
-                    "name": name, "stage": "error", "current": 0, "total": 0, "detail": e
+                    "name": safe_name, "stage": stage, "current": 0, "total": 0, "detail": e
                 }),
             );
+        } else {
+            crate::instance::unregister_cancel(&safe_name);
         }
     });
     Ok(format!("开始创建版本: {}", name_clone))
@@ -480,6 +771,9 @@ fn do_create_instance(
     }
     let game_dir = resolve_game_dir(game_dir_input);
     let emit = make_emitter(app_handle, name);
+    if crate::instance::is_cancelled(name) {
+        return Err("用户取消安装".to_string());
+    }
 
     let inst_dir = game_dir.join("instances").join(name);
     if inst_dir.exists() {
@@ -500,6 +794,9 @@ fn do_create_instance(
     let mut ver_json = vanilla::install_vanilla(
         app_handle, name, mc_version, meta_url, &game_dir, &inst_dir, &http, use_mirror,
     )?;
+    if crate::instance::is_cancelled(name) {
+        return Err("用户取消安装".to_string());
+    }
 
     // Forge/NeoForge 需要 Java，如果前端没传则自动查找/下载
     let effective_java: String;
@@ -518,7 +815,11 @@ fn do_create_instance(
                 1,
                 &format!("自动下载 Java {}...", required_major),
             );
-            match crate::java_download::download_java_sync(required_major, game_dir_input) {
+            match crate::java_download::download_java_sync_cancelable(
+                required_major,
+                game_dir_input,
+                Some(name),
+            ) {
                 Ok(p) => {
                     effective_java = p;
                     &effective_java
@@ -534,6 +835,9 @@ fn do_create_instance(
     } else {
         java_path
     };
+    if crate::instance::is_cancelled(name) {
+        return Err("用户取消安装".to_string());
+    }
 
     // 处理 Mod Loader
     match loader_type {
@@ -592,6 +896,9 @@ fn do_create_instance(
             )?;
         }
         _ => {}
+    }
+    if crate::instance::is_cancelled(name) {
+        return Err("用户取消安装".to_string());
     }
 
     // 写回最终配置到 instance.json

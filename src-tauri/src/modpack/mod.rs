@@ -1,7 +1,7 @@
 pub mod cf_download;
 pub mod install;
 
-use crate::instance::resolve_game_dir;
+use crate::instance::{register_cancel, resolve_game_dir, safe_path_name, unregister_cancel};
 use tauri::Emitter;
 
 /// 构建 HTTP client
@@ -375,6 +375,7 @@ pub async fn import_modpack(
                 .unwrap_or("整合包")
                 .to_string()
         });
+    let cancel_flag = register_cancel(&progress_name);
     std::thread::spawn(move || {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             do_import_modpack_named(
@@ -392,11 +393,17 @@ pub async fn import_modpack(
                 panic_payload_to_string(payload)
             )),
         };
+        unregister_cancel(&progress_name);
         if let Err(ref e) = result {
+            let stage = if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                "cancelled"
+            } else {
+                "error"
+            };
             let _ = app2.emit(
                 "install-progress",
                 serde_json::json!({
-                    "name": &progress_name, "stage": "error", "current": 0, "total": 0, "detail": e
+                    "name": &progress_name, "stage": stage, "current": 0, "total": 0, "detail": e
                 }),
             );
         }
@@ -427,7 +434,7 @@ pub fn do_import_modpack_named(
     emit_progress(app, temp_name, "detecting", 0, 1, "正在识别整合包格式...");
 
     let meta = detect_modpack(zip_file)?;
-    let inst_name = sanitize_name(&meta.name);
+    let inst_name = safe_path_name(&sanitize_name(&meta.name), "版本名")?;
     let game_dir = resolve_game_dir(game_dir_input);
     let inst_dir = game_dir.join("instances").join(&inst_name);
 

@@ -49,10 +49,19 @@ pub fn cancel_modpack_install(file_name: String) -> Result<String, String> {
 /// 在系统默认浏览器打开 URL
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(url.trim()).map_err(|_| "链接格式无效".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("不支持的链接协议: {}", scheme)),
+    }
+    let url = parsed.to_string();
+
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &url])
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| format!("打开链接失败: {}", e))?;
     }
@@ -222,20 +231,18 @@ pub fn list_installed_versions(game_dir: String) -> Result<Vec<InstanceInfo>, St
 
 #[tauri::command]
 pub async fn delete_version(game_dir: String, name: String) -> Result<String, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send((|| {
-            let dir = resolve_game_dir(&game_dir);
-            let safe_name = safe_path_name(&name, "版本名")?;
-            let inst_path = dir.join("instances").join(&safe_name);
-            if !inst_path.exists() {
-                return Err(format!("版本 {} 不存在", name));
-            }
-            std::fs::remove_dir_all(&inst_path).map_err(|e| format!("删除失败: {}", e))?;
-            Ok(format!("已删除版本: {}", name))
-        })());
-    });
-    rx.recv().map_err(|_| "线程通信失败".to_string())?
+    tokio::task::spawn_blocking(move || {
+        let dir = resolve_game_dir(&game_dir);
+        let safe_name = safe_path_name(&name, "版本名")?;
+        let inst_path = dir.join("instances").join(&safe_name);
+        if !inst_path.exists() {
+            return Err(format!("版本 {} 不存在", name));
+        }
+        std::fs::remove_dir_all(&inst_path).map_err(|e| format!("删除失败: {}", e))?;
+        Ok(format!("已删除版本: {}", name))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 使用系统文件管理器打开指定目录
