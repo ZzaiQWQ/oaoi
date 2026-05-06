@@ -205,6 +205,57 @@ use tauri::Emitter;
 /// Forge / NeoForge 安装器全局锁 — 同一时间只能运行一个安装
 pub static FORGE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 
+pub fn run_java_process_cancelable(
+    java_path: &str,
+    classpath: &str,
+    main_class: &str,
+    args: &[String],
+    current_dir: &std::path::Path,
+    cancel_name: &str,
+) -> Result<std::process::ExitStatus, String> {
+    if crate::instance::is_cancelled(cancel_name) {
+        return Err("用户取消安装".to_string());
+    }
+
+    let mut command = std::process::Command::new(java_path);
+    command
+        .arg("-cp")
+        .arg(classpath)
+        .arg(main_class)
+        .args(args)
+        .current_dir(current_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("processor 启动失败: {}", e))?;
+
+    loop {
+        if crate::instance::is_cancelled(cancel_name) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("用户取消安装".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("processor 等待失败: {}", e));
+            }
+        }
+    }
+}
+
 /// 将官方 URL 替换为 BMCLAPI 国内镜像
 pub fn mirror_url(url: &str, use_mirror: bool) -> String {
     if !use_mirror {

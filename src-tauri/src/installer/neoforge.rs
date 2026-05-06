@@ -1,6 +1,7 @@
 use super::{
     build_data_map, download_file_if_needed_cancelable, get_jar_main_class, make_emitter,
-    maven_name_to_path, merge_libraries, resolve_data_arg, safe_maven_path, FORGE_LOCK,
+    maven_name_to_path, merge_libraries, resolve_data_arg, run_java_process_cancelable,
+    safe_maven_path, FORGE_LOCK,
 };
 use crate::instance::safe_join;
 
@@ -31,7 +32,18 @@ pub fn install_neoforge(
 
     // 获取安装锁（和 Forge 共享）
     emit("neoforge", 0, 100, "等待其他安装器完成...");
-    let _forge_guard = FORGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _forge_guard = loop {
+        if crate::instance::is_cancelled(name) {
+            return Err("用户取消安装".to_string());
+        }
+        match FORGE_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+        }
+    };
 
     // 1. 下载 neoforge-installer.jar
     let installer_url = if use_mirror {
@@ -68,6 +80,9 @@ pub fn install_neoforge(
         let file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         for i in 0..archive.len() {
+            if crate::instance::is_cancelled(name) {
+                return Err("用户取消安装".to_string());
+            }
             if let Ok(mut entry) = archive.by_index(i) {
                 let Ok(out_path) = safe_join(&temp_dir, entry.name()) else {
                     continue;
@@ -125,6 +140,9 @@ pub fn install_neoforge(
     let mut downloaded = 0;
 
     for lib in &all_libs {
+        if crate::instance::is_cancelled(name) {
+            return Err("用户取消安装".to_string());
+        }
         downloaded += 1;
         let lib_name = lib["name"].as_str().unwrap_or("");
 
@@ -230,6 +248,9 @@ pub fn install_neoforge(
             let total_proc = client_processors.len();
 
             for (i, proc) in client_processors.iter().enumerate() {
+                if crate::instance::is_cancelled(name) {
+                    return Err("用户取消安装".to_string());
+                }
                 emit(
                     "neoforge",
                     70 + (i * 25 / total_proc.max(1)),
@@ -308,32 +329,23 @@ pub fn install_neoforge(
                     jar_name, main_class, proc_args
                 );
 
-                #[cfg(windows)]
-                use std::os::windows::process::CommandExt;
-                let output = std::process::Command::new(java_path)
-                    .arg("-cp")
-                    .arg(proc_cp.join(";"))
-                    .arg(&main_class)
-                    .args(&proc_args)
-                    .current_dir(inst_dir)
-                    .creation_flags(0x08000000)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .stdin(std::process::Stdio::null())
-                    .output();
-
-                match output {
-                    Ok(o) => {
-                        if !o.status.success() {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            eprintln!(
-                                "[neoforge] processor 失败: {} - {}",
-                                jar_name,
-                                stderr.chars().take(300).collect::<String>()
-                            );
+                match run_java_process_cancelable(
+                    java_path,
+                    &proc_cp.join(";"),
+                    &main_class,
+                    &proc_args,
+                    inst_dir,
+                    name,
+                ) {
+                    Ok(status) => {
+                        if !status.success() {
+                            eprintln!("[neoforge] processor 失败: {}", jar_name);
                         }
                     }
                     Err(e) => {
+                        if e.contains("取消") {
+                            return Err(e);
+                        }
                         eprintln!("[neoforge] processor 执行出错: {} - {}", jar_name, e);
                     }
                 }
