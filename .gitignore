@@ -2,6 +2,9 @@
 /src-tauri/target/
 /dist/
 /node_modules/
+/release-builds/
+/update/
+/.playwright-mcp/
 
 # IDE
 .vscode/
