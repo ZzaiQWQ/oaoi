@@ -125,7 +125,7 @@ pub fn do_install_modpack_inner(
     let all_handles: Vec<std::thread::JoinHandle<()>>;
 
     // 收集需要下载的文件
-    let tasks: Vec<(String, std::path::PathBuf, Option<String>)>;
+    let tasks: Vec<(Vec<String>, std::path::PathBuf, Option<String>)>;
     {
         let mods_dir = inst_dir.join("mods");
         std::fs::create_dir_all(&mods_dir).ok();
@@ -135,7 +135,7 @@ pub fn do_install_modpack_inner(
                 .iter()
                 .map(|f| {
                     let dest = safe_join(inst_dir, &f.path)?;
-                    Ok((f.url.clone(), dest, f.sha1.clone()))
+                    Ok((vec![f.url.clone()], dest, f.sha1.clone()))
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             ModpackKind::CurseForge { files, .. } => {
@@ -203,7 +203,8 @@ pub fn do_install_modpack_inner(
                     file_ids.len()
                 );
 
-                let mut resolved: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+                let mut resolved: Vec<(Vec<String>, std::path::PathBuf, Option<String>)> =
+                    Vec::new();
                 let mut unresolved: Vec<(u32, u32)> = Vec::new();
 
                 if let Some(client) = &api_client {
@@ -285,15 +286,14 @@ pub fn do_install_modpack_inner(
                                             }
                                             let dest = target_dir.join(&fname);
 
+                                            let mut urls = cf_cdn_urls(fid, &fname);
                                             if !dl.is_empty() {
-                                                resolved.push((dl, dest, None));
+                                                urls.push(dl);
+                                            }
+                                            if urls.is_empty() {
+                                                unresolved.push((pid, fid));
                                             } else {
-                                                let cdns = cf_cdn_urls(fid, &fname);
-                                                if let Some(url) = cdns.first() {
-                                                    resolved.push((url.clone(), dest, None));
-                                                } else {
-                                                    unresolved.push((pid, fid));
-                                                }
+                                                resolved.push((urls, dest, None));
                                             }
                                         }
                                     }
@@ -324,7 +324,7 @@ pub fn do_install_modpack_inner(
                 for (pid, fid) in unresolved {
                     let marker = format!("CF:{}:{}", pid, fid);
                     let dest = mods_dir.join("_cf_placeholder_");
-                    resolved.push((marker, dest, None));
+                    resolved.push((vec![marker], dest, None));
                 }
 
                 resolved
@@ -393,7 +393,7 @@ pub fn do_install_modpack_inner(
 
     all_handles = tasks
         .into_iter()
-        .map(|(url, dest, sha1)| {
+        .map(|(urls, dest, sha1)| {
             let cats = categories.clone();
             let errors = mod_errors.clone();
             let h = mod_http.clone();
@@ -403,10 +403,11 @@ pub fn do_install_modpack_inner(
             let cancel_name = display_name.to_string();
             std::thread::spawn(move || {
                 let _ = sem_r.lock().unwrap().recv();
+                let first_url = urls.first().cloned().unwrap_or_default();
                 let result = if crate::instance::is_cancelled(&cancel_name) {
                     Err("用户取消下载".to_string())
-                } else if url.starts_with("CF:") {
-                    let parts: Vec<&str> = url.split(':').collect();
+                } else if first_url.starts_with("CF:") {
+                    let parts: Vec<&str> = first_url.split(':').collect();
                     let project_id: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let file_id: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let inst_dir_fallback = dest
@@ -424,17 +425,37 @@ pub fn do_install_modpack_inner(
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    download_file_if_needed_cancelable(
-                        &h,
-                        &url,
-                        &dest,
-                        sha1.as_deref(),
-                        false,
-                        Some(&cancel_name),
-                    )
+                    let mut last_err = String::new();
+                    let mut done = None;
+                    for url in urls {
+                        if crate::instance::is_cancelled(&cancel_name) {
+                            last_err = "用户取消下载".to_string();
+                            break;
+                        }
+                        eprintln!("[download] try: {}", url);
+                        match download_file_if_needed_cancelable(
+                            &h,
+                            &url,
+                            &dest,
+                            sha1.as_deref(),
+                            false,
+                            Some(&cancel_name),
+                        ) {
+                            Ok(result) => {
+                                done = Some(result);
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = format!("{}: {}", url, e);
+                                eprintln!("[download] failed, try next: {}", last_err);
+                                let _ = std::fs::remove_file(&dest);
+                            }
+                        }
+                    }
+                    done.map(Ok).unwrap_or_else(|| Err(last_err))
                 };
                 if let Err(e) = result {
-                    errors.lock().unwrap().push(format!("{}: {}", url, e));
+                    errors.lock().unwrap().push(format!("{}: {}", first_url, e));
                 }
                 if let Some(counter) = cats.get(&category) {
                     counter
@@ -618,6 +639,13 @@ pub fn do_install_modpack_inner(
         for e in errs.iter() {
             eprintln!("[modpack] 失败: {}", e);
         }
+        let sample = errs.iter().take(5).cloned().collect::<Vec<_>>().join("; ");
+        return Err(format!(
+            "整合包文件下载失败: {}/{} 个文件失败。{}",
+            errs.len(),
+            total_files,
+            sample
+        ));
     }
 
     // 复制 overrides

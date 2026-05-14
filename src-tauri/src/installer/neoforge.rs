@@ -46,15 +46,21 @@ pub fn install_neoforge(
     };
 
     // 1. 下载 neoforge-installer.jar
+    let legacy_artifact = loader_version.starts_with(&format!("{}-", mc_version));
+    let (artifact_path, artifact_name) = if legacy_artifact {
+        ("net/neoforged/forge", "forge")
+    } else {
+        ("net/neoforged/neoforge", "neoforge")
+    };
     let installer_url = if use_mirror {
         format!(
-            "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
-            loader_version
+            "https://bmclapi2.bangbang93.com/maven/{}/{}/{}-{}-installer.jar",
+            artifact_path, loader_version, artifact_name, loader_version
         )
     } else {
         format!(
-            "https://maven.neoforged.net/releases/net/neoforged/neoforge/{0}/neoforge-{0}-installer.jar",
-            loader_version
+            "https://maven.neoforged.net/releases/{}/{}/{}-{}-installer.jar",
+            artifact_path, loader_version, artifact_name, loader_version
         )
     };
     let installer_path = inst_dir.join("neoforge-installer.jar");

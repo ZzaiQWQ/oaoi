@@ -184,20 +184,35 @@ pub fn install_fabric(
                                     if let Ok(safe_filename) = safe_path_name(filename, "文件名")
                                     {
                                         let dest = mods_dir.join(&safe_filename);
-                                        let _ = download_file_if_needed_cancelable(
+                                        match download_file_if_needed_cancelable(
                                             http,
                                             dl_url,
                                             &dest,
                                             None,
                                             use_mirror,
                                             Some(name),
-                                        );
-                                        emit(
-                                            "fabric-api",
-                                            1,
-                                            1,
-                                            &format!("Fabric API {} 已下载", safe_filename),
-                                        );
+                                        ) {
+                                            Ok(_) => {
+                                                emit(
+                                                    "fabric-api",
+                                                    1,
+                                                    1,
+                                                    &format!("Fabric API {} 已下载", safe_filename),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "[install] Fabric API 下载失败(非致命): {}",
+                                                    e
+                                                );
+                                                emit(
+                                                    "fabric-api",
+                                                    1,
+                                                    1,
+                                                    "Fabric API 下载失败，可稍后手动安装",
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }

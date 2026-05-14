@@ -4,8 +4,343 @@
 
 /* 服务器页全局布局 */
 .page-servers {
-  padding: 14px 18px;
+  padding: 16px 18px 14px;
   overflow: hidden;
   background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
   height: 100%;
+}
+
+.page-servers.active {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  row-gap: 12px;
+}
+
+.server-page-tabs {
+  display: inline-flex;
+  gap: 8px;
+  padding: 4px;
+  margin: 0;
+  width: fit-content;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.52);
+  border: 1px solid rgba(255, 133, 169, 0.16);
+  box-shadow: 0 8px 22px rgba(255, 83, 134, 0.08);
+  backdrop-filter: blur(var(--blur-radius, 12px));
+}
+
+.server-page-tab {
+  min-width: 92px;
+  height: 30px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-mid);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.server-page-tab.active {
+  color: white;
+  background: var(--rose-gradient);
+  box-shadow: 0 8px 18px rgba(255, 83, 134, 0.24);
+}
+
+.server-tab-panel {
+  display: none;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.server-tab-panel.active {
+  display: block;
+}
+
+.server-tab-panel .servers-grid {
+  height: 100%;
+}
+
+.p2p-tool-layout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 0.82fr 1fr 1fr;
+  grid-template-rows: 196px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.p2p-card {
+  border-radius: 22px;
+  border: 1.5px solid rgba(255, 133, 169, 0.22);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(var(--blur-radius, 12px));
+  box-shadow: 0 10px 24px rgba(255, 83, 134, 0.08);
+  padding: 12px 14px;
+  overflow: hidden;
+}
+
+.p2p-card-main {
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 102, 153, 0.2), rgba(255, 255, 255, 0.72) 42%),
+    rgba(255, 255, 255, 0.72);
+}
+
+.p2p-card:not(.p2p-card-main):not(.p2p-log-card) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.p2p-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.p2p-card-head.compact {
+  margin-bottom: 9px;
+}
+
+.p2p-card-head.compact > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.p2p-card-head.compact .p2p-kicker {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+.p2p-card-head.compact h3 {
+  white-space: nowrap;
+}
+
+.p2p-kicker {
+  display: block;
+  color: var(--pink-500);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.p2p-card h2,
+.p2p-card h3 {
+  margin: 0;
+  color: var(--text-dark);
+  line-height: 1.2;
+}
+
+.p2p-card h2 {
+  font-size: 21px;
+  font-weight: 900;
+}
+
+.p2p-card h3 {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.p2p-status-chip {
+  min-width: 76px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 102, 153, 0.13);
+  color: var(--pink-600);
+  font-size: 10px;
+  font-weight: 900;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.p2p-guide {
+  margin-top: auto;
+  display: grid;
+  gap: 7px;
+  color: var(--text-mid);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.p2p-guide p {
+  margin: 0;
+}
+
+.p2p-guide strong {
+  color: var(--pink-600);
+  font-weight: 900;
+}
+
+.p2p-status-strip,
+.p2p-code-box {
+  border-radius: 15px;
+  border: 1px solid rgba(255, 133, 169, 0.18);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 10px 12px;
+}
+
+.p2p-status-strip span,
+.p2p-code-box span,
+.p2p-field span,
+.p2p-readonly-field span {
+  display: block;
+  color: var(--text-light);
+  font-size: 9px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.p2p-status-strip strong {
+  color: var(--pink-600);
+  font-size: 13px;
+}
+
+.p2p-code-box strong {
+  color: var(--text-dark);
+  font-size: 21px;
+  letter-spacing: 3px;
+}
+
+.p2p-field,
+.p2p-readonly-field {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.p2p-field input,
+.p2p-code-value {
+  width: 100%;
+  height: 28px;
+  border: 1.5px solid rgba(255, 133, 169, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 12px;
+  outline: none;
+}
+
+.p2p-code-value {
+  display: flex;
+  align-items: center;
+  letter-spacing: 3px;
+}
+
+.p2p-inline-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-light);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.p2p-field input:focus {
+  border-color: var(--pink-400);
+  box-shadow: 0 0 0 3px rgba(255, 102, 153, 0.12);
+}
+
+.p2p-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.p2p-btn,
+.p2p-reset-btn {
+  height: 28px;
+  border-radius: 12px;
+  border: none;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.p2p-btn {
+  flex: 1;
+}
+
+.p2p-reset-btn {
+  min-width: 58px;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+
+.p2p-btn.primary {
+  color: white;
+  background: var(--rose-gradient);
+  box-shadow: 0 8px 18px rgba(255, 83, 134, 0.22);
+}
+
+.p2p-btn.ghost,
+.p2p-reset-btn {
+  color: var(--pink-600);
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(255, 102, 153, 0.24);
+}
+
+.p2p-btn:disabled,
+.p2p-reset-btn:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.p2p-log-card {
+  grid-column: span 2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.p2p-log-box {
+  flex: 1;
+  min-height: 0;
+  margin-top: 7px;
+  border-radius: 14px;
+  background: rgba(255, 246, 250, 0.78);
+  border: 1px solid rgba(255, 133, 169, 0.16);
+  padding: 10px 12px;
+  color: var(--text-mid);
+  font-size: 11px;
+  font-weight: 700;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.p2p-log-box p {
+  margin: 0;
+}
+
+.p2p-log-line {
+  margin-bottom: 5px;
+  overflow-wrap: anywhere;
+}
+
+.p2p-log-success {
+  color: #239b5a;
+}
+
+.p2p-log-error {
+  color: #e53963;
+}
+
+.p2p-log-info {
+  color: var(--text-mid);
 }

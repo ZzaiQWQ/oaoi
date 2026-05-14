@@ -18,6 +18,72 @@ pub struct LaunchOptions {
     pub custom_jvm_args: Option<String>,
 }
 
+fn split_command_args(input: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_arg = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            in_arg = true;
+            continue;
+        }
+
+        if ch == '\\' {
+            if quote == Some('\'') {
+                current.push(ch);
+            } else {
+                escaped = true;
+            }
+            in_arg = true;
+            continue;
+        }
+
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            in_arg = true;
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            in_arg = true;
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if in_arg {
+                args.push(std::mem::take(&mut current));
+                in_arg = false;
+            }
+            continue;
+        }
+
+        current.push(ch);
+        in_arg = true;
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("JVM 参数引号未闭合".to_string());
+    }
+    if in_arg {
+        args.push(current);
+    }
+
+    Ok(args)
+}
+
 #[tauri::command]
 pub async fn launch_minecraft(
     app_handle: tauri::AppHandle,
@@ -201,15 +267,14 @@ fn do_launch_minecraft(
                         eprintln!("[launch] 下载 native: {}", url);
                         let sha1 =
                             lib["downloads"]["classifiers"][&classifier_key]["sha1"].as_str();
-                        if let Ok(http) = reqwest::blocking::Client::builder()
+                        let http = reqwest::blocking::Client::builder()
                             .connect_timeout(std::time::Duration::from_secs(15))
                             .timeout(std::time::Duration::from_secs(60))
                             .user_agent("OAOI-Launcher/1.0")
                             .build()
-                        {
-                            let _ =
-                                download_file_if_needed(&http, url, &native_jar_path, sha1, false);
-                        }
+                            .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
+                        download_file_if_needed(&http, url, &native_jar_path, sha1, false)
+                            .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
                     }
                 }
                 if native_jar_path.exists() {
@@ -334,7 +399,7 @@ fn do_launch_minecraft(
     if let Some(ref custom) = options.custom_jvm_args {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
-            for part in trimmed.split_whitespace() {
+            for part in split_command_args(trimmed)? {
                 args.push(part.to_string());
             }
             eprintln!("[launch] 自定义 JVM 参数: {}", trimmed);
@@ -464,7 +529,7 @@ fn do_launch_minecraft(
             )
             .replace("${version_type}", "release")
             .replace("${user_properties}", "{}");
-        for part in replaced.split_whitespace() {
+        for part in split_command_args(&replaced)? {
             args.push(part.to_string());
         }
     } else {

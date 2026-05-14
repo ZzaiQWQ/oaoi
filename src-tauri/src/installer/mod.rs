@@ -199,11 +199,13 @@ pub fn merge_libraries(existing_libs: &mut Vec<serde_json::Value>, new_libs: &[s
 }
 
 use crate::instance::{resolve_game_dir, safe_join, safe_path_name};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::Emitter;
 
 /// Forge / NeoForge 安装器全局锁 — 同一时间只能运行一个安装
 pub static FORGE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
+static DOWNLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn run_java_process_cancelable(
     java_path: &str,
@@ -553,6 +555,20 @@ fn is_download_cancelled(cancel_name: Option<&str>) -> bool {
     cancel_name.is_some_and(crate::instance::is_cancelled)
 }
 
+fn unique_temp_path(dest: &std::path::Path) -> std::path::PathBuf {
+    let file_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let counter = DOWNLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dest.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ))
+}
+
 /// 实际执行单次下载（流式写入，不一次性读到内存）
 fn do_download(
     http: &reqwest::blocking::Client,
@@ -586,7 +602,7 @@ where
 
     let total = resp.content_length();
     on_progress(0, total);
-    let tmp_path = dest.with_extension("tmp");
+    let tmp_path = unique_temp_path(dest);
     let result = (|| -> Result<(), String> {
         let mut file =
             std::fs::File::create(&tmp_path).map_err(|e| format!("创建临时文件失败: {}", e))?;

@@ -563,8 +563,9 @@ function renderOnlineResults(results, query) {
 
   if (results.length === 0) {
     const isChinese = /[\u4e00-\u9fa5]/.test(query);
+    const safeQuery = escapeHtml(query || '');
     listEl.innerHTML = `<div class="mod-list-empty">
-      未找到匹配的结果${isChinese ? '<br><span style="font-size:11px;margin-top:4px;display:inline-block;">中文搜索推荐 <a href="#" class="mcmod-search-link" style="color:var(--pink-700);font-weight:600;">在MC百科搜索「' + query + '」</a></span>' : ''}
+      未找到匹配的结果${isChinese ? '<br><span style="font-size:11px;margin-top:4px;display:inline-block;">中文搜索推荐 <a href="#" class="mcmod-search-link" style="color:var(--pink-700);font-weight:600;">在MC百科搜索「' + safeQuery + '」</a></span>' : ''}
     </div>`;
     if (isChinese) {
       listEl.querySelector('.mcmod-search-link')?.addEventListener('click', (e) => {

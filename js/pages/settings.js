@@ -87,9 +87,9 @@ function initSettings() {
     const safeId = encodeURIComponent(id || 'MHF_Steve');
     return [
       `https://mc-heads.net/avatar/${safeId}/${size}`,
+      `https://crafthead.net/helm/${safeId}/${size}`,
+      `https://minotar.net/helm/${safeId}/${size}.png`,
       `https://crafatar.com/avatars/${safeId}?size=${size}&overlay`,
-      `https://crafthead.net/avatar/${safeId}/${size}`,
-      `https://minotar.net/avatar/${safeId}/${size}.png`,
     ];
   }
 
@@ -110,6 +110,10 @@ function initSettings() {
     };
     img.src = sources[index];
   }
+
+  document.querySelectorAll('.about-avatar img[data-avatar-id]').forEach(img => {
+    installAvatarFallback(img, img.dataset.avatarId, img.dataset.avatarName, 48);
+  });
 
   function renderAccountList() {
     if (!accountListEl) return;

@@ -179,6 +179,7 @@ pub struct ModpackVersionInfo {
     pub version_name: String,
     pub mc_versions: String,
     pub download_url: String,
+    pub download_urls: Vec<String>,
     pub file_name: String,
     pub file_size: u64,
     pub date: String,
@@ -259,7 +260,8 @@ fn get_mr_modpack_versions(
                 .unwrap_or(ver["version_number"].as_str().unwrap_or(""))
                 .to_string(),
             mc_versions: game_versions,
-            download_url: dl_url,
+            download_url: dl_url.clone(),
+            download_urls: vec![dl_url.clone()],
             file_name: fname,
             file_size: fsize,
             date: ver["date_published"]
@@ -305,28 +307,19 @@ fn get_cf_modpack_versions(
         let raw_file_name = file["fileName"].as_str().unwrap_or("modpack.zip");
         let safe_file_name =
             safe_path_name(raw_file_name, "文件名").unwrap_or_else(|_| "modpack.zip".to_string());
-        let dl_url = file["downloadUrl"].as_str().unwrap_or("").to_string();
-        // CF 有时 downloadUrl 为 null，需要用 fileId 构造 CDN URL
-        let dl_url = if dl_url.is_empty() {
-            let fid = file["id"].as_u64().unwrap_or(0);
-            if fid > 0 {
-                format!(
-                    "https://edge.forgecdn.net/files/{}/{}/{}",
-                    fid / 1000,
-                    fid % 1000,
-                    urlencoding::encode(&safe_file_name)
-                )
-            } else {
-                continue;
-            }
-        } else {
-            dl_url
+        let fid = file["id"].as_u64().unwrap_or(0);
+        let api_dl_url = file["downloadUrl"].as_str().unwrap_or("");
+        let download_urls =
+            curseforge_archive_download_candidates(fid, &safe_file_name, api_dl_url);
+        let Some(dl_url) = download_urls.first().cloned() else {
+            continue;
         };
 
         results.push(ModpackVersionInfo {
             version_name: file["displayName"].as_str().unwrap_or("").to_string(),
             mc_versions: game_versions,
             download_url: dl_url,
+            download_urls,
             file_name: safe_file_name,
             file_size: file["fileLength"].as_u64().unwrap_or(0),
             date: file["fileDate"]
@@ -341,21 +334,74 @@ fn get_cf_modpack_versions(
     Ok(results)
 }
 
+fn curseforge_archive_download_candidates(
+    file_id: u64,
+    file_name: &str,
+    api_download_url: &str,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    if file_id > 0 && !file_name.is_empty() {
+        let encoded_name = urlencoding::encode(file_name);
+        urls.push(format!(
+            "https://edge.forgecdn.net/files/{}/{}/{}",
+            file_id / 1000,
+            file_id % 1000,
+            encoded_name
+        ));
+        urls.push(format!(
+            "https://mediafilez.forgecdn.net/files/{}/{}/{}",
+            file_id / 1000,
+            file_id % 1000,
+            encoded_name
+        ));
+    }
+    if !api_download_url.trim().is_empty() {
+        urls.push(api_download_url.trim().to_string());
+    }
+    dedupe_urls(urls)
+}
+
+fn normalize_download_urls(
+    download_url: String,
+    download_urls: Option<Vec<String>>,
+) -> Vec<String> {
+    let mut urls = download_urls.unwrap_or_default();
+    if !download_url.trim().is_empty() {
+        urls.push(download_url);
+    }
+    dedupe_urls(urls)
+}
+
+fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for url in urls {
+        let url = url.trim().to_string();
+        if url.is_empty() || !seen.insert(url.clone()) {
+            continue;
+        }
+        result.push(url);
+    }
+    result
+}
+
 #[tauri::command]
 pub fn install_modpack_direct(
     app_handle: tauri::AppHandle,
     download_url: String,
+    download_urls: Option<Vec<String>>,
     file_name: String,
     game_dir: String,
     java_path: String,
     use_mirror: bool,
 ) -> Result<String, String> {
     let file_name = safe_path_name(&file_name, "文件名")?;
+    let download_urls = normalize_download_urls(download_url, download_urls);
     let cancel_flag = register_cancel(&file_name);
     std::thread::spawn(move || {
         let result = do_install_modpack_direct(
             &app_handle,
-            &download_url,
+            download_urls,
             &file_name,
             &game_dir,
             &java_path,
@@ -386,7 +432,7 @@ pub fn install_modpack_direct(
 
 fn do_install_modpack_direct(
     app_handle: &tauri::AppHandle,
-    download_url: &str,
+    download_urls: Vec<String>,
     file_name: &str,
     game_dir: &str,
     java_path: &str,
@@ -411,8 +457,13 @@ fn do_install_modpack_direct(
     let tmp_dir = std::env::temp_dir().join("oaoi_modpack_dl");
     std::fs::create_dir_all(&tmp_dir).ok();
     let tmp_path = tmp_dir.join(file_name);
-    let downloaded =
-        download_modpack_archive(app_handle, &http, download_url, file_name, &tmp_path)?;
+    let downloaded = download_modpack_archive_with_fallbacks(
+        app_handle,
+        &http,
+        &download_urls,
+        file_name,
+        &tmp_path,
+    )?;
     let total_size = std::fs::metadata(&tmp_path)
         .map(|m| m.len())
         .unwrap_or(downloaded);
@@ -554,6 +605,33 @@ fn emit_download_progress(
             }),
         );
     }
+}
+
+fn download_modpack_archive_with_fallbacks(
+    app_handle: &tauri::AppHandle,
+    http: &reqwest::blocking::Client,
+    download_urls: &[String],
+    file_name: &str,
+    tmp_path: &std::path::Path,
+) -> Result<u64, String> {
+    let mut last_err = String::new();
+    for url in download_urls {
+        eprintln!("[modpack-dl] try archive: {}", url);
+        match download_modpack_archive(app_handle, http, url, file_name, tmp_path) {
+            Ok(downloaded) => return Ok(downloaded),
+            Err(err) => {
+                last_err = format!("{}: {}", url, err);
+                eprintln!("[modpack-dl] archive failed, try next: {}", last_err);
+                let _ = std::fs::remove_file(tmp_path);
+                remove_part_files(tmp_path, MODPACK_PARALLEL_WORKERS as usize);
+            }
+        }
+    }
+    Err(if last_err.is_empty() {
+        "没有可用整合包下载地址".to_string()
+    } else {
+        last_err
+    })
 }
 
 fn download_modpack_single(

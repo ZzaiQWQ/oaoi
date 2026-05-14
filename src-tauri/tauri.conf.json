@@ -1,12 +1,12 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "oaoi",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "identifier": "com.oaoi.launcher",
   "build": {
     "frontendDist": "../dist",
-    "beforeBuildCommand": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force ../dist | Out-Null; Copy-Item ../index.html ../dist/; Copy-Item -Recurse -Force ../js ../dist/js; Copy-Item -Recurse -Force ../styles ../dist/styles; Copy-Item -Recurse -Force ../assets ../dist/assets; Copy-Item -Force modcn.txt target/release/modcn.txt -ErrorAction SilentlyContinue\"",
-    "beforeDevCommand": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force ../dist | Out-Null; Copy-Item ../index.html ../dist/; Copy-Item -Recurse -Force ../js ../dist/js; Copy-Item -Recurse -Force ../styles ../dist/styles; Copy-Item -Recurse -Force ../assets ../dist/assets\""
+    "beforeBuildCommand": "node scripts/sync_dist.js --release",
+    "beforeDevCommand": "node scripts/sync_dist.js"
   },
   "app": {
     "withGlobalTauri": true,
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' asset: http://asset.localhost https://launchercontent.mojang.com https://cdn.modrinth.com https://media.forgecdn.net https://mc-heads.net https://crafthead.net https://crafatar.com https://minotar.net data:; connect-src 'self' https: http://localhost; font-src 'self' https://fonts.gstatic.com"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' asset: http://asset.localhost https://launchercontent.mojang.com https://cdn.modrinth.com https://media.forgecdn.net https://mc-heads.net https://crafthead.net https://crafatar.com https://minotar.net data:; connect-src 'self' https: wss://xl.oaoi.cn http://localhost; font-src 'self' https://fonts.gstatic.com"
     }
   },
   "bundle": {
