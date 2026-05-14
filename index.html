@@ -76,7 +76,7 @@
                   d="M20 13H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1v-6c0-.55-.45-1-1-1zM7 19c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM20 3H4c-.55 0-1 .45-1 1v6c0 .55.45 1 1 1h16c.55 0 1-.45 1-1V4c0-.55-.45-1-1-1zM7 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" />
               </svg>
             </div>
-            <span>服务器列表</span>
+            <span>联机</span>
           </a>
           <a href="#" class="nav-item" data-page="download">
             <div class="nav-icon">
@@ -175,12 +175,12 @@
 
           <!-- ========== 服务器列表页 ========== -->
           <div class="page page-servers" id="pageServers">
-            <div class="servers-header">
-              <h1 class="servers-main-title">oaoi</h1>
-              <span class="servers-sub-title">服务器列表</span>
-              <p class="servers-desc">探索樱花盛开的每一个角落，与数千名玩家共同开启属于你的史诗冒险。</p>
+            <div class="server-page-tabs" data-no-drag>
+              <button class="server-page-tab active" type="button" data-server-tab="list">服务器列表</button>
+              <button class="server-page-tab" type="button" data-server-tab="p2p">联机工具</button>
             </div>
-            <div class="servers-grid" data-no-drag>
+            <div class="server-tab-panel active" data-server-panel="list">
+              <div class="servers-grid" data-no-drag>
               <div class="srv-card srv-card-featured">
                 <img class="srv-card-bg" src="assets/bg.png" alt="">
                 <div class="srv-card-bg-overlay"></div>
@@ -237,6 +237,79 @@
                 <h3>正在寻找更多？</h3>
                 <p>访问官方Wiki查看所有服务器特性与玩家指南。</p>
                 <button class="srv-more-btn">查看完整列表</button>
+              </div>
+              </div>
+            </div>
+            <div class="server-tab-panel" data-server-panel="p2p" data-no-drag>
+              <div class="p2p-tool-layout">
+                <section class="p2p-card p2p-card-main">
+                  <div class="p2p-card-head">
+                    <div>
+                      <span class="p2p-kicker">P2P Link</span>
+                      <h2>联机工具</h2>
+                    </div>
+                    <span class="p2p-status-chip" id="p2p-signal-status">未连接</span>
+                  </div>
+                  <div class="p2p-guide">
+                    <p><strong>房主</strong> 先在游戏里打开“对局域网开放”，再点侦测端口和创建房间。</p>
+                    <p><strong>访客</strong> 输入房间码加入，成功后去游戏局域网列表找房间。</p>
+                  </div>
+                </section>
+
+                <section class="p2p-card">
+                  <div class="p2p-card-head compact">
+                    <div>
+                      <span class="p2p-kicker">Host</span>
+                      <h3>我是房主</h3>
+                    </div>
+                  </div>
+                  <label class="p2p-field">
+                    <span>MC 局域网端口</span>
+                    <input id="p2p-host-port" type="number" value="25565" min="1" max="65535">
+                  </label>
+                  <div class="p2p-readonly-field">
+                    <span>房间码</span>
+                    <div class="p2p-code-value" id="p2p-host-room-code">------</div>
+                    <small class="p2p-inline-note" id="p2p-host-guest-count">访客 0/7</small>
+                  </div>
+                  <div class="p2p-actions">
+                    <button class="p2p-btn ghost" id="p2p-detect-port" type="button">侦测端口</button>
+                    <button class="p2p-btn primary" id="p2p-create-room" type="button">创建房间</button>
+                  </div>
+                </section>
+
+                <section class="p2p-card">
+                  <div class="p2p-card-head compact">
+                    <div>
+                      <span class="p2p-kicker">Guest</span>
+                      <h3>我是访客</h3>
+                    </div>
+                  </div>
+                  <label class="p2p-field">
+                    <span>房间码</span>
+                    <input id="p2p-guest-room-code" type="text" maxlength="6" placeholder="输入 6 位房间码">
+                  </label>
+                  <label class="p2p-field">
+                    <span>本地端口</span>
+                    <input id="p2p-guest-local-port" type="number" placeholder="留空自动选择" min="1" max="65535">
+                  </label>
+                  <div class="p2p-actions">
+                    <button class="p2p-btn primary wide" id="p2p-join-room" type="button">加入房间</button>
+                  </div>
+                </section>
+
+                <section class="p2p-card p2p-log-card">
+                  <div class="p2p-card-head compact">
+                    <div>
+                      <span class="p2p-kicker">Log</span>
+                      <h3>连接日志</h3>
+                    </div>
+                    <button class="p2p-reset-btn" id="p2p-reset-connection" type="button">重置</button>
+                  </div>
+                  <div class="p2p-log-box" id="p2p-log-output">
+                    <p>等待操作</p>
+                  </div>
+                </section>
               </div>
             </div>
           </div>
@@ -462,16 +535,16 @@
                   <h3>核心开发团队</h3>
                   <div class="about-team-grid">
                     <div class="about-member">
-                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/Gy_ZZ/48" alt="Zzai"></div><span
-                        class="about-member-name">Zzai</span><span class="about-member-role">主开发</span>
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/Gy_ZZ/48" data-avatar-id="Gy_ZZ" data-avatar-name="Gy_ZZ" alt="Zzai"></div><span
+                        class="about-member-name">Zzai</span><span class="about-member-role">Bug 饲养员</span>
                     </div>
                     <div class="about-member">
-                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/_Moon_ovo/48" alt="oaoi"></div>
-                      <span class="about-member-name">oaoi</span><span class="about-member-role">设计</span>
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/_Moon_ovo/48" data-avatar-id="_Moon_ovo" data-avatar-name="_Moon_ovo" alt="oaoi"></div>
+                      <span class="about-member-name">oaoi</span><span class="about-member-role">界面粉刷匠</span>
                     </div>
                     <div class="about-member">
-                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/MuMu_SAIGAO/48" alt="mumu"></div>
-                      <span class="about-member-name">mumu</span><span class="about-member-role">美术总监</span>
+                      <div class="about-avatar"><img src="https://mc-heads.net/avatar/MuMu_SAIGAO/48" data-avatar-id="MuMu_SAIGAO" data-avatar-name="MuMu_SAIGAO" alt="mumu"></div>
+                      <span class="about-member-name">mumu</span><span class="about-member-role">画饼大师</span>
                     </div>
                   </div>
                 </div>
@@ -868,6 +941,8 @@
       <script src="js/navigation.js"></script>
       <script src="js/sakura.js"></script>
       <script src="js/pages/home.js"></script>
+      <script src="js/pages/servers.js"></script>
+      <script src="js/pages/p2p-link.js"></script>
       <script src="js/pages/settings.js"></script>
       <script src="js/pages/download.js"></script>
       <script src="js/pages/modpack.js"></script>

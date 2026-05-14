@@ -1,6 +1,6 @@
 [package]
 name = "oaoi"
-version = "1.0.4"
+version = "1.0.5"
 description = "oaoi - Minecraft Launcher"
 authors = ["you"]
 license = ""
@@ -33,8 +33,13 @@ sha1_smol = "1.0"
 sha2 = "0.10"
 zip = "2"
 urlencoding = "2"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "io-util"] }
 flate2 = "1"
+tokio-util = "0.7"
+quinn = "0.10"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rcgen = "0.11"
+rand = "0.8"
 
 [profile.release]
 strip = true

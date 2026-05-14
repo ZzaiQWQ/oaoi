@@ -1,4 +1,7 @@
 use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MOD_DOWNLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(serde::Serialize, Clone)]
 pub struct OnlineModVersionInfo {
@@ -185,6 +188,7 @@ fn download_online_mod_blocking(
 
     // 检查并下载前置依赖
     let mut dep_names: Vec<String> = Vec::new();
+    let mut dep_errors: Vec<String> = Vec::new();
     if let Some(deps) = version["dependencies"].as_array() {
         let safe_name = safe_path_name(name, "版本名")?;
         let mods_dir = resolve_game_dir(game_dir)
@@ -266,10 +270,13 @@ fn download_online_mod_blocking(
                                                 eprintln!("[dep] 已下载前置: {}", dep_fname);
                                                 dep_names.push(dep_fname.to_string());
                                             }
-                                            Err(e) => eprintln!(
-                                                "[dep] 下载前置失败: {} - {}",
-                                                dep_fname, e
-                                            ),
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "[dep] 下载前置失败: {} - {}",
+                                                    dep_fname, e
+                                                );
+                                                dep_errors.push(format!("{}: {}", dep_fname, e));
+                                            }
                                         }
                                     } else {
                                         eprintln!("[dep] 前置已存在: {}", dep_fname);
@@ -281,6 +288,10 @@ fn download_online_mod_blocking(
                 }
             }
         }
+    }
+
+    if !dep_errors.is_empty() {
+        return Err(format!("前置依赖下载失败: {}", dep_errors.join("; ")));
     }
 
     if dep_names.is_empty() {
@@ -529,6 +540,66 @@ fn curseforge_loader_type(loader: &str) -> &'static str {
     }
 }
 
+fn curseforge_cdn_urls(file_id: u64, file_name: &str) -> Vec<String> {
+    if file_id == 0 || file_name.is_empty() {
+        return Vec::new();
+    }
+    let encoded_name = urlencoding::encode(file_name);
+    vec![
+        format!(
+            "https://edge.forgecdn.net/files/{}/{}/{}",
+            file_id / 1000,
+            file_id % 1000,
+            encoded_name
+        ),
+        format!(
+            "https://mediafilez.forgecdn.net/files/{}/{}/{}",
+            file_id / 1000,
+            file_id % 1000,
+            encoded_name
+        ),
+    ]
+}
+
+fn curseforge_download_candidates(
+    file_id: u64,
+    file_name: &str,
+    api_download_url: &str,
+) -> Vec<String> {
+    let mut urls = curseforge_cdn_urls(file_id, file_name);
+    if !api_download_url.is_empty() {
+        urls.push(api_download_url.to_string());
+    }
+    urls
+}
+
+fn do_download_to_dir_with_fallbacks(
+    http: &reqwest::blocking::Client,
+    game_dir: &str,
+    name: &str,
+    download_urls: &[String],
+    file_name: &str,
+    sub_dir: &str,
+    cancel_name: Option<&str>,
+) -> Result<String, String> {
+    let mut last_err = String::new();
+    for url in download_urls {
+        eprintln!("[cf] try download: {}", url);
+        match do_download_to_dir(http, game_dir, name, url, file_name, sub_dir, cancel_name) {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                last_err = format!("{}: {}", url, err);
+                eprintln!("[cf] download failed, try next: {}", last_err);
+            }
+        }
+    }
+    Err(if last_err.is_empty() {
+        "没有可用下载地址".to_string()
+    } else {
+        last_err
+    })
+}
+
 fn download_from_curseforge(
     http: &reqwest::blocking::Client,
     game_dir: &str,
@@ -574,34 +645,22 @@ fn download_from_curseforge(
     };
     let file_name = file["fileName"].as_str().ok_or("无文件名")?;
     let file_id = file["id"].as_u64().unwrap_or(0);
-    let download_url = match file["downloadUrl"].as_str() {
-        Some(u) if !u.is_empty() => u.to_string(),
-        _ => {
-            // downloadUrl 为 null，使用 CDN 盲猜
-            if file_id > 0 {
-                eprintln!("[cf] downloadUrl 为空，CDN 回退: fileId={}", file_id);
-                format!(
-                    "https://edge.forgecdn.net/files/{}/{}/{}",
-                    file_id / 1000,
-                    file_id % 1000,
-                    urlencoding::encode(file_name)
-                )
-            } else {
-                return Err("此 Mod 不允许第三方下载，请从 CurseForge 网站手动下载".to_string());
-            }
-        }
-    };
+    let api_download_url = file["downloadUrl"].as_str().unwrap_or("");
+    let download_urls = curseforge_download_candidates(file_id, file_name, api_download_url);
+    if download_urls.is_empty() {
+        return Err("此 Mod 没有可用下载地址，请从 CurseForge 网站手动下载".to_string());
+    }
 
     let sub_dir = match project_type {
         "resourcepack" => "resourcepacks",
         "shader" => "shaderpacks",
         _ => "mods",
     };
-    let main_result = do_download_to_dir(
+    let main_result = do_download_to_dir_with_fallbacks(
         http,
         game_dir,
         name,
-        &download_url,
+        &download_urls,
         file_name,
         sub_dir,
         Some(cancel_name),
@@ -609,6 +668,7 @@ fn download_from_curseforge(
 
     // 检查 CurseForge 前置依赖
     let mut dep_names: Vec<String> = Vec::new();
+    let mut dep_errors: Vec<String> = Vec::new();
     if let Some(deps) = file["dependencies"].as_array() {
         let safe_name = safe_path_name(name, "版本名")?;
         let mods_dir = resolve_game_dir(game_dir)
@@ -639,6 +699,7 @@ fn download_from_curseforge(
                         if let Some(df) = dep_files.first() {
                             let dep_fname = df["fileName"].as_str().unwrap_or("");
                             let dep_dl_url = df["downloadUrl"].as_str().unwrap_or("");
+                            let dep_file_id = df["id"].as_u64().unwrap_or(0);
                             let safe_dep_fname = match safe_path_name(dep_fname, "文件名") {
                                 Ok(name) => name,
                                 Err(e) => {
@@ -646,15 +707,17 @@ fn download_from_curseforge(
                                     continue;
                                 }
                             };
+                            let dep_download_urls =
+                                curseforge_download_candidates(dep_file_id, dep_fname, dep_dl_url);
                             if !dep_fname.is_empty()
-                                && !dep_dl_url.is_empty()
+                                && !dep_download_urls.is_empty()
                                 && !mods_dir.join(&safe_dep_fname).exists()
                             {
-                                match do_download_to_dir(
+                                match do_download_to_dir_with_fallbacks(
                                     http,
                                     game_dir,
                                     name,
-                                    dep_dl_url,
+                                    &dep_download_urls,
                                     dep_fname,
                                     "mods",
                                     Some(cancel_name),
@@ -664,7 +727,8 @@ fn download_from_curseforge(
                                         dep_names.push(dep_fname.to_string());
                                     }
                                     Err(e) => {
-                                        eprintln!("[cf_dep] 下载前置失败: {} - {}", dep_fname, e)
+                                        eprintln!("[cf_dep] 下载前置失败: {} - {}", dep_fname, e);
+                                        dep_errors.push(format!("{}: {}", dep_fname, e));
                                     }
                                 }
                             }
@@ -673,6 +737,10 @@ fn download_from_curseforge(
                 }
             }
         }
+    }
+
+    if !dep_errors.is_empty() {
+        return Err(format!("前置依赖下载失败: {}", dep_errors.join("; ")));
     }
 
     if dep_names.is_empty() {
@@ -725,7 +793,13 @@ fn do_download_to_dir(
     if !response.status().is_success() {
         return Err(format!("下载失败: HTTP {}", response.status()));
     }
-    let tmp = dest.with_file_name(format!("{}.download", safe_file_name));
+    let tmp_counter = MOD_DOWNLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dest.with_file_name(format!(
+        ".{}.{}.{}.download",
+        safe_file_name,
+        std::process::id(),
+        tmp_counter
+    ));
     {
         let mut out =
             std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败: {}", e))?;

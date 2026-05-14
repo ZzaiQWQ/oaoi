@@ -77,9 +77,33 @@ pub fn cf_download_mod_cancelable(
                     if dest.exists() {
                         return Ok(false);
                     }
-                    // 1a) 有 downloadUrl
+                    // 1a) CDN + 文件名（通常比 API 返回的 downloadUrl 更快）
+                    let cdn_urls = cf_cdn_urls(file_id, &fname);
+                    for cdn in &cdn_urls {
+                        if is_cancelled(cancel_name) {
+                            return Err("用户取消下载".to_string());
+                        }
+                        eprintln!("[cf] CDN: {}", cdn);
+                        let download_result = download_file_if_needed_cancelable(
+                            http,
+                            cdn,
+                            &dest,
+                            None,
+                            false,
+                            cancel_name,
+                        );
+                        match download_result {
+                            Ok(r) => return Ok(r),
+                            Err(e) => {
+                                eprintln!("[cf] CDN失败: {}", e);
+                                let _ = std::fs::remove_file(&dest);
+                                continue;
+                            }
+                        }
+                    }
+                    // 1b) 有 downloadUrl 时作为兜底
                     if !dl_url.is_empty() {
-                        eprintln!("[cf] API downloadUrl: {}", fname);
+                        eprintln!("[cf] API downloadUrl fallback: {}", fname);
                         return download_file_if_needed_cancelable(
                             http,
                             &dl_url,
@@ -89,7 +113,7 @@ pub fn cf_download_mod_cancelable(
                             cancel_name,
                         );
                     }
-                    // 1b) 尝试 download-url 端点
+                    // 1c) 尝试 download-url 端点
                     let dl_api = format!(
                         "https://api.curseforge.com/v1/mods/{}/files/{}/download-url",
                         project_id, file_id
@@ -114,29 +138,6 @@ pub fn cf_download_mod_cancelable(
                                         );
                                     }
                                 }
-                            }
-                        }
-                    }
-                    // 1c) CDN + 文件名
-                    let cdn_urls = cf_cdn_urls(file_id, &fname);
-                    for cdn in &cdn_urls {
-                        if is_cancelled(cancel_name) {
-                            return Err("用户取消下载".to_string());
-                        }
-                        eprintln!("[cf] CDN: {}", cdn);
-                        match download_file_if_needed_cancelable(
-                            http,
-                            cdn,
-                            &dest,
-                            None,
-                            false,
-                            cancel_name,
-                        ) {
-                            Ok(r) => return Ok(r),
-                            Err(e) => {
-                                eprintln!("[cf] CDN失败: {}", e);
-                                let _ = std::fs::remove_file(&dest);
-                                continue;
                             }
                         }
                     }

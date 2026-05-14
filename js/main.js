@@ -42,6 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 导航
   try { initNavigation(); } catch (e) { console.error('导航初始化失败:', e); }
+  try { initP2PLink(); } catch (e) { console.error('联机工具初始化失败:', e); }
 
   // 主页
   try { initLaunchButton(); } catch (e) { console.error('启动按钮初始化失败:', e); }

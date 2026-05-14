@@ -121,15 +121,145 @@ async function initWindowControls() {
 }
 
 // ===== 禁用浏览器行为 =====
-// 右键菜单
-document.addEventListener('contextmenu', e => e.preventDefault());
+function isEditableTarget(target) {
+  return target && target.closest && target.closest('input, textarea, [contenteditable="true"]');
+}
+
+let oaoiTextContextTarget = null;
+let oaoiTextContextMenu = null;
+
+function getTextContextMenu() {
+  if (oaoiTextContextMenu) return oaoiTextContextMenu;
+  const menu = document.createElement('div');
+  menu.id = 'oaoiTextContextMenu';
+  menu.innerHTML = `
+    <button type="button" data-action="copy">复制</button>
+    <button type="button" data-action="paste">粘贴</button>
+    <button type="button" data-action="cut">剪切</button>
+  `;
+  const style = document.createElement('style');
+  style.textContent = `
+    #oaoiTextContextMenu {
+      position: fixed;
+      z-index: 999999;
+      display: none;
+      min-width: 92px;
+      padding: 5px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 133, 169, 0.28);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 12px 28px rgba(255, 83, 134, 0.2);
+      backdrop-filter: blur(12px);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #oaoiTextContextMenu button {
+      display: block;
+      width: 100%;
+      height: 28px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #8a3d59;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: left;
+      padding: 0 10px;
+      cursor: pointer;
+    }
+    #oaoiTextContextMenu button:hover {
+      background: rgba(255, 107, 138, 0.14);
+      color: #e84574;
+    }
+  `;
+  document.head.appendChild(style);
+  document.body.appendChild(menu);
+  menu.addEventListener('click', async e => {
+    const button = e.target.closest('button[data-action]');
+    if (!button || !oaoiTextContextTarget) return;
+    await runTextContextAction(button.dataset.action, oaoiTextContextTarget);
+    hideTextContextMenu();
+  });
+  oaoiTextContextMenu = menu;
+  return menu;
+}
+
+function hideTextContextMenu() {
+  if (oaoiTextContextMenu) oaoiTextContextMenu.style.display = 'none';
+}
+
+function showTextContextMenu(x, y, target) {
+  oaoiTextContextTarget = target;
+  const menu = getTextContextMenu();
+  menu.style.display = 'block';
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+}
+
+async function runTextContextAction(action, target) {
+  target.focus();
+  if (action === 'paste') {
+    try {
+      const text = await navigator.clipboard.readText();
+      insertTextAtCursor(target, text);
+    } catch {
+      document.execCommand('paste');
+    }
+    return;
+  }
+  document.execCommand(action);
+}
+
+function insertTextAtCursor(target, text) {
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const start = target.selectionStart ?? target.value.length;
+    const end = target.selectionEnd ?? target.value.length;
+    target.setRangeText(text, start, end, 'end');
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+  document.execCommand('insertText', false, text);
+}
+
+
+// 右键菜单：输入框只显示复制/粘贴/剪切，其他地方不显示
+document.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const editable = isEditableTarget(e.target);
+  if (!editable) {
+    hideTextContextMenu();
+    return;
+  }
+  showTextContextMenu(e.clientX, e.clientY, editable);
+}, true);
 // 禁止选中文字（input/textarea 除外）
 document.addEventListener('selectstart', e => {
-  if (e.target.closest('input, textarea')) return;
+  if (isEditableTarget(e.target)) return;
   e.preventDefault();
-});
+}, true);
 // 禁止拖拽图片
-document.addEventListener('dragstart', e => e.preventDefault());
+document.addEventListener('dragstart', e => e.preventDefault(), true);
+// 禁止复制和剪切
+document.addEventListener('copy', e => {
+  if (isEditableTarget(e.target)) return;
+  e.preventDefault();
+}, true);
+document.addEventListener('cut', e => {
+  if (isEditableTarget(e.target)) return;
+  e.preventDefault();
+}, true);
+document.addEventListener('keydown', e => {
+  if (isEditableTarget(e.target)) return;
+  const key = String(e.key || '').toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && (key === 'c' || key === 'x')) {
+    e.preventDefault();
+  }
+}, true);
+document.addEventListener('click', hideTextContextMenu, true);
+window.addEventListener('blur', hideTextContextMenu);
+window.addEventListener('scroll', hideTextContextMenu, true);
 // 仅生产模式下禁用 F12 / DevTools 快捷键
 if (!location.hostname.includes('localhost') && !location.port) {
   document.addEventListener('keydown', e => {

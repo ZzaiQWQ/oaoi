@@ -215,7 +215,7 @@ function initModpackTab() {
     if (!listEl) return;
     const esc = escapeHtml;
 
-    listEl.innerHTML = versions.map(v => {
+    listEl.innerHTML = versions.map((v, idx) => {
       const size = formatFileSize(v.file_size);
       return `
         <div class="dl-item">
@@ -226,7 +226,7 @@ function initModpackTab() {
               ${size ? `📦 ${escapeHtml(size)}` : ''} ${v.date ? `· ${escapeHtml(v.date)}` : ''}
             </div>
           </div>
-          <button class="dl-install-btn" data-url="${esc(v.download_url)}" data-filename="${esc(v.file_name)}">安装</button>
+          <button class="dl-install-btn" data-index="${idx}" data-url="${esc(v.download_url)}" data-filename="${esc(v.file_name)}">安装</button>
         </div>
       `;
     }).join('');
@@ -234,7 +234,11 @@ function initModpackTab() {
     // 绑定安装按钮
     listEl.querySelectorAll('.dl-install-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const url = btn.dataset.url;
+        const version = versions[Number(btn.dataset.index)] || {};
+        const downloadUrls = Array.isArray(version.download_urls)
+          ? version.download_urls.filter(Boolean)
+          : [];
+        const url = downloadUrls[0] || btn.dataset.url;
         const fileName = btn.dataset.filename;
         btn.textContent = '下载中...';
         btn.disabled = true;
@@ -448,7 +452,7 @@ function initModpackTab() {
 
           // 发起下载安装
           await tauri.core.invoke('install_modpack_direct', {
-            downloadUrl: url, fileName, gameDir, javaPath, useMirror
+            downloadUrl: url, downloadUrls, fileName, gameDir, javaPath, useMirror
           });
         } catch (err) {
           btn.textContent = '❌ 失败';

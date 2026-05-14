@@ -19,6 +19,7 @@ mod mod_search;
 mod modcn;
 mod modpack;
 mod modpack_search;
+mod p2p;
 mod versions;
 
 pub mod secrets {
@@ -266,6 +267,7 @@ async fn call_ai_api(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(p2p::init_state())
         .invoke_handler(tauri::generate_handler![
             java_detect::get_system_memory,
             java_detect::find_java,
@@ -300,6 +302,11 @@ pub fn run() {
             get_app_version,
             get_update_manifest,
             install_update,
+            p2p::step1_get_ip,
+            p2p::detect_mc_port,
+            p2p::host_step2_connect,
+            p2p::guest_step2_connect,
+            p2p::reset_connections,
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
