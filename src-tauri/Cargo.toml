@@ -2,9 +2,9 @@
 name = "oaoi"
 version = "1.0.5"
 description = "oaoi - Minecraft Launcher"
-authors = ["you"]
-license = ""
-repository = ""
+authors = ["ZzaiQWQ"]
+license-file = "../LICENSE"
+repository = "https://github.com/ZzaiQWQ/oaoi"
 edition = "2021"
 rust-version = "1.77.2"
 

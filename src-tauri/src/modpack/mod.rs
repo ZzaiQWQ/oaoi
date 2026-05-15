@@ -106,7 +106,7 @@ fn detect_modpack(zip_path: &std::path::Path) -> Result<ModpackMeta, String> {
             loader_type = "vanilla".to_string();
             loader_version = String::new();
         }
-        let pack_name = json["name"].as_str().unwrap_or("modpack").to_string();
+        let pack_name = clean_modpack_name(json["name"].as_str().unwrap_or("modpack"));
         let files: Vec<MrpackFile> = json["files"]
             .as_array()
             .unwrap_or(&vec![])
@@ -183,7 +183,7 @@ fn detect_modpack(zip_path: &std::path::Path) -> Result<ModpackMeta, String> {
             loader_type = "vanilla".to_string();
             loader_version = String::new();
         }
-        let pack_name = json["name"].as_str().unwrap_or("modpack").to_string();
+        let pack_name = clean_modpack_name(json["name"].as_str().unwrap_or("modpack"));
         let override_path = json["overrides"]
             .as_str()
             .unwrap_or("overrides")
@@ -275,8 +275,43 @@ pub(crate) struct ModpackMeta {
     pub recommended_memory_mb: Option<u32>,
 }
 
+pub(crate) fn strip_modpack_archive_suffix(name: &str) -> String {
+    let mut cleaned = name.trim();
+    loop {
+        let lower = cleaned.to_ascii_lowercase();
+        let next = if lower.ends_with(".mrpack") {
+            Some(cleaned[..cleaned.len() - ".mrpack".len()].trim_end())
+        } else if lower.ends_with(".zip") {
+            Some(cleaned[..cleaned.len() - ".zip".len()].trim_end())
+        } else {
+            None
+        };
+        match next {
+            Some(value) if !value.trim().is_empty() => cleaned = value,
+            _ => break,
+        }
+    }
+    cleaned.to_string()
+}
+
+fn clean_modpack_name(name: &str) -> String {
+    let cleaned = strip_modpack_archive_suffix(name);
+    if cleaned.trim().is_empty() {
+        "modpack".to_string()
+    } else {
+        cleaned
+    }
+}
+
 pub(crate) fn sanitize_name(name: &str) -> String {
-    name.chars()
+    let cleaned = strip_modpack_archive_suffix(name);
+    let source = if cleaned.trim().is_empty() {
+        name.trim()
+    } else {
+        cleaned.trim()
+    };
+    source
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c

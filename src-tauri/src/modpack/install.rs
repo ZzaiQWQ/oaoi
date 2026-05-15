@@ -4,6 +4,17 @@ use super::{
 };
 use crate::installer::{download_file_if_needed_cancelable, mirror_url};
 use crate::instance::{cf_api_key, safe_join, safe_path_name};
+use crate::modpack_sources::{
+    save_source_entry, sha1_from_curseforge_hashes, SourceEntry,
+};
+
+#[derive(Clone)]
+struct ModpackDownloadTask {
+    urls: Vec<String>,
+    dest: std::path::PathBuf,
+    sha1: Option<String>,
+    source: Option<SourceEntry>,
+}
 
 pub fn do_install_modpack_inner(
     app: &tauri::AppHandle,
@@ -125,7 +136,7 @@ pub fn do_install_modpack_inner(
     let all_handles: Vec<std::thread::JoinHandle<()>>;
 
     // 收集需要下载的文件
-    let tasks: Vec<(Vec<String>, std::path::PathBuf, Option<String>)>;
+    let tasks: Vec<ModpackDownloadTask>;
     {
         let mods_dir = inst_dir.join("mods");
         std::fs::create_dir_all(&mods_dir).ok();
@@ -135,7 +146,12 @@ pub fn do_install_modpack_inner(
                 .iter()
                 .map(|f| {
                     let dest = safe_join(inst_dir, &f.path)?;
-                    Ok((vec![f.url.clone()], dest, f.sha1.clone()))
+                    Ok(ModpackDownloadTask {
+                        urls: vec![f.url.clone()],
+                        dest,
+                        sha1: f.sha1.clone(),
+                        source: None,
+                    })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             ModpackKind::CurseForge { files, .. } => {
@@ -203,8 +219,7 @@ pub fn do_install_modpack_inner(
                     file_ids.len()
                 );
 
-                let mut resolved: Vec<(Vec<String>, std::path::PathBuf, Option<String>)> =
-                    Vec::new();
+                let mut resolved: Vec<ModpackDownloadTask> = Vec::new();
                 let mut unresolved: Vec<(u32, u32)> = Vec::new();
 
                 if let Some(client) = &api_client {
@@ -230,6 +245,7 @@ pub fn do_install_modpack_inner(
                                                 .unwrap_or("")
                                                 .to_string();
                                             let pid = file_map.get(&fid).map(|x| x.0).unwrap_or(0);
+                                            let sha1 = sha1_from_curseforge_hashes(&item["hashes"]);
 
                                             if raw_fname.is_empty() {
                                                 unresolved.push((pid, fid));
@@ -285,6 +301,11 @@ pub fn do_install_modpack_inner(
                                                 );
                                             }
                                             let dest = target_dir.join(&fname);
+                                            let rel = dest
+                                                .strip_prefix(inst_dir)
+                                                .ok()
+                                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                                .unwrap_or_else(|| fname.clone());
 
                                             let mut urls = cf_cdn_urls(fid, &fname);
                                             if !dl.is_empty() {
@@ -293,7 +314,20 @@ pub fn do_install_modpack_inner(
                                             if urls.is_empty() {
                                                 unresolved.push((pid, fid));
                                             } else {
-                                                resolved.push((urls, dest, None));
+                                                resolved.push(ModpackDownloadTask {
+                                                    urls,
+                                                    dest,
+                                                    sha1: None,
+                                                    source: Some(SourceEntry {
+                                                        source: "curseforge".to_string(),
+                                                        path: rel,
+                                                        project_id: Some(pid),
+                                                        file_id: Some(fid),
+                                                        class_id: pid_class.get(&pid).copied(),
+                                                        sha1,
+                                                        file_name: Some(fname.clone()),
+                                                    }),
+                                                });
                                             }
                                         }
                                     }
@@ -324,7 +358,12 @@ pub fn do_install_modpack_inner(
                 for (pid, fid) in unresolved {
                     let marker = format!("CF:{}:{}", pid, fid);
                     let dest = mods_dir.join("_cf_placeholder_");
-                    resolved.push((vec![marker], dest, None));
+                    resolved.push(ModpackDownloadTask {
+                        urls: vec![marker],
+                        dest,
+                        sha1: None,
+                        source: None,
+                    });
                 }
 
                 resolved
@@ -335,8 +374,8 @@ pub fn do_install_modpack_inner(
     // 按类型统计
     let mut category_totals: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (_, dest, _) in &tasks {
-        let cat = classify_path(dest).to_string();
+    for task in &tasks {
+        let cat = classify_path(&task.dest).to_string();
         *category_totals.entry(cat).or_insert(0) += 1;
     }
 
@@ -393,24 +432,26 @@ pub fn do_install_modpack_inner(
 
     all_handles = tasks
         .into_iter()
-        .map(|(urls, dest, sha1)| {
+        .map(|task| {
             let cats = categories.clone();
             let errors = mod_errors.clone();
             let h = mod_http.clone();
             let sem_r = sem_rx.clone();
             let sem_s = sem_tx.clone();
-            let category = classify_path(&dest).to_string();
+            let category = classify_path(&task.dest).to_string();
             let cancel_name = display_name.to_string();
+            let source_root = game_dir.to_path_buf();
+            let source_instance = inst_name.clone();
             std::thread::spawn(move || {
                 let _ = sem_r.lock().unwrap().recv();
-                let first_url = urls.first().cloned().unwrap_or_default();
+                let first_url = task.urls.first().cloned().unwrap_or_default();
                 let result = if crate::instance::is_cancelled(&cancel_name) {
                     Err("用户取消下载".to_string())
                 } else if first_url.starts_with("CF:") {
                     let parts: Vec<&str> = first_url.split(':').collect();
                     let project_id: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let file_id: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let inst_dir_fallback = dest
+                    let inst_dir_fallback = task.dest
                         .parent()
                         .and_then(|p| p.parent())
                         .unwrap_or(std::path::Path::new("."));
@@ -422,12 +463,12 @@ pub fn do_install_modpack_inner(
                         Some(&cancel_name),
                     )
                 } else {
-                    if let Some(parent) = dest.parent() {
+                    if let Some(parent) = task.dest.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
                     let mut last_err = String::new();
                     let mut done = None;
-                    for url in urls {
+                    for url in &task.urls {
                         if crate::instance::is_cancelled(&cancel_name) {
                             last_err = "用户取消下载".to_string();
                             break;
@@ -435,9 +476,9 @@ pub fn do_install_modpack_inner(
                         eprintln!("[download] try: {}", url);
                         match download_file_if_needed_cancelable(
                             &h,
-                            &url,
-                            &dest,
-                            sha1.as_deref(),
+                            url,
+                            &task.dest,
+                            task.sha1.as_deref(),
                             false,
                             Some(&cancel_name),
                         ) {
@@ -448,12 +489,19 @@ pub fn do_install_modpack_inner(
                             Err(e) => {
                                 last_err = format!("{}: {}", url, e);
                                 eprintln!("[download] failed, try next: {}", last_err);
-                                let _ = std::fs::remove_file(&dest);
+                                let _ = std::fs::remove_file(&task.dest);
                             }
                         }
                     }
                     done.map(Ok).unwrap_or_else(|| Err(last_err))
                 };
+                if result.is_ok() {
+                    if let Some(source) = task.source {
+                        if let Err(e) = save_source_entry(&source_root, &source_instance, source) {
+                            eprintln!("[modpack] save source metadata failed: {}", e);
+                        }
+                    }
+                }
                 if let Err(e) = result {
                     errors.lock().unwrap().push(format!("{}: {}", first_url, e));
                 }
@@ -557,6 +605,7 @@ pub fn do_install_modpack_inner(
                 &http,
                 game_mirror,
                 &mut ver_json,
+                false,
             ),
             "quilt" if !meta.loader_version.is_empty() => quilt::install_quilt(
                 app,

@@ -12,6 +12,7 @@ pub fn install_fabric(
     http: &reqwest::blocking::Client,
     use_mirror: bool,
     ver_json: &mut serde_json::Value,
+    auto_download_fabric_api: bool,
 ) -> Result<(), String> {
     let emit = make_emitter(app_handle, name);
 
@@ -161,6 +162,10 @@ pub fn install_fabric(
         "type": "fabric",
         "version": loader_version
     });
+
+    if !auto_download_fabric_api {
+        return Ok(());
+    }
 
     // 自动下载 Fabric API
     emit("fabric-api", 0, 1, "下载 Fabric API...");

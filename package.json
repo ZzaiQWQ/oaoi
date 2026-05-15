@@ -2,6 +2,13 @@
   "name": "oaoi-launcher",
   "version": "1.0.5",
   "description": "oaoi - Minecraft 启动器",
+  "author": "ZzaiQWQ",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZzaiQWQ/oaoi.git"
+  },
+  "homepage": "https://github.com/ZzaiQWQ/oaoi#readme",
   "scripts": {
     "tauri": "tauri"
   },

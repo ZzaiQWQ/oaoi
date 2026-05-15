@@ -919,6 +919,7 @@ fn do_create_instance(
                 &http,
                 use_mirror,
                 &mut ver_json,
+                true,
             )?;
         }
         "forge" if !loader_version.is_empty() => {
