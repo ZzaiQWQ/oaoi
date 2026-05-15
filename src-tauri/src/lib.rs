@@ -18,7 +18,9 @@ mod mod_manager;
 mod mod_search;
 mod modcn;
 mod modpack;
+mod modpack_export;
 mod modpack_search;
+mod modpack_sources;
 mod p2p;
 mod versions;
 
@@ -295,6 +297,8 @@ pub fn run() {
             java_download::download_java,
             java_download::cancel_java_download,
             modpack::import_modpack,
+            modpack_export::export_modpack,
+            modpack_export::get_modpack_export_items,
             modpack_search::search_modpacks,
             modpack_search::get_modpack_versions,
             modpack_search::install_modpack_direct,

@@ -316,6 +316,9 @@ pub async fn delete_version(game_dir: String, name: String) -> Result<String, St
             return Err(format!("版本 {} 不存在", name));
         }
         std::fs::remove_dir_all(&inst_path).map_err(|e| format!("删除失败: {}", e))?;
+        if let Err(e) = crate::modpack_sources::delete_source_index(&dir, &safe_name) {
+            eprintln!("[instance] delete modpack source metadata failed: {}", e);
+        }
         Ok(format!("已删除版本: {}", name))
     })
     .await

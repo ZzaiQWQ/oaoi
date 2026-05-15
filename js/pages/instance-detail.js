@@ -4,6 +4,27 @@ let currentDetailInstance = null;
 let currentDetailInfo = null; // { mc_version, loader_type }
 let currentModList = [];
 const modUrlCache = {}; // 缓存已查过的 mod 链接
+let modListLoadSeq = 0;
+let modListRenderSeq = 0;
+let modUrlLookupSeq = 0;
+let modUrlLookupTimer = null;
+const modpackExportTask = {
+  running: false,
+  name: '',
+  format: '',
+  progress: { stage: 'idle', current: 0, total: 100, detail: '' },
+  result: null,
+  error: null,
+  unlisten: null,
+};
+
+function cleanModpackArchiveName(name) {
+  let cleaned = String(name || '').trim();
+  while (/\.(zip|mrpack)$/i.test(cleaned)) {
+    cleaned = cleaned.replace(/\.(zip|mrpack)$/i, '').trim();
+  }
+  return cleaned;
+}
 
 // 打开实例详情页
 function showInstanceDetail(instanceName) {
@@ -52,7 +73,16 @@ function showInstanceDetail(instanceName) {
     }
   }
 
-  loadModList();
+  currentModList = [];
+  const modListEl = document.getElementById('modList');
+  if (modListEl) modListEl.innerHTML = '<div class="mod-list-empty">加载中...</div>';
+  const modCountEl = document.getElementById('modCount');
+  if (modCountEl) modCountEl.textContent = String(instance.modCount ?? 0);
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      if (currentDetailInstance === instanceName) loadModList(instanceName);
+    }, 0);
+  });
 }
 
 function instanceSettingKey(prefix) {
@@ -140,6 +170,323 @@ function resetInstanceSettings() {
   }
 }
 
+function ensureModpackExportModal() {
+  let modal = document.getElementById('modpackExportModal');
+  if (modal) return modal;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="hidden modpack-export-modal" id="modpackExportModal" data-no-drag>
+      <div class="modal-content" data-no-drag>
+        <div class="modal-header">
+          <button class="modal-close" id="modpackExportClose">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="export-top-row">
+            <label class="export-format-card active">
+              <input type="radio" name="modpackExportFormat" value="modrinth" checked>
+              <span>Modrinth 标准包</span>
+              <small>.mrpack</small>
+            </label>
+            <label class="export-format-card">
+              <input type="radio" name="modpackExportFormat" value="curseforge">
+              <span>CurseForge 标准包</span>
+              <small>.zip</small>
+            </label>
+            <label class="export-name-row">
+              <span>名称</span>
+              <input type="text" id="modpackExportName" maxlength="80" placeholder="整合包名称">
+            </label>
+            <label class="export-version-row">
+              <span>版本</span>
+              <input type="text" id="modpackExportVersion" maxlength="40" placeholder="1.0.0">
+            </label>
+          </div>
+          <div class="export-output-row">
+            <span>保存到</span>
+            <button type="button" id="modpackExportOutputBtn">选择目录</button>
+            <em id="modpackExportOutputPath"></em>
+          </div>
+          <div class="export-toolbar">
+            <span id="modpackExportSummary">扫描中...</span>
+            <div>
+              <button type="button" id="modpackExportDefault">推荐项</button>
+              <button type="button" id="modpackExportAll">全选</button>
+            </div>
+          </div>
+          <div class="export-progress hidden" id="modpackExportProgress">
+            <div class="export-progress-head">
+              <span id="modpackExportProgressText">准备导出...</span>
+              <strong id="modpackExportProgressCount">0%</strong>
+            </div>
+            <div class="export-progress-track">
+              <div class="export-progress-bar" id="modpackExportProgressBar"></div>
+            </div>
+          </div>
+          <div class="export-item-list" id="modpackExportItems">
+            <div class="mod-list-empty">正在扫描当前版本文件夹...</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="modpackExportCancel">取消</button>
+          <button class="btn btn-primary" id="modpackExportStart">开始导出</button>
+        </div>
+      </div>
+    </div>
+  `);
+  return document.getElementById('modpackExportModal');
+}
+
+function renderModpackExportTaskState() {
+  const modal = document.getElementById('modpackExportModal');
+  if (!modal) return;
+  const progressEl = document.getElementById('modpackExportProgress');
+  const progressText = document.getElementById('modpackExportProgressText');
+  const progressCount = document.getElementById('modpackExportProgressCount');
+  const progressBar = document.getElementById('modpackExportProgressBar');
+  const summaryEl = document.getElementById('modpackExportSummary');
+  const startBtn = document.getElementById('modpackExportStart');
+  const defaultBtn = document.getElementById('modpackExportDefault');
+  const allBtn = document.getElementById('modpackExportAll');
+
+  const progress = modpackExportTask.progress || {};
+  const total = Number(progress.total || 0);
+  const current = Number(progress.current || 0);
+  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0;
+  const detail = progress.detail || '正在导出...';
+
+  if (progressEl) progressEl.classList.toggle('hidden', !modpackExportTask.running && !modpackExportTask.result && !modpackExportTask.error);
+  if (progressText) progressText.textContent = modpackExportTask.error || detail;
+  if (progressCount) progressCount.textContent = modpackExportTask.error ? '失败' : `${pct}%`;
+  if (progressBar) progressBar.style.width = modpackExportTask.error ? '100%' : `${pct}%`;
+  if (summaryEl && modpackExportTask.running) summaryEl.textContent = `正在导出 ${modpackExportTask.format || ''}`;
+  if (startBtn) {
+    startBtn.disabled = modpackExportTask.running;
+    startBtn.textContent = modpackExportTask.running ? '导出中...' : '开始导出';
+  }
+  if (defaultBtn) defaultBtn.disabled = modpackExportTask.running;
+  if (allBtn) allBtn.disabled = modpackExportTask.running;
+}
+
+async function ensureModpackExportProgressListener(tauri) {
+  if (modpackExportTask.unlisten || !tauri?.event?.listen) return;
+  modpackExportTask.unlisten = await tauri.event.listen('modpack-export-progress', (event) => {
+    const payload = event.payload || {};
+    if (modpackExportTask.name && payload.name && payload.name !== modpackExportTask.name) return;
+    modpackExportTask.progress = {
+      stage: payload.stage || '',
+      current: Number(payload.current || 0),
+      total: Number(payload.total || 0),
+      detail: payload.detail || '',
+    };
+    if (payload.stage === 'done') {
+      modpackExportTask.running = false;
+    } else if (payload.stage === 'error') {
+      modpackExportTask.running = false;
+      modpackExportTask.error = payload.detail || '导出失败';
+    }
+    renderModpackExportTaskState();
+  });
+}
+
+function showModpackExportModal() {
+  if (!currentDetailInstance) return;
+  const modal = ensureModpackExportModal();
+  const listEl = document.getElementById('modpackExportItems');
+  const summaryEl = document.getElementById('modpackExportSummary');
+  const startBtn = document.getElementById('modpackExportStart');
+  const closeBtn = document.getElementById('modpackExportClose');
+  const cancelBtn = document.getElementById('modpackExportCancel');
+  const nameInput = document.getElementById('modpackExportName');
+  const versionInput = document.getElementById('modpackExportVersion');
+  const outputBtn = document.getElementById('modpackExportOutputBtn');
+  const outputPathEl = document.getElementById('modpackExportOutputPath');
+  let exportItems = [];
+
+  const close = () => modal.classList.add('hidden');
+  modal.classList.remove('hidden');
+  listEl.innerHTML = '<div class="mod-list-empty">正在扫描当前版本文件夹...</div>';
+  summaryEl.textContent = '扫描中...';
+  startBtn.disabled = true;
+  startBtn.textContent = '开始导出';
+  if (nameInput) {
+    const defaultName = cleanModpackArchiveName(currentDetailInfo?.name || currentDetailInstance);
+    nameInput.value = defaultName || currentDetailInstance;
+  }
+  if (versionInput && !versionInput.value.trim()) {
+    versionInput.value = '1.0.0';
+  }
+  const gameDir = localStorage.getItem('gameDir') || '';
+  const defaultOutputDir = localStorage.getItem('modpackExportOutputDir') || (gameDir ? `${gameDir}\\exports` : '');
+  if (outputPathEl) {
+    outputPathEl.textContent = defaultOutputDir || '默认 exports';
+    outputPathEl.title = defaultOutputDir || '默认 exports';
+    modal.dataset.exportOutputDir = defaultOutputDir;
+  }
+  if (outputBtn) {
+    outputBtn.onclick = async () => {
+      try {
+        const tauri = await waitForTauri();
+        const selected = await tauri.dialog.open({
+          title: '选择整合包导出位置',
+          directory: true,
+        });
+        if (selected) {
+          modal.dataset.exportOutputDir = selected;
+          localStorage.setItem('modpackExportOutputDir', selected);
+          if (outputPathEl) {
+            outputPathEl.textContent = selected;
+            outputPathEl.title = selected;
+          }
+        }
+      } catch (err) {
+        console.warn('选择导出位置失败:', err);
+        showToast('选择导出位置失败: ' + err, 'error');
+      }
+    };
+  }
+  if (!modpackExportTask.running) {
+    modpackExportTask.result = null;
+    modpackExportTask.error = null;
+    document.getElementById('modpackExportProgress')?.classList.add('hidden');
+  }
+
+  modal.querySelectorAll('.export-format-card').forEach(card => {
+    const input = card.querySelector('input');
+    card.classList.toggle('active', input.checked);
+    card.onclick = () => {
+      input.checked = true;
+      modal.querySelectorAll('.export-format-card').forEach(item => item.classList.remove('active'));
+      card.classList.add('active');
+    };
+  });
+
+  closeBtn.onclick = close;
+  cancelBtn.onclick = close;
+  modal.onclick = (e) => {
+    if (e.target === modal) close();
+  };
+
+  if (modpackExportTask.running && modpackExportTask.name === currentDetailInstance) {
+    listEl.innerHTML = '<div class="mod-list-empty">导出正在后台进行，关闭窗口不会取消任务。</div>';
+    renderModpackExportTaskState();
+    return;
+  }
+
+  const refreshSummary = () => {
+    const checkedCount = listEl.querySelectorAll('input[type="checkbox"]:checked').length;
+    const totalCount = exportItems.length;
+    summaryEl.textContent = totalCount ? `已选 ${checkedCount}/${totalCount}` : '没有可导出的文件';
+  };
+
+  const requestedInstance = currentDetailInstance;
+  const loadToken = `${requestedInstance}:${Date.now()}`;
+  modal.dataset.exportLoadToken = loadToken;
+  setTimeout(async () => {
+    try {
+    const tauri = await waitForTauri();
+    await ensureModpackExportProgressListener(tauri);
+    exportItems = await tauri.core.invoke('get_modpack_export_items', {
+      gameDir,
+      name: requestedInstance,
+    });
+    if (modal.dataset.exportLoadToken !== loadToken || currentDetailInstance !== requestedInstance) return;
+
+    if (!exportItems.length) {
+      listEl.innerHTML = '<div class="mod-list-empty">这个版本空得很安静，没找到可导出的东西</div>';
+      summaryEl.textContent = '没有可导出的文件';
+      return;
+    }
+
+    listEl.innerHTML = exportItems.map(item => `
+      <label class="export-item-row">
+        <input type="checkbox" value="${escapeHtml(item.path)}" ${item.defaultChecked ? 'checked' : ''}>
+        <span class="export-item-main">
+          <strong>${escapeHtml(item.label || item.path)}</strong>
+          <em>${escapeHtml(item.path)}</em>
+        </span>
+        <span class="export-item-meta">${item.kind === 'folder' ? `${item.count} 项` : '文件'} · ${formatFileSize(item.size || 0)}</span>
+      </label>
+    `).join('');
+
+    listEl.querySelectorAll('input[type="checkbox"]').forEach(input => {
+      input.addEventListener('change', refreshSummary);
+    });
+    document.getElementById('modpackExportDefault').onclick = () => {
+      listEl.querySelectorAll('input[type="checkbox"]').forEach((input, idx) => {
+        input.checked = !!exportItems[idx]?.defaultChecked;
+      });
+      refreshSummary();
+    };
+    document.getElementById('modpackExportAll').onclick = () => {
+      const boxes = [...listEl.querySelectorAll('input[type="checkbox"]')];
+      const shouldCheck = boxes.some(input => !input.checked);
+      boxes.forEach(input => input.checked = shouldCheck);
+      refreshSummary();
+    };
+    startBtn.disabled = false;
+    refreshSummary();
+
+    startBtn.onclick = async () => {
+      const includePaths = [...listEl.querySelectorAll('input[type="checkbox"]:checked')]
+        .map(input => input.value);
+      if (!includePaths.length) {
+        showToast('至少选一个文件夹或文件，不然导出空气了', 'warn');
+        return;
+      }
+      const format = modal.querySelector('input[name="modpackExportFormat"]:checked')?.value || 'modrinth';
+      const exportName = cleanModpackArchiveName(nameInput?.value || currentDetailInstance);
+      const exportVersion = (versionInput?.value || '1.0.0').trim() || '1.0.0';
+      if (!exportName) {
+        showToast('整合包名称不能为空', 'warn');
+        nameInput?.focus();
+        return;
+      }
+      modpackExportTask.running = true;
+      modpackExportTask.name = currentDetailInstance;
+      modpackExportTask.format = format === 'curseforge' ? 'CurseForge' : 'Modrinth';
+      modpackExportTask.result = null;
+      modpackExportTask.error = null;
+      modpackExportTask.progress = { stage: 'prepare', current: 0, total: 100, detail: 'Preparing export...' };
+      startBtn.disabled = true;
+      startBtn.textContent = '导出中...';
+      renderModpackExportTaskState();
+      try {
+        const result = await tauri.core.invoke('export_modpack', {
+          gameDir,
+          name: currentDetailInstance,
+          format,
+          exportName,
+          exportVersion,
+          outputDir: modal.dataset.exportOutputDir || null,
+          includePaths,
+        });
+        modpackExportTask.running = false;
+        modpackExportTask.result = result;
+        modpackExportTask.progress = { stage: 'done', current: 100, total: 100, detail: 'Export complete' };
+        renderModpackExportTaskState();
+        const bundled = result.bundledFiles ? `，${result.bundledFiles} 个文件已内置打包` : '';
+        const warnings = Array.isArray(result.warnings) && result.warnings.length
+          ? `；${result.warnings.join('；')}`
+          : '';
+        showToast(`导出完成：${result.path}${bundled}${warnings}`, 'success', 10000);
+        close();
+      } catch (err) {
+        modpackExportTask.running = false;
+        modpackExportTask.error = String(err);
+        modpackExportTask.progress = { stage: 'error', current: 0, total: 0, detail: String(err) };
+        renderModpackExportTaskState();
+        showToast('导出失败: ' + err, 'error', 10000);
+        startBtn.disabled = false;
+        startBtn.textContent = '开始导出';
+      }
+    };
+    } catch (err) {
+    listEl.innerHTML = `<div class="mod-list-empty">扫描失败: ${escapeHtml(err)}</div>`;
+    summaryEl.textContent = '扫描失败';
+    }
+  }, 250);
+}
+
 // Tab 切换
 function switchModTab(tab) {
   document.querySelectorAll('.mod-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -157,15 +504,24 @@ function switchModTab(tab) {
   }
 }
 
+function afterNextPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+}
+
 // 加载已安装 mod 列表
-async function loadModList() {
-  if (!currentDetailInstance) return;
+async function loadModList(instanceName = currentDetailInstance) {
+  if (!instanceName) return;
   const listEl = document.getElementById('modList');
   const countEl = document.getElementById('modCount');
+  const loadSeq = ++modListLoadSeq;
+  if (listEl) listEl.innerHTML = '<div class="mod-list-empty">加载中...</div>';
   try {
+    await afterNextPaint();
+    if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
     const tauri = await waitForTauri();
     const gameDir = localStorage.getItem('gameDir') || '';
-    const mods = await tauri.core.invoke('list_mods', { gameDir, name: currentDetailInstance });
+    const mods = await tauri.core.invoke('list_mods', { gameDir, name: instanceName });
+    if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
     currentModList = mods;
     if (countEl) countEl.textContent = mods.length;
     renderModList(mods);
@@ -175,10 +531,33 @@ async function loadModList() {
   }
 }
 
+function renderModItem(mod) {
+  const fileName = mod.file_name || '';
+  const safeFileName = escapeHtml(fileName);
+  const baseName = fileName.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '');
+  const displayName = mod.cn_name ? `${mod.cn_name} (${baseName})` : baseName;
+  const actionId = fileName.replace(/[^a-zA-Z0-9]/g, '_');
+  return `
+    <div class="mod-item ${mod.enabled ? '' : 'disabled'}" data-file="${safeFileName}">
+      <button class="mod-toggle ${mod.enabled ? 'active' : ''}" data-file="${safeFileName}" title="${mod.enabled ? '点击禁用' : '点击启用'}"></button>
+      <span class="mod-name" title="${safeFileName}">${escapeHtml(displayName)}</span>
+      <span class="mod-actions" id="mod-actions-${actionId}">
+        <button class="mod-delete-btn" data-file="${safeFileName}" title="删除">🗑</button>
+      </span>
+      <span class="mod-size">${mod.size_kb > 1024 ? (mod.size_kb / 1024).toFixed(1) + ' MB' : mod.size_kb + ' KB'}</span>
+    </div>
+  `;
+}
+
 // 渲染已安装 mod 列表
 function renderModList(mods) {
   const listEl = document.getElementById('modList');
   if (!listEl) return;
+  const renderSeq = ++modListRenderSeq;
+  if (modUrlLookupTimer) {
+    clearTimeout(modUrlLookupTimer);
+    modUrlLookupTimer = null;
+  }
 
   const searchVal = (document.getElementById('modSearchInput')?.value || '').toLowerCase();
   const filtered = searchVal
@@ -190,92 +569,54 @@ function renderModList(mods) {
     return;
   }
 
-  listEl.innerHTML = filtered.map(mod => {
-    const fileName = mod.file_name || '';
-    const safeFileName = escapeHtml(fileName);
-    const baseName = fileName.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '');
-    const displayName = mod.cn_name ? `${mod.cn_name} (${baseName})` : baseName;
-    const actionId = fileName.replace(/[^a-zA-Z0-9]/g, '_');
-    return `
-      <div class="mod-item ${mod.enabled ? '' : 'disabled'}" data-file="${safeFileName}">
-        <button class="mod-toggle ${mod.enabled ? 'active' : ''}" data-file="${safeFileName}" title="${mod.enabled ? '点击禁用' : '点击启用'}"></button>
-        <span class="mod-name" title="${safeFileName}">${escapeHtml(displayName)}</span>
-        <span class="mod-actions" id="mod-actions-${actionId}">
-          <button class="mod-delete-btn" data-file="${safeFileName}" title="删除">🗑</button>
-        </span>
-        <span class="mod-size">${mod.size_kb > 1024 ? (mod.size_kb / 1024).toFixed(1) + ' MB' : mod.size_kb + ' KB'}</span>
-      </div>
-    `;
-  }).join('');
+  listEl.innerHTML = '';
+  const chunkSize = 80;
+  let index = 0;
 
-  // 开关事件
-  listEl.querySelectorAll('.mod-toggle').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        const tauri = await waitForTauri();
-        const gameDir = localStorage.getItem('gameDir') || '';
-        await tauri.core.invoke('toggle_mod', { gameDir, name: currentDetailInstance, fileName: btn.dataset.file });
-        await loadModList();
-      } catch (err) {
-        console.warn('切换 Mod 状态失败:', err);
-      }
-    });
-  });
-
-  // 删除事件（二次点击确认）
-  listEl.querySelectorAll('.mod-delete-btn').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      // 第一次点击：变成确认状态
-      if (!btn.dataset.confirming) {
-        btn.dataset.confirming = 'true';
-        btn.textContent = '确认?';
-        btn.classList.add('confirming');
-        // 2秒后自动恢复
-        btn.dataset.timerId = String(setTimeout(() => {
-          delete btn.dataset.confirming;
-          btn.textContent = '🗑';
-          btn.classList.remove('confirming');
-        }, 2000));
-        return;
-      }
-      // 第二次点击：真正删除
-      clearTimeout(parseInt(btn.dataset.timerId));
-      try {
-        const tauri = await waitForTauri();
-        const gameDir = localStorage.getItem('gameDir') || '';
-        await tauri.core.invoke('delete_mod', { gameDir, name: currentDetailInstance, fileName: btn.dataset.file });
-        await loadModList();
-      } catch (err) {
-        console.warn('删除 Mod 失败:', err);
-      }
-    });
-  });
-
-  // 异步查询真实链接（带缓存）
-  const allFileNames = filtered.map(m => m.file_name);
-  // 先用缓存填充已有的
-  for (const fn of allFileNames) {
-    if (modUrlCache[fn]) {
-      _applyModUrls(modUrlCache[fn]);
+  const renderChunk = () => {
+    if (renderSeq !== modListRenderSeq) return;
+    const html = filtered.slice(index, index + chunkSize).map(renderModItem).join('');
+    listEl.insertAdjacentHTML('beforeend', html);
+    index += chunkSize;
+    if (index < filtered.length) {
+      setTimeout(renderChunk, 0);
+    } else {
+      scheduleModUrlLookup(filtered, renderSeq, searchVal);
     }
+  };
+  renderChunk();
+}
+
+function scheduleModUrlLookup(mods, renderSeq, searchVal) {
+  const allFileNames = mods.map(m => m.file_name);
+  for (const fn of allFileNames) {
+    if (modUrlCache[fn]) _applyModUrls(modUrlCache[fn]);
   }
+
   const uncached = allFileNames.filter(fn => !modUrlCache[fn]);
-  if (uncached.length > 0) {
-    (async () => {
-      try {
-        const tauri = await waitForTauri();
-        const urls = await tauri.core.invoke('lookup_mod_urls', { fileNames: uncached });
+  if (uncached.length === 0) return;
+
+  const lookupSeq = ++modUrlLookupSeq;
+  const lookupLimit = searchVal ? 200 : 80;
+  const pending = uncached.slice(0, lookupLimit);
+  modUrlLookupTimer = setTimeout(async () => {
+    try {
+      const tauri = await waitForTauri();
+      const batchSize = 20;
+      for (let i = 0; i < pending.length; i += batchSize) {
+        if (lookupSeq !== modUrlLookupSeq || renderSeq !== modListRenderSeq) return;
+        const urls = await tauri.core.invoke('lookup_mod_urls', { fileNames: pending.slice(i, i + batchSize) });
+        if (lookupSeq !== modUrlLookupSeq || renderSeq !== modListRenderSeq) return;
         for (const info of urls) {
           modUrlCache[info.file_name] = info;
           _applyModUrls(info);
         }
-      } catch (err) {
-        console.warn('查询 Mod 链接失败:', err);
+        await afterNextPaint();
       }
-    })();
-  }
+    } catch (err) {
+      console.warn('查询 Mod 链接失败:', err);
+    }
+  }, 400);
 }
 
 function _applyModUrls(info) {
@@ -298,6 +639,62 @@ function _applyModUrls(info) {
       e.stopPropagation();
       await openExternalUrl(link.dataset.url);
     });
+  });
+}
+
+function bindModListEvents() {
+  const listEl = document.getElementById('modList');
+  if (!listEl || listEl.dataset.bound === 'true') return;
+  listEl.dataset.bound = 'true';
+  listEl.addEventListener('click', async (e) => {
+    const target = e.target?.closest ? e.target : e.target?.parentElement;
+    if (!target) return;
+    const link = target.closest('.mod-link');
+    if (link && listEl.contains(link)) {
+      e.preventDefault();
+      e.stopPropagation();
+      await openExternalUrl(link.dataset.url);
+      return;
+    }
+
+    const toggleBtn = target.closest('.mod-toggle');
+    if (toggleBtn && listEl.contains(toggleBtn)) {
+      e.stopPropagation();
+      try {
+        const tauri = await waitForTauri();
+        const gameDir = localStorage.getItem('gameDir') || '';
+        await tauri.core.invoke('toggle_mod', { gameDir, name: currentDetailInstance, fileName: toggleBtn.dataset.file });
+        await loadModList(currentDetailInstance);
+      } catch (err) {
+        console.warn('切换 Mod 状态失败:', err);
+      }
+      return;
+    }
+
+    const deleteBtn = target.closest('.mod-delete-btn');
+    if (!deleteBtn || !listEl.contains(deleteBtn)) return;
+    e.stopPropagation();
+    if (!deleteBtn.dataset.confirming) {
+      deleteBtn.dataset.confirming = 'true';
+      deleteBtn.textContent = '确认?';
+      deleteBtn.classList.add('confirming');
+      deleteBtn.dataset.timerId = String(setTimeout(() => {
+        delete deleteBtn.dataset.confirming;
+        deleteBtn.textContent = '🗑';
+        deleteBtn.classList.remove('confirming');
+      }, 2000));
+      return;
+    }
+
+    clearTimeout(parseInt(deleteBtn.dataset.timerId));
+    try {
+      const tauri = await waitForTauri();
+      const gameDir = localStorage.getItem('gameDir') || '';
+      await tauri.core.invoke('delete_mod', { gameDir, name: currentDetailInstance, fileName: deleteBtn.dataset.file });
+      await loadModList(currentDetailInstance);
+    } catch (err) {
+      console.warn('删除 Mod 失败:', err);
+    }
   });
 }
 
@@ -695,6 +1092,9 @@ function renderOnlineResults(results, query) {
 
 // 初始化
 function initInstanceDetailPage() {
+  ensureModpackExportModal();
+  bindModListEvents();
+
   const backBtn = document.getElementById('instanceBackBtn');
   if (backBtn) {
     backBtn.addEventListener('click', () => {
@@ -705,6 +1105,9 @@ function initInstanceDetailPage() {
       document.getElementById('pageDownload').classList.add('active');
       const dlNav = document.querySelector('[data-page="download"]');
       if (dlNav) dlNav.classList.add('active');
+      modListRenderSeq++;
+      modUrlLookupSeq++;
+      if (modUrlLookupTimer) clearTimeout(modUrlLookupTimer);
       currentDetailInstance = null;
       currentDetailInfo = null;
       currentModList = [];
@@ -714,6 +1117,7 @@ function initInstanceDetailPage() {
   // 文件夹按钮
   document.querySelectorAll('.instance-folder-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
+      if (btn.id === 'instanceExportBtn') return;
       if (!currentDetailInstance) return;
       try {
         const tauri = await waitForTauri();
@@ -724,6 +1128,7 @@ function initInstanceDetailPage() {
       }
     });
   });
+  document.getElementById('instanceExportBtn')?.addEventListener('click', showModpackExportModal);
 
   // Tab 切换
   document.querySelectorAll('.mod-tab').forEach(tab => {

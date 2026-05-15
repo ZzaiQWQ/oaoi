@@ -1,6 +1,8 @@
 use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name};
 use crate::modcn::{contains_chinese, load_modcn};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Serialize, Clone)]
 pub struct ModInfo {
@@ -12,7 +14,13 @@ pub struct ModInfo {
 
 /// 列出实例的所有 mod（.jar 和 .jar.disabled）
 #[tauri::command]
-pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String> {
+pub async fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String> {
+    tokio::task::spawn_blocking(move || list_mods_blocking(&game_dir, &name))
+        .await
+        .map_err(|e| format!("任务失败: {}", e))?
+}
+
+fn list_mods_blocking(game_dir: &str, name: &str) -> Result<Vec<ModInfo>, String> {
     let dir = resolve_game_dir(&game_dir);
     let safe_name = safe_path_name(&name, "版本名")?;
     let mods_dir = dir.join("instances").join(&safe_name).join("mods");
@@ -20,8 +28,8 @@ pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String>
         return Ok(vec![]);
     }
 
-    // 加载 modcn 数据用于匹配中文名
-    let modcn = load_modcn();
+    // 加载 modcn 索引用于匹配中文名
+    let modcn_index = modcn_index();
 
     let mut mods = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&mods_dir) {
@@ -59,38 +67,7 @@ pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String>
                     .next()
                     .unwrap_or(base);
 
-                let cn_name = modcn
-                    .iter()
-                    .find_map(|e| {
-                        if e.cn_name.is_empty() || !contains_chinese(&e.cn_name) {
-                            return None;
-                        }
-                        let en_lower = e.en_name.to_lowercase();
-                        if en_lower.is_empty() {
-                            return None;
-                        }
-                        let en_slug = en_lower.replace(' ', "-").replace('_', "-");
-                        let abbr_lower = e.abbr.to_lowercase();
-                        // 1. slug完全匹配核心名
-                        if mod_key.len() >= 2 && (en_slug == mod_key || en_slug == first_seg) {
-                            return Some(e.cn_name.clone());
-                        }
-                        // 2. 文件名包含英文名 或 英文名包含核心名
-                        if mod_key.len() >= 3
-                            && (base.contains(&en_slug) || en_slug.contains(mod_key))
-                        {
-                            return Some(e.cn_name.clone());
-                        }
-                        // 3. 缩写匹配
-                        if !abbr_lower.is_empty()
-                            && abbr_lower.len() >= 2
-                            && (mod_key == abbr_lower || first_seg == abbr_lower)
-                        {
-                            return Some(e.cn_name.clone());
-                        }
-                        None
-                    })
-                    .unwrap_or_default();
+                let cn_name = find_cn_name(&modcn_index, mod_key, first_seg, base);
 
                 mods.push(ModInfo {
                     file_name: fname,
@@ -103,6 +80,62 @@ pub fn list_mods(game_dir: String, name: String) -> Result<Vec<ModInfo>, String>
     }
     mods.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
     Ok(mods)
+}
+
+struct ModCnIndex {
+    exact: HashMap<String, String>,
+    slugs: Vec<(String, String)>,
+}
+
+fn modcn_index() -> &'static ModCnIndex {
+    static MODCN_INDEX: OnceLock<ModCnIndex> = OnceLock::new();
+    MODCN_INDEX.get_or_init(|| build_modcn_index(load_modcn()))
+}
+
+fn build_modcn_index(entries: &[crate::modcn::ModCnEntry]) -> ModCnIndex {
+    let mut exact = HashMap::new();
+    let mut slugs = Vec::new();
+    for entry in entries {
+        if entry.cn_name.is_empty() || !contains_chinese(&entry.cn_name) {
+            continue;
+        }
+        let en_lower = entry.en_name.to_lowercase();
+        if !en_lower.is_empty() {
+            let en_slug = en_lower.replace(' ', "-").replace('_', "-");
+            if en_slug.len() >= 2 {
+                exact.entry(en_slug.clone()).or_insert_with(|| entry.cn_name.clone());
+                slugs.push((en_slug, entry.cn_name.clone()));
+            }
+        }
+        let abbr_lower = entry.abbr.to_lowercase();
+        if abbr_lower.len() >= 2 {
+            exact.entry(abbr_lower).or_insert_with(|| entry.cn_name.clone());
+        }
+    }
+    ModCnIndex { exact, slugs }
+}
+
+fn find_cn_name(index: &ModCnIndex, mod_key: &str, first_seg: &str, base: &str) -> String {
+    if mod_key.len() >= 2 {
+        if let Some(name) = index.exact.get(mod_key) {
+            return name.clone();
+        }
+    }
+    if first_seg.len() >= 2 {
+        if let Some(name) = index.exact.get(first_seg) {
+            return name.clone();
+        }
+    }
+    if mod_key.len() >= 3 {
+        if let Some((_, name)) = index
+            .slugs
+            .iter()
+            .find(|(slug, _)| base.contains(slug) || slug.contains(mod_key))
+        {
+            return name.clone();
+        }
+    }
+    String::new()
 }
 
 /// 切换 mod 启用/禁用（.jar ↔ .jar.disabled）
