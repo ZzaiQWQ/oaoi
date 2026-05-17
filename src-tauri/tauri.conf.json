@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "oaoi",
-  "version": "1.0.5",
+  "version": "1.0.9",
   "identifier": "com.oaoi.launcher",
   "build": {
     "frontendDist": "../dist",

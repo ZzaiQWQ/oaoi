@@ -1,6 +1,7 @@
 use crate::instance::{
     cf_api_key, is_cancelled, register_cancel, safe_path_name, unregister_cancel,
 };
+use crate::installer::download_file_with_progress;
 use std::sync::atomic::Ordering;
 
 // ===== 整合包在线搜索 =====
@@ -505,6 +506,7 @@ fn do_install_modpack_direct(
     result
 }
 
+#[allow(dead_code)]
 const MODPACK_PARALLEL_MIN_SIZE: u64 = 16 * 1024 * 1024;
 const MODPACK_PARALLEL_WORKERS: u64 = 8;
 
@@ -515,29 +517,30 @@ fn download_modpack_archive(
     file_name: &str,
     tmp_path: &std::path::Path,
 ) -> Result<u64, String> {
-    if let Ok(Some(total_size)) = probe_range_size(http, download_url) {
-        if total_size >= MODPACK_PARALLEL_MIN_SIZE {
-            match download_modpack_parallel(
-                app_handle,
-                http,
-                download_url,
-                file_name,
-                tmp_path,
-                total_size,
-            ) {
-                Ok(downloaded) => return Ok(downloaded),
-                Err(e) => {
-                    eprintln!("[modpack-dl] 分片下载失败，回退单连接: {}", e);
-                    let _ = std::fs::remove_file(tmp_path);
-                    remove_part_files(tmp_path, MODPACK_PARALLEL_WORKERS as usize);
-                }
-            }
-        }
-    }
+    let _ = std::fs::remove_file(tmp_path);
+    download_file_with_progress(
+        http,
+        download_url,
+        tmp_path,
+        None,
+        false,
+        Some(file_name),
+        |downloaded, total| {
+            emit_download_progress(app_handle, file_name, downloaded, total.unwrap_or(0));
+        },
+    )
+    .map_err(|e| format!("下载整合包失败: {}", e))?;
 
-    download_modpack_single(app_handle, http, download_url, file_name, tmp_path)
+    let downloaded = std::fs::metadata(tmp_path)
+        .map(|m| m.len())
+        .map_err(|e| format!("读取整合包文件失败: {}", e))?;
+    if downloaded == 0 {
+        return Err("下载整合包失败: 文件为空".to_string());
+    }
+    Ok(downloaded)
 }
 
+#[allow(dead_code)]
 fn probe_range_size(
     http: &reqwest::blocking::Client,
     download_url: &str,
@@ -634,6 +637,7 @@ fn download_modpack_archive_with_fallbacks(
     })
 }
 
+#[allow(dead_code)]
 fn download_modpack_single(
     app_handle: &tauri::AppHandle,
     http: &reqwest::blocking::Client,
@@ -693,6 +697,7 @@ fn download_modpack_single(
     Ok(downloaded)
 }
 
+#[allow(dead_code)]
 fn download_modpack_parallel(
     app_handle: &tauri::AppHandle,
     http: &reqwest::blocking::Client,

@@ -323,9 +323,11 @@ function initSettings() {
     localStorage.setItem('memoryMode', nextMode);
     memoryModeManual?.classList.toggle('active', nextMode === 'manual');
     memoryModeAuto?.classList.toggle('active', nextMode === 'auto');
+    memSlider?.classList.toggle('is-hidden', nextMode === 'auto');
+    sliderLabels?.classList.toggle('is-hidden', nextMode === 'auto');
     if (memoryModeHint) {
       memoryModeHint.textContent = nextMode === 'auto'
-        ? '启动整合包时优先使用自动值；没有自动值时使用下方数值。'
+        ? '启动整合包时优先使用自动值；没有自动值时使用右侧数值。'
         : '启动时使用下方数值，不会被整合包自动值覆盖。';
     }
   }

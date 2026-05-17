@@ -2,6 +2,24 @@
 
 .set-card-perf {
   grid-column: 1;
+  min-height: 0;
+}
+
+.set-card-perf .set-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.set-card-perf .set-tab-content::-webkit-scrollbar {
+  width: 3px;
+}
+
+.set-card-perf .set-tab-content::-webkit-scrollbar-thumb {
+  background: var(--pink-300);
+  border-radius: 3px;
 }
 
 .set-field {
@@ -41,6 +59,11 @@
   background: var(--pink-200);
   outline: none;
   cursor: pointer;
+}
+
+.set-slider.is-hidden,
+.set-slider-labels.is-hidden {
+  display: none;
 }
 
 .set-slider::-webkit-slider-thumb {

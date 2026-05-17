@@ -11,6 +11,12 @@
   height: 100%;
 }
 
+.page-settings.active {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .settings-header {
   margin-bottom: 6px;
 }

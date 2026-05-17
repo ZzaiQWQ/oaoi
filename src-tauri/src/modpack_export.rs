@@ -190,10 +190,25 @@ fn export_modpack_blocking(
 
     match export_format.as_str() {
         "modrinth" | "mrpack" => {
-            emit_export_progress(app_handle, name, "scan", 5, 100, "Scanning selected files...");
+            emit_export_progress(
+                app_handle,
+                name,
+                "scan",
+                5,
+                100,
+                "Scanning selected files...",
+            );
             let candidates = collect_package_files(app_handle, name, &inst_dir, &selected_paths)?;
-            let cached_cf_matches = load_cached_curseforge_matches(&game_root, &safe_name, &candidates);
-            emit_export_progress(app_handle, name, "lookup", 20, 100, "Checking Modrinth files...");
+            let cached_cf_matches =
+                load_cached_curseforge_matches(&game_root, &safe_name, &candidates);
+            emit_export_progress(
+                app_handle,
+                name,
+                "lookup",
+                20,
+                100,
+                "Checking Modrinth files...",
+            );
             let mr_matches = lookup_modrinth_hashes(&http, &candidates);
             let cf_candidates: Vec<FileCandidate> = candidates
                 .iter()
@@ -215,7 +230,14 @@ fn export_modpack_blocking(
                 );
                 cf_matches.extend(lookup_curseforge_fingerprints(&http, &cf_candidates));
             }
-            emit_export_progress(app_handle, name, "write", 70, 100, "Writing modpack archive...");
+            emit_export_progress(
+                app_handle,
+                name,
+                "write",
+                70,
+                100,
+                "Writing modpack archive...",
+            );
             export_mrpack(
                 &export_dir,
                 &inst_dir,
@@ -232,7 +254,14 @@ fn export_modpack_blocking(
             )
         }
         "curseforge" | "cf" => {
-            emit_export_progress(app_handle, name, "scan", 5, 100, "Reading cached file sources...");
+            emit_export_progress(
+                app_handle,
+                name,
+                "scan",
+                5,
+                100,
+                "Reading cached file sources...",
+            );
             let package_files = collect_package_paths(&inst_dir, &selected_paths)?;
             let cached_cf_matches =
                 load_cached_curseforge_matches_for_paths(&game_root, &safe_name, &package_files);
@@ -242,7 +271,14 @@ fn export_modpack_blocking(
                 .cloned()
                 .collect();
             let fallback_candidates = hash_package_paths(app_handle, name, cf_candidates)?;
-            emit_export_progress(app_handle, name, "lookup", 25, 100, "Checking CurseForge files...");
+            emit_export_progress(
+                app_handle,
+                name,
+                "lookup",
+                25,
+                100,
+                "Checking CurseForge files...",
+            );
             let mut cf_matches = cached_cf_matches;
             if !fallback_candidates.is_empty() {
                 let fallback_matches = lookup_curseforge_fingerprints(&http, &fallback_candidates);
@@ -252,7 +288,14 @@ fn export_modpack_blocking(
                     }
                 }
             }
-            emit_export_progress(app_handle, name, "write", 70, 100, "Writing modpack archive...");
+            emit_export_progress(
+                app_handle,
+                name,
+                "write",
+                70,
+                100,
+                "Writing modpack archive...",
+            );
             export_curseforge_pack(
                 &export_dir,
                 &inst_dir,
@@ -678,20 +721,22 @@ fn get_modpack_export_items_blocking(
         };
         if path.is_dir() {
             let item_path = safe.clone();
-            dir_handles.push(std::thread::spawn(move || -> Result<Option<ExportItem>, String> {
-                let (size, count) = dir_stats(&path)?;
-                if count == 0 {
-                    return Ok(None);
-                }
-                Ok(Some(ExportItem {
-                    path: item_path.clone(),
-                    label: export_label(&item_path).to_string(),
-                    kind: "folder".to_string(),
-                    size,
-                    count,
-                    default_checked: default_export_checked(&item_path),
-                }))
-            }));
+            dir_handles.push(std::thread::spawn(
+                move || -> Result<Option<ExportItem>, String> {
+                    let (size, count) = dir_stats(&path)?;
+                    if count == 0 {
+                        return Ok(None);
+                    }
+                    Ok(Some(ExportItem {
+                        path: item_path.clone(),
+                        label: export_label(&item_path).to_string(),
+                        kind: "folder".to_string(),
+                        size,
+                        count,
+                        default_checked: default_export_checked(&item_path),
+                    }))
+                },
+            ));
         } else if path.is_file() {
             if !should_include_export_root_file(&safe) {
                 continue;
@@ -1021,14 +1066,11 @@ fn lookup_curseforge_fingerprints(
             let file_name = file["fileName"].as_str().unwrap_or("");
             let api_download_url = file["downloadUrl"].as_str().unwrap_or("");
             let downloads = curseforge_download_candidates(file_id, file_name, api_download_url);
-            matches_by_sha
-                .entry(sha)
-                .or_default()
-                .push(CfResolved {
-                    project_id: project_id as u32,
-                    file_id: file_id as u32,
-                    downloads,
-                });
+            matches_by_sha.entry(sha).or_default().push(CfResolved {
+                project_id: project_id as u32,
+                file_id: file_id as u32,
+                downloads,
+            });
         }
     }
 
@@ -1041,9 +1083,10 @@ fn lookup_curseforge_fingerprints(
     let mut out = HashMap::new();
     for (sha, mut matches) in matches_by_sha {
         if let Some(expected_class) = expected_class_by_sha.get(&sha) {
-            if let Some(index) = matches.iter().position(|item| {
-                class_by_project.get(&item.project_id) == Some(expected_class)
-            }) {
+            if let Some(index) = matches
+                .iter()
+                .position(|item| class_by_project.get(&item.project_id) == Some(expected_class))
+            {
                 out.insert(sha, matches.remove(index));
                 continue;
             }

@@ -351,11 +351,13 @@ pub fn run() {
             });
 
             if cfg!(debug_assertions) {
-                app.handle().plugin(
+                if let Err(err) = app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
-                )?;
+                ) {
+                    eprintln!("[debug-log] failed to initialize: {}", err);
+                }
             }
             Ok(())
         })

@@ -114,6 +114,7 @@ function getRequiredJavaMajor(mcVersion) {
 let instancesCache = [];
 let isLaunching = false;
 let javaDownloadModalTimer = null;
+let launchRepairModalTimer = null;
 
 function ensureJavaDownloadModal() {
   let modal = document.getElementById('javaDownloadModal');
@@ -249,6 +250,83 @@ function finishJavaDownloadModal(success, message) {
     modal.classList.add('hidden');
     document.getElementById('javaDownloadBar')?.classList.remove('error');
   }, success ? 900 : 3500);
+}
+
+function ensureLaunchRepairModal() {
+  let modal = document.getElementById('launchRepairModal');
+  if (modal) return modal;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-overlay hidden java-download-modal" id="launchRepairModal" data-no-drag>
+      <div class="java-download-card">
+        <div class="java-download-header">
+          <div>
+            <div class="java-download-title" id="launchRepairTitle">启动前修复</div>
+            <div class="java-download-subtitle" id="launchRepairSubtitle">准备检查文件...</div>
+          </div>
+          <div class="java-download-percent" id="launchRepairPercent">0%</div>
+        </div>
+        <div class="java-download-bar-wrap">
+          <div class="java-download-bar" id="launchRepairBar"></div>
+        </div>
+        <div class="java-download-detail" id="launchRepairDetail">正在检查缺失文件...</div>
+      </div>
+    </div>
+  `);
+  return document.getElementById('launchRepairModal');
+}
+
+function updateLaunchRepairModal(version, payload) {
+  if (launchRepairModalTimer) {
+    clearTimeout(launchRepairModalTimer);
+    launchRepairModalTimer = null;
+  }
+  const modal = ensureLaunchRepairModal();
+  modal.classList.remove('hidden');
+  const stage = payload.stage || 'repair';
+  const label = (window.STAGE_LABELS && window.STAGE_LABELS[stage]) || stage || '修复文件';
+  const current = Number(payload.current || 0);
+  const total = Number(payload.total || 0);
+  const titleEl = document.getElementById('launchRepairTitle');
+  const subtitleEl = document.getElementById('launchRepairSubtitle');
+  const percentEl = document.getElementById('launchRepairPercent');
+  const barEl = document.getElementById('launchRepairBar');
+  const detailEl = document.getElementById('launchRepairDetail');
+
+  if (titleEl) titleEl.textContent = '启动前修复';
+  if (subtitleEl) subtitleEl.textContent = version || '当前版本';
+  if (barEl) barEl.classList.remove('error');
+
+  if (total > 0) {
+    const percent = Math.min(100, Math.round((current / Math.max(total, 1)) * 100));
+    if (percentEl) percentEl.textContent = `${percent}%`;
+    if (barEl) barEl.style.width = `${percent}%`;
+    if (detailEl) detailEl.textContent = `${label} ${formatStageProgress(current, total, stage)}`;
+  } else {
+    if (percentEl) percentEl.textContent = '--';
+    if (barEl) barEl.style.width = '12%';
+    if (detailEl) detailEl.textContent = String(payload.detail || label);
+  }
+}
+
+function finishLaunchRepairModal(success, message) {
+  const modal = document.getElementById('launchRepairModal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  const subtitleEl = document.getElementById('launchRepairSubtitle');
+  const percentEl = document.getElementById('launchRepairPercent');
+  const barEl = document.getElementById('launchRepairBar');
+  const detailEl = document.getElementById('launchRepairDetail');
+  if (subtitleEl) subtitleEl.textContent = success ? '修复完成' : '修复失败';
+  if (percentEl) percentEl.textContent = success ? '100%' : '失败';
+  if (barEl) {
+    barEl.style.width = '100%';
+    barEl.classList.toggle('error', !success);
+  }
+  if (detailEl) detailEl.textContent = message || (success ? '文件检查完成，正在启动游戏。' : '启动前修复失败。');
+  launchRepairModalTimer = setTimeout(() => {
+    modal.classList.add('hidden');
+    document.getElementById('launchRepairBar')?.classList.remove('error');
+  }, success ? 700 : 3500);
 }
 
 function parseMemoryMb(value) {
@@ -618,7 +696,7 @@ function initLaunchButton() {
       const requiredMajor = getRequiredJavaMajor(mcVer);
 
       btn.style.pointerEvents = 'none';
-      btn.innerHTML = `<span class="launch-icon">⏳</span><span>查找 Java ${requiredMajor}...</span>`;
+      btn.innerHTML = `<span>查找 Java ${requiredMajor}...</span>`;
       btn.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
 
       try {
@@ -635,7 +713,7 @@ function initLaunchButton() {
         } else {
           // 2. 没找到 → 自动下载
           console.log(`[java] 未找到 Java ${requiredMajor}，自动下载...`);
-          btn.innerHTML = `<span class="launch-icon">⏳</span><span>下载 Java ${requiredMajor}...</span>`;
+          btn.innerHTML = `<span>下载 Java ${requiredMajor}...</span>`;
           showJavaDownloadModal(requiredMajor);
           let progressUnlisten = null;
           let doneUnlisten = null;
@@ -669,20 +747,20 @@ function initLaunchButton() {
             if (d.major !== requiredMajor) return;
             updateJavaDownloadModal(d);
             if (d.stage === 'extracting') {
-              btn.innerHTML = `<span class="launch-icon">⏳</span><span>解压 Java ${requiredMajor}...</span>`;
+              btn.innerHTML = `<span>解压 Java ${requiredMajor}...</span>`;
               return;
             }
             if (d.stage === 'done') {
-              btn.innerHTML = `<span class="launch-icon">⏳</span><span>准备启动...</span>`;
+              btn.innerHTML = `<span>准备启动...</span>`;
               return;
             }
             const downloaded = Number(d.downloaded || 0);
             const total = Number(d.total || 0);
             if (downloaded > 0 && total > 0) {
               const percent = Math.min(100, Math.round(downloaded / total * 100));
-              btn.innerHTML = `<span class="launch-icon">⏳</span><span>下载 Java ${requiredMajor} ${percent}%</span>`;
+              btn.innerHTML = `<span>下载 Java ${requiredMajor} ${percent}%</span>`;
             } else if (d.detail) {
-              btn.innerHTML = `<span class="launch-icon">⏳</span><span>${escapeHtml(String(d.detail)).slice(0, 24)}</span>`;
+              btn.innerHTML = `<span>${escapeHtml(String(d.detail)).slice(0, 24)}</span>`;
             }
           });
 
@@ -719,7 +797,6 @@ function initLaunchButton() {
 
     btn.style.pointerEvents = 'none';
     btn.innerHTML = `
-      <span class="launch-icon">⏳</span>
       <span>正在启动...</span>
     `;
     btn.style.background = 'linear-gradient(135deg, #c084fc 0%, #a855f7 50%, #9333ea 100%)';
@@ -727,26 +804,38 @@ function initLaunchButton() {
 
     try {
       const tauri = await waitForTauri();
+      let repairUnlisten = null;
+      repairUnlisten = await tauri.event.listen('install-progress', (event) => {
+        const d = event.payload || {};
+        if (d.name !== selectedVersion) return;
+        updateLaunchRepairModal(selectedVersion, d);
+      });
       const instanceJvmArgs = localStorage.getItem(`jvmArgs_${selectedVersion}`);
       const customJvmArgs = instanceJvmArgs !== null
         ? instanceJvmArgs
         : (localStorage.getItem('customJvmArgs') || null);
-      const result = await tauri.core.invoke('launch_minecraft', {
-        options: {
-          java_path: javaPath,
-          game_dir: gameDir,
-          version_name: selectedVersion,
-          player_name: playerName,
-          memory_mb: memAlloc,
-          server_ip: null,
-          server_port: null,
-          access_token: accessToken,
-          uuid: playerUuid,
-          custom_jvm_args: customJvmArgs,
-        }
-      });
+      let result;
+      try {
+        result = await tauri.core.invoke('launch_minecraft', {
+          options: {
+            java_path: javaPath,
+            game_dir: gameDir,
+            version_name: selectedVersion,
+            player_name: playerName,
+            memory_mb: memAlloc,
+            server_ip: null,
+            server_port: null,
+            access_token: accessToken,
+            uuid: playerUuid,
+            custom_jvm_args: customJvmArgs,
+          }
+        });
+      } finally {
+        if (repairUnlisten) repairUnlisten();
+      }
 
       console.log('🎮 ' + result);
+      finishLaunchRepairModal(true, '文件检查完成，正在启动游戏。');
       btn.innerHTML = `
         <span class="launch-icon">✅</span>
         <span>启动成功！</span>
@@ -755,11 +844,12 @@ function initLaunchButton() {
     } catch (e) {
       console.log('❌ 启动失败:', e);
       const errMsg = typeof e === 'string' ? e : (e.message || '未知错误');
+      finishLaunchRepairModal(false, errMsg.split('\n')[0]);
       // 按钮显示简短错误
       const shortMsg = errMsg.split('\n')[0].substring(0, 30);
       btn.innerHTML = `
         <span class="launch-icon">❌</span>
-        <span>${shortMsg}</span>
+        <span>${escapeHtml(shortMsg)}</span>
       `;
       btn.style.background = 'linear-gradient(135deg, #fca5a5 0%, #f87171 50%, #ef4444 100%)';
       // 弹窗显示完整错误

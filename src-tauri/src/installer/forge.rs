@@ -1,9 +1,10 @@
 use super::{
-    build_data_map, download_file_if_needed_cancelable, get_jar_main_class, make_emitter,
-    maven_name_to_path, merge_libraries, resolve_data_arg, run_java_process_cancelable,
-    safe_maven_path, FORGE_LOCK,
+    build_data_map, download_file_with_progress, get_jar_main_class, make_emitter,
+    maven_name_to_path, merge_libraries, parallel_download, resolve_data_arg,
+    run_java_process_cancelable, safe_maven_path, wait_for_install_file, FORGE_LOCK,
 };
 use crate::instance::safe_join;
+use tauri::Emitter;
 
 /// 安装 Forge loader（解压 installer.jar，自行下载库 + 执行 processors）
 pub fn install_forge(
@@ -55,16 +56,26 @@ pub fn install_forge(
     };
     let installer_path = inst_dir.join("forge-installer.jar");
 
-    emit("forge", 5, 100, "下载 Forge 安装器...");
-    download_file_if_needed_cancelable(
+    emit("forge-installer", 0, 1, "下载 Forge 安装器...");
+    download_file_with_progress(
         http,
         &installer_url,
         &installer_path,
         None,
         use_mirror,
         Some(name),
+        |downloaded, total| {
+            let total = total.unwrap_or_else(|| downloaded.max(1)).max(1);
+            emit(
+                "forge-installer",
+                downloaded.min(usize::MAX as u64) as usize,
+                total.min(usize::MAX as u64) as usize,
+                "下载 Forge 安装器...",
+            );
+        },
     )
     .map_err(|e| format!("下载 Forge 安装器失败: {}", e))?;
+    emit("forge-installer", 1, 1, "Forge 安装器下载完成");
 
     // 2. 解压 installer.jar
     emit("forge", 15, 100, "解压 Forge 安装器...");
@@ -134,17 +145,18 @@ pub fn install_forge(
     }
 
     let total_libs = all_libs.len();
-    let mut downloaded = 0;
+    let mut scanned = 0;
+    let mut download_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
 
     for lib in &all_libs {
         if crate::instance::is_cancelled(name) {
             return Err("用户取消安装".to_string());
         }
-        downloaded += 1;
+        scanned += 1;
         let lib_name = lib["name"].as_str().unwrap_or("");
 
         // 解析 Maven 坐标 → 文件路径
-        let (rel_path, artifact_url) =
+        let (rel_path, artifact_url, sha1) =
             if let Some(artifact) = lib["downloads"]["artifact"].as_object() {
                 let path = artifact
                     .get("path")
@@ -156,7 +168,11 @@ pub fn install_forge(
                     .and_then(|u| u.as_str())
                     .unwrap_or("")
                     .to_string();
-                (path, url)
+                let sha1 = artifact
+                    .get("sha1")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                (path, url, sha1)
             } else if !lib_name.is_empty() {
                 // 没有 downloads，从 name 推导路径
                 let path = maven_name_to_path(lib_name);
@@ -165,7 +181,11 @@ pub fn install_forge(
                     .and_then(|u| u.as_str())
                     .unwrap_or("https://maven.minecraftforge.net");
                 let url = format!("{}/{}", url_base.trim_end_matches('/'), path);
-                (path, url)
+                let sha1 = lib
+                    .get("sha1")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                (path, url, sha1)
             } else {
                 continue;
             };
@@ -192,38 +212,52 @@ pub fn install_forge(
             std::fs::copy(&local_maven, &dest).ok();
             emit(
                 "forge",
-                30 + (downloaded * 40 / total_libs.max(1)),
+                30 + (scanned * 20 / total_libs.max(1)),
                 100,
-                &format!("复制本地库 {}/{}", downloaded, total_libs),
+                &format!("复制本地库 {}/{}", scanned, total_libs),
             );
             continue;
         }
 
-        // 下载
         if !artifact_url.is_empty() {
-            emit(
-                "forge",
-                30 + (downloaded * 40 / total_libs.max(1)),
-                100,
-                &format!("下载库 {}/{}", downloaded, total_libs),
-            );
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            match download_file_if_needed_cancelable(
-                http,
-                &artifact_url,
-                &dest,
-                None,
-                use_mirror,
-                Some(name),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("[forge] 库下载失败(非致命): {} - {}", lib_name, e);
-                }
-            }
+            download_tasks.push((artifact_url, dest, sha1));
+        } else {
+            return Err(format!("Forge 库缺少下载地址: {}", lib_name));
         }
+    }
+    if !download_tasks.is_empty() {
+        let total = download_tasks.len();
+        emit(
+            "forge-libs",
+            0,
+            total,
+            &format!("并行下载 {} 个 Forge 依赖库...", total),
+        );
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app_clone = app_handle.clone();
+        let done_reporter = done.clone();
+        let inst_name_copy = name.to_string();
+        let reporter = std::thread::spawn(move || loop {
+            let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = app_clone.emit(
+                "install-progress",
+                serde_json::json!({
+                    "name": inst_name_copy,
+                    "stage": "forge-libs",
+                    "current": finished,
+                    "total": total,
+                    "detail": format!("Forge 依赖库 {}/{}", finished, total)
+                }),
+            );
+            if finished >= total {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let result = parallel_download(http, download_tasks, &done, 32, use_mirror, Some(name));
+        let _ = reporter.join();
+        result.map_err(|e| format!("Forge 依赖库下载失败: {}", e))?;
+        emit("forge-libs", total, total, "Forge 依赖库下载完成");
     }
 
     // 6. 执行 Processors（运行 install_profile 定义的处理器链）
@@ -241,6 +275,11 @@ pub fn install_forge(
                 .collect();
 
             let total_proc = client_processors.len();
+            let client_jar = inst_dir.join("client.jar");
+            if total_proc > 0 {
+                emit("forge", 70, 100, "等待 client.jar 完成...");
+                wait_for_install_file(&client_jar, "client.jar", name)?;
+            }
 
             for (i, proc) in client_processors.iter().enumerate() {
                 if crate::instance::is_cancelled(name) {
@@ -265,8 +304,10 @@ pub fn install_forge(
                 };
                 let jar_path = libs_dir.join(jar_rel_path);
                 if !jar_path.exists() {
-                    eprintln!("[forge] processor jar 不存在: {}", jar_path.display());
-                    continue;
+                    return Err(format!(
+                        "Forge processor jar 不存在: {}",
+                        jar_path.display()
+                    ));
                 }
 
                 // 构建 classpath（processor jar + 所有依赖）
@@ -288,7 +329,6 @@ pub fn install_forge(
                 }
 
                 // 构建参数，替换 data 变量
-                let client_jar = inst_dir.join("client.jar");
                 let data_map = build_data_map(
                     profile,
                     &libs_dir,
@@ -311,8 +351,7 @@ pub fn install_forge(
                 // 从 jar manifest 获取 Main-Class
                 let main_class = get_jar_main_class(&jar_path).unwrap_or_default();
                 if main_class.is_empty() {
-                    eprintln!("[forge] 无法获取 processor main class: {}", jar_name);
-                    continue;
+                    return Err(format!("Forge processor 缺少 Main-Class: {}", jar_name));
                 }
 
                 eprintln!(
@@ -330,14 +369,17 @@ pub fn install_forge(
                 ) {
                     Ok(status) => {
                         if !status.success() {
-                            eprintln!("[forge] processor 失败: {}", jar_name);
+                            return Err(format!(
+                                "Forge processor 执行失败: {} ({})",
+                                jar_name, status
+                            ));
                         }
                     }
                     Err(e) => {
                         if e.contains("取消") {
                             return Err(e);
                         }
-                        eprintln!("[forge] processor 执行出错: {} - {}", jar_name, e);
+                        return Err(format!("Forge processor 执行出错: {} - {}", jar_name, e));
                     }
                 }
             }

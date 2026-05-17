@@ -7,7 +7,9 @@
 }
 
 .about-hero-img {
-  flex: 2;
+  flex: 0 0 calc((100% - 10px) * 0.6);
+  max-width: calc((100% - 10px) * 0.6);
+  min-width: 0;
   position: relative;
   border-radius: var(--radius-xl);
   overflow: hidden;
@@ -26,7 +28,9 @@
 .about-hero-text p { font-size: 10px; color: color-mix(in srgb, var(--pink-200) calc(0.9 * 100%), transparent); font-weight: 600; }
 
 .about-version-card {
-  flex: 1;
+  flex: 0 0 calc((100% - 10px) * 0.4);
+  max-width: calc((100% - 10px) * 0.4);
+  min-width: 0;
   background: rgba(255,255,255,0.7);
   border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   border-radius: var(--radius-xl);

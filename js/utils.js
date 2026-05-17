@@ -14,10 +14,12 @@ function escapeHtml(s) {
 const STAGE_LABELS = {
   downloading: '下载整合包', detecting: '识别格式', installing: '安装中',
   extracting: '解压中', meta: '元数据', client: 'client.jar',
-  libraries: '依赖库', assets: '资源文件', mods: 'Mod 文件',
+  libraries: '依赖库', assetIndex: '资源索引', assets: '资源文件', mods: 'Mod 文件',
   resourcepacks: '材质包', shaderpacks: '光影包', config: '配置文件', other: '其他文件',
   java: 'Java 环境', loader: '加载器', forge: 'Forge',
-  neoforge: 'NeoForge', fabric: 'Fabric', quilt: 'Quilt',
+  'forge-installer': 'Forge 安装器', 'forge-libs': 'Forge 依赖库',
+  neoforge: 'NeoForge', 'neoforge-installer': 'NeoForge 安装器', 'neoforge-libs': 'NeoForge 依赖库',
+  fabric: 'Fabric', 'fabric-libs': 'Fabric 组件', quilt: 'Quilt',
   processors: '处理器', overrides: '覆盖文件'
 };
 

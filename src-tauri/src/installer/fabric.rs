@@ -1,5 +1,9 @@
-use super::{download_file_if_needed_cancelable, make_emitter, merge_libraries, safe_maven_path};
+use super::{
+    download_file_if_needed_cancelable, make_emitter, merge_libraries, parallel_download,
+    safe_maven_path,
+};
 use crate::instance::safe_path_name;
+use tauri::Emitter;
 
 /// 安装 Fabric loader
 pub fn install_fabric(
@@ -78,61 +82,30 @@ pub fn install_fabric(
         );
 
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let handles: Vec<_> = fabric_tasks
-            .into_iter()
-            .map(|(url, dest, sha1)| {
-                let done = done.clone();
-                let errors = errors.clone();
-                let h = http.clone();
-                let cancel_name = name.to_string();
-                std::thread::spawn(move || {
-                    if let Err(e) = download_file_if_needed_cancelable(
-                        &h,
-                        &url,
-                        &dest,
-                        sha1.as_deref(),
-                        use_mirror,
-                        Some(&cancel_name),
-                    ) {
-                        errors.lock().unwrap().push(format!("{} -> {}", url, e));
-                    }
-                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                })
-            })
-            .collect();
-
-        loop {
-            let finished = done.load(std::sync::atomic::Ordering::Relaxed);
-            emit(
-                "fabric-libs",
-                finished,
-                total,
-                &format!("Fabric 组件 {}/{}", finished, total),
+        let app_clone = app_handle.clone();
+        let done_reporter = done.clone();
+        let inst_name_copy = name.to_string();
+        let reporter = std::thread::spawn(move || loop {
+            let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = app_clone.emit(
+                "install-progress",
+                serde_json::json!({
+                    "name": inst_name_copy,
+                    "stage": "fabric-libs",
+                    "current": finished,
+                    "total": total,
+                    "detail": format!("Fabric 组件 {}/{}", finished, total)
+                }),
             );
             if finished >= total {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        for h in handles {
-            if h.join().is_err() {
-                errors
-                    .lock()
-                    .unwrap()
-                    .push("fabric download worker panicked".to_string());
-            }
-        }
-        let errors = errors.lock().unwrap();
-        if !errors.is_empty() {
-            let sample = errors
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(format!("Fabric libraries failed: {}", sample));
-        }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let download_result =
+            parallel_download(http, fabric_tasks, &done, 32, use_mirror, Some(name));
+        let _ = reporter.join();
+        download_result.map_err(|e| format!("Fabric libraries failed: {}", e))?;
         emit("fabric-libs", total, total, "Fabric 组件下载完成");
     }
 

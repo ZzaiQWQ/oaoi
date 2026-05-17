@@ -1,4 +1,8 @@
-use crate::installer::{download_file_if_needed, maven_name_to_path, safe_maven_path};
+use crate::installer::{
+    download_file_mirror_then_official, download_file_mirror_then_official_with_progress,
+    library_rules_value_allowed, maven_name_to_path, parallel_download_mirror_then_official,
+    safe_maven_path,
+};
 use crate::instance::{resolve_game_dir, safe_path_name};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -84,6 +88,262 @@ fn split_command_args(input: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+fn sha1_ok(path: &std::path::Path, expected_sha1: Option<&str>) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Some(expected_sha1) = expected_sha1 else {
+        return true;
+    };
+    match std::fs::read(path) {
+        Ok(data) => sha1_smol::Sha1::from(&data)
+            .digest()
+            .to_string()
+            .eq_ignore_ascii_case(expected_sha1),
+        Err(_) => false,
+    }
+}
+
+fn is_valid_sha1(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn repair_launch_files(
+    app_handle: &tauri::AppHandle,
+    version_name: &str,
+    game_dir: &std::path::Path,
+    ver_dir: &std::path::Path,
+    json: &serde_json::Value,
+) -> Result<(), String> {
+    let http = reqwest::blocking::Client::builder()
+        .pool_max_idle_per_host(64)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
+        .user_agent("OAOI-Launcher/1.0")
+        .build()
+        .map_err(|e| format!("创建启动修复下载客户端失败: {}", e))?;
+
+    let emit = |stage: &str, current: usize, total: usize, detail: &str| {
+        let _ = app_handle.emit(
+            "install-progress",
+            serde_json::json!({
+                "name": version_name,
+                "stage": stage,
+                "current": current,
+                "total": total,
+                "detail": detail
+            }),
+        );
+    };
+
+    if let Some(client_info) = json.get("downloads").and_then(|d| d.get("client")) {
+        if let Some(url) = client_info.get("url").and_then(|v| v.as_str()) {
+            let sha1 = client_info.get("sha1").and_then(|v| v.as_str());
+            let jar_path = ver_dir.join("client.jar");
+            if !sha1_ok(&jar_path, sha1) {
+                emit("client", 0, 1, "启动前修复 client.jar...");
+                download_file_mirror_then_official_with_progress(
+                    &http,
+                    url,
+                    &jar_path,
+                    sha1,
+                    None,
+                    |done, total| {
+                        let total = total.unwrap_or_else(|| done.max(1)).max(1);
+                        let current = done.min(usize::MAX as u64) as usize;
+                        let total = total.min(usize::MAX as u64) as usize;
+                        emit("client", current, total, "启动前修复 client.jar...");
+                    },
+                )
+                .map_err(|e| format!("启动前修复 client.jar 失败: {}", e))?;
+                emit("client", 1, 1, "client.jar 修复完成");
+            }
+        }
+    }
+
+    let libs_dir = game_dir.join("libs");
+    let mut lib_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    if let Some(libs) = json.get("libraries").and_then(|v| v.as_array()) {
+        for lib in libs {
+            if !library_rules_value_allowed(lib.get("rules")) {
+                continue;
+            }
+            if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
+                if let (Some(path), Some(url)) = (
+                    artifact.get("path").and_then(|v| v.as_str()),
+                    artifact.get("url").and_then(|v| v.as_str()),
+                ) {
+                    let Ok(rel_path) = safe_maven_path(path) else {
+                        continue;
+                    };
+                    let dest = libs_dir.join(rel_path);
+                    let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
+                    if !sha1_ok(&dest, sha1) {
+                        lib_tasks.push((url.to_string(), dest, sha1.map(|s| s.to_string())));
+                    }
+                    continue;
+                }
+            }
+
+            if let Some(name) = lib.get("name").and_then(|v| v.as_str()) {
+                let rel_path = maven_name_to_path(name);
+                let Ok(rel_path_buf) = safe_maven_path(&rel_path) else {
+                    continue;
+                };
+                let maven_url = lib
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("https://libraries.minecraft.net/");
+                let url = format!("{}/{}", maven_url.trim_end_matches('/'), rel_path);
+                let dest = libs_dir.join(rel_path_buf);
+                let sha1 = lib.get("sha1").and_then(|v| v.as_str());
+                if !sha1_ok(&dest, sha1) {
+                    lib_tasks.push((url, dest, sha1.map(|s| s.to_string())));
+                }
+            }
+        }
+    }
+    if !lib_tasks.is_empty() {
+        let total = lib_tasks.len();
+        emit(
+            "libraries",
+            0,
+            total,
+            &format!("启动前修复 {} 个依赖库...", total),
+        );
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app_clone = app_handle.clone();
+        let done_reporter = done.clone();
+        let version_copy = version_name.to_string();
+        let reporter = std::thread::spawn(move || loop {
+            let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
+            let _ = app_clone.emit(
+                "install-progress",
+                serde_json::json!({
+                    "name": version_copy,
+                    "stage": "libraries",
+                    "current": finished,
+                    "total": total,
+                    "detail": format!("启动前修复依赖库 {}/{}", finished, total)
+                }),
+            );
+            if finished >= total {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let result = parallel_download_mirror_then_official(&http, lib_tasks, &done, 32, None);
+        let _ = reporter.join();
+        result.map_err(|e| format!("启动前修复依赖库失败: {}", e))?;
+    }
+
+    if let Some(asset_index) = json.get("assetIndex") {
+        let index_url = asset_index
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let index_id = asset_index
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str());
+        if !index_url.is_empty() {
+            let index_path = game_dir
+                .join("res")
+                .join("indexes")
+                .join(format!("{}.json", index_id));
+            if !sha1_ok(&index_path, index_sha1) {
+                emit("assetIndex", 0, 0, "启动前修复资源索引...");
+                let mut index_urls = Vec::new();
+                if !index_id.is_empty() && index_id != "unknown" {
+                    index_urls.push(format!(
+                        "https://bmclapi2.bangbang93.com/indexes/{}.json",
+                        index_id
+                    ));
+                }
+                index_urls.push(index_url.to_string());
+                let mut last_index_err = String::new();
+                let mut index_done = false;
+                for url in index_urls {
+                    match download_file_mirror_then_official(&http, &url, &index_path, index_sha1, None) {
+                        Ok(_) => {
+                            index_done = true;
+                            break;
+                        }
+                        Err(e) => {
+                            last_index_err = format!("{} ({})", e, url);
+                            let _ = std::fs::remove_file(&index_path);
+                        }
+                    }
+                }
+                if !index_done {
+                    return Err(format!("启动前修复资源索引失败: {}", last_index_err));
+                }
+                emit("assetIndex", 1, 1, "资源索引修复完成");
+            }
+            let index_content = std::fs::read_to_string(&index_path)
+                .map_err(|e| format!("读取资源索引失败: {}", e))?;
+            let index_json: serde_json::Value = serde_json::from_str(&index_content)
+                .map_err(|e| format!("解析资源索引失败: {}", e))?;
+            if let Some(objects) = index_json.get("objects").and_then(|v| v.as_object()) {
+                let mut asset_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+                for (_name, info) in objects {
+                    let hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+                    if !is_valid_sha1(hash) {
+                        continue;
+                    }
+                    let prefix = &hash[..2];
+                    let dest = game_dir.join("res").join("objects").join(prefix).join(hash);
+                    if sha1_ok(&dest, Some(hash)) {
+                        continue;
+                    }
+                    let url = format!(
+                        "https://resources.download.minecraft.net/{}/{}",
+                        prefix, hash
+                    );
+                    asset_tasks.push((url, dest, Some(hash.to_string())));
+                }
+                if !asset_tasks.is_empty() {
+                    let total = asset_tasks.len();
+                    emit(
+                        "assets",
+                        0,
+                        total,
+                        &format!("启动前修复 {} 个资源文件...", total),
+                    );
+                    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let app_clone = app_handle.clone();
+                    let done_reporter = done.clone();
+                    let version_copy = version_name.to_string();
+                    let reporter = std::thread::spawn(move || loop {
+                        let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
+                        let _ = app_clone.emit(
+                            "install-progress",
+                            serde_json::json!({
+                                "name": version_copy,
+                                "stage": "assets",
+                                "current": finished,
+                                "total": total,
+                                "detail": format!("启动前修复资源 {}/{}", finished, total)
+                            }),
+                        );
+                        if finished >= total {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    });
+                    let result =
+                        parallel_download_mirror_then_official(&http, asset_tasks, &done, 32, None);
+                    let _ = reporter.join();
+                    result.map_err(|e| format!("启动前修复资源文件失败: {}", e))?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn launch_minecraft(
     app_handle: tauri::AppHandle,
@@ -118,6 +378,8 @@ fn do_launch_minecraft(
     let json: serde_json::Value =
         serde_json::from_str(&json_str).map_err(|e| format!("解析版本 JSON 失败: {}", e))?;
 
+    repair_launch_files(&app_handle, &version_name, &game_dir, &ver_dir, &json)?;
+
     // 获取主类
     let main_class = json["mainClass"]
         .as_str()
@@ -133,28 +395,8 @@ fn do_launch_minecraft(
 
     if let Some(libs) = json["libraries"].as_array() {
         for lib in libs {
-            if let Some(rules) = lib["rules"].as_array() {
-                let mut allowed = false;
-                for rule in rules {
-                    let action = rule["action"].as_str().unwrap_or("");
-                    let os_name = rule["os"]["name"].as_str();
-                    match (action, os_name) {
-                        ("allow", None) => allowed = true,
-                        ("allow", Some("windows")) => allowed = true,
-                        ("disallow", Some("windows")) => {
-                            allowed = false;
-                            break;
-                        }
-                        ("disallow", None) => {
-                            allowed = false;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                if !allowed {
-                    continue;
-                }
+            if !library_rules_value_allowed(lib.get("rules")) {
+                continue;
             }
 
             // 解析库路径
@@ -273,7 +515,7 @@ fn do_launch_minecraft(
                             .user_agent("OAOI-Launcher/1.0")
                             .build()
                             .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
-                        download_file_if_needed(&http, url, &native_jar_path, sha1, false)
+                        download_file_mirror_then_official(&http, url, &native_jar_path, sha1, None)
                             .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
                     }
                 }

@@ -8,8 +8,8 @@ function initDownloadPage() {
   let dlFilter = 'release';
   let dlSource = localStorage.getItem('downloadSource') || 'official';
   if (!['official', 'bmcl'].includes(dlSource)) dlSource = 'official';
-  let activeManifestSource = dlSource;
   let versionFetchToken = 0;
+  let loaderFetchToken = 0;
 
   // 下载源切换按钮
   const sourceFilters = document.getElementById('dlSourceFilters');
@@ -23,7 +23,7 @@ function initDownloadPage() {
         btn.classList.add('active');
         dlSource = btn.dataset.source;
         localStorage.setItem('downloadSource', dlSource);
-        fetchVersions(); // 切换时重新加载版本列表
+        renderVersions(); // 只刷新安装按钮携带的下载源，不重新拉版本列表
       });
     });
   }
@@ -31,33 +31,20 @@ function initDownloadPage() {
   async function fetchVersions() {
     const fetchToken = ++versionFetchToken;
     try {
-      const primarySource = dlSource === 'bmcl' ? 'bmcl' : 'official';
-      const fallbackSource = primarySource === 'bmcl' ? 'official' : 'bmcl';
-      let result;
-      try {
-        result = await loadVersionManifest(primarySource);
-      } catch (_) {
-        result = await loadVersionManifest(fallbackSource);
-      }
+      const result = await loadVersionManifest();
       if (fetchToken !== versionFetchToken) return;
-      activeManifestSource = result.source;
       allVersions = Array.isArray(result.data.versions) ? result.data.versions : [];
       renderVersions();
     } catch (e) {
       if (fetchToken !== versionFetchToken) return;
-      activeManifestSource = dlSource;
       if (dlList) dlList.innerHTML = '<div class="dl-loading">❌ 加载失败，请检查网络</div>';
     }
   }
 
-  async function loadVersionManifest(source) {
-    const manifestUrls = {
-      official: 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json',
-      bmcl: 'https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json'
-    };
-    const resp = await fetch(manifestUrls[source] || manifestUrls.official);
+  async function loadVersionManifest() {
+    const resp = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json');
     if (!resp.ok) throw new Error(`版本清单请求失败: ${resp.status}`);
-    return { source, data: await resp.json() };
+    return { source: 'official', data: await resp.json() };
   }
 
   // 愚人节版本检测（日期在3/31~4/2 且为 snapshot 类型）
@@ -102,7 +89,7 @@ function initDownloadPage() {
     const aprilFools = isAprilFools(v);
     const versionId = escapeHtml(v.id || '');
     const metaUrl = escapeHtml(v.url || '');
-    const source = escapeHtml(activeManifestSource);
+    const source = escapeHtml(dlSource);
     let icon, typeName, typeClass;
     if (aprilFools) {
       icon = '🎃'; typeName = '愚人节'; typeClass = 'april-fools';
@@ -161,7 +148,7 @@ function initDownloadPage() {
         const modal = document.getElementById('newInstanceModal');
         if (modal) {
           modal.dataset.mcVersion = ver;
-          modal.dataset.downloadSource = btn.dataset.source || dlSource;
+          modal.dataset.downloadSource = dlSource;
         }
         document.getElementById('instNameInput').value = `${ver}`;
         document.getElementById('instMetaUrl').value = url;
@@ -175,6 +162,7 @@ function initDownloadPage() {
         document.querySelectorAll('.loader-radio-btn').forEach(el => el.classList.remove('active'));
         document.querySelector('input[value="vanilla"]').parentElement.classList.add('active');
         document.getElementById('loaderVersionGroup').style.display = 'none';
+        loaderFetchToken++;
 
         const createBtn = document.getElementById('createInstBtn');
         createBtn.disabled = false;
@@ -224,13 +212,19 @@ function initDownloadPage() {
         nameInput.value = loader === 'vanilla' ? mcVer : `${mcVer}-${loader}`;
 
         if (loader === 'vanilla') {
+          loaderFetchToken++;
           loaderVersionGroup.style.display = 'none';
+          loaderSelect.innerHTML = '';
+          loaderTargetSpinner.textContent = '';
+          createBtn.disabled = false;
           return;
         }
 
+        const fetchToken = ++loaderFetchToken;
         loaderVersionGroup.style.display = 'block';
         loaderSelect.innerHTML = '';
         loaderTargetSpinner.textContent = '加载中...';
+        createBtn.disabled = true;
 
         try {
           const tauri = await waitForTauri();
@@ -245,8 +239,14 @@ function initDownloadPage() {
             versions = await tauri.core.invoke('get_quilt_versions', { mcVersion: mcVer });
           }
 
+          const currentLoader = document.querySelector('input[name="loader"]:checked')?.value;
+          if (fetchToken !== loaderFetchToken || currentLoader !== loader || modal.dataset.mcVersion !== mcVer) {
+            return;
+          }
+
           if (versions.length === 0) {
             loaderTargetSpinner.textContent = ' 无可用版本';
+            createBtn.disabled = true;
           } else {
             loaderTargetSpinner.textContent = '';
             versions.forEach(v => {
@@ -254,9 +254,12 @@ function initDownloadPage() {
               opt.value = opt.textContent = v;
               loaderSelect.appendChild(opt);
             });
+            createBtn.disabled = false;
           }
         } catch (err) {
+          if (fetchToken !== loaderFetchToken) return;
           loaderTargetSpinner.textContent = ' 获取失败';
+          createBtn.disabled = true;
           console.error(err);
         }
       });

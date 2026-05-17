@@ -238,8 +238,8 @@ async function initModpackDrop() {
     try {
       unlisten = await tauri.event.listen('install-progress', (event) => {
         const { name: evtName, stage, current, total, detail } = event.payload;
-        // 只处理与当前拖拽文件匹配的任务（后端用 display_name 或 inst_name）
-        if (evtName && evtName !== displayName && !displayName.startsWith(evtName)) return;
+        // 拖拽导入后端统一用 displayName 发进度，必须精确匹配，避免同名前缀任务串进度。
+        if (evtName !== displayName) return;
         if (stage === 'done') {
           if (statusEl) statusEl.textContent = '✅ 安装完成！';
           if (barEl) { barEl.style.width = '100%'; barEl.style.opacity = '0.5'; }

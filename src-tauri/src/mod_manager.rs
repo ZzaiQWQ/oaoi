@@ -103,13 +103,17 @@ fn build_modcn_index(entries: &[crate::modcn::ModCnEntry]) -> ModCnIndex {
         if !en_lower.is_empty() {
             let en_slug = en_lower.replace(' ', "-").replace('_', "-");
             if en_slug.len() >= 2 {
-                exact.entry(en_slug.clone()).or_insert_with(|| entry.cn_name.clone());
+                exact
+                    .entry(en_slug.clone())
+                    .or_insert_with(|| entry.cn_name.clone());
                 slugs.push((en_slug, entry.cn_name.clone()));
             }
         }
         let abbr_lower = entry.abbr.to_lowercase();
         if abbr_lower.len() >= 2 {
-            exact.entry(abbr_lower).or_insert_with(|| entry.cn_name.clone());
+            exact
+                .entry(abbr_lower)
+                .or_insert_with(|| entry.cn_name.clone());
         }
     }
     ModCnIndex { exact, slugs }

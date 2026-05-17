@@ -1,6 +1,12 @@
 use super::detect_target_dir;
-use crate::installer::download_file_if_needed_cancelable;
+use crate::installer::download_file_exact_once_with_stall_timeout;
 use crate::instance::{cf_api_key, safe_path_name};
+use crate::modpack_sources::sha1_from_curseforge_hashes;
+
+const CF_DOWNLOAD_ROUNDS: usize = 3;
+const CF_RETRY_DELAY_SECS: u64 = 15;
+const CF_STALL_TIMEOUT_SECS: u64 = 15;
+const CF_TOTAL_TIMEOUT_SECS: u64 = 180;
 
 /// 根据 fileId 构造 CurseForge CDN URL（fileId 拆分为 id/1000 和 id%1000 路径）
 pub fn cf_cdn_urls(file_id: u32, file_name: &str) -> Vec<String> {
@@ -9,14 +15,73 @@ pub fn cf_cdn_urls(file_id: u32, file_name: &str) -> Vec<String> {
     let encoded_name = urlencoding::encode(file_name);
     vec![
         format!(
-            "https://edge.forgecdn.net/files/{}/{}/{}",
-            id1, id2, encoded_name
-        ),
-        format!(
             "https://mediafilez.forgecdn.net/files/{}/{}/{}",
             id1, id2, encoded_name
         ),
+        format!(
+            "https://edge.forgecdn.net/files/{}/{}/{}",
+            id1, id2, encoded_name
+        ),
     ]
+}
+
+fn cf_retry_delay(last_err: &str) -> std::time::Duration {
+    let lower = last_err.to_ascii_lowercase();
+    if last_err.contains("429")
+        || last_err.contains("超时")
+        || last_err.contains("下载过慢")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline")
+        || lower.contains("too slow")
+    {
+        std::time::Duration::from_secs(CF_RETRY_DELAY_SECS)
+    } else {
+        std::time::Duration::from_millis(500)
+    }
+}
+
+fn download_cf_candidates(
+    _http: &reqwest::blocking::Client,
+    urls: &[String],
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+    cancel_name: Option<&str>,
+) -> Result<bool, String> {
+    if urls.is_empty() {
+        return Err("CF无可用URL".to_string());
+    }
+
+    let mut last_err = String::new();
+    for round in 0..CF_DOWNLOAD_ROUNDS {
+        for url in urls {
+            if is_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
+            eprintln!("[cf] try {}/{}: {}", round + 1, CF_DOWNLOAD_ROUNDS, url);
+            match download_file_exact_once_with_stall_timeout(
+                url,
+                dest,
+                expected_sha1,
+                cancel_name,
+                CF_STALL_TIMEOUT_SECS,
+                CF_TOTAL_TIMEOUT_SECS,
+            ) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_err = format!("{}: {}", url, e);
+                    eprintln!("[cf] failed, rotate: {}", last_err);
+                    let _ = std::fs::remove_file(dest);
+                }
+            }
+        }
+
+        if round + 1 < CF_DOWNLOAD_ROUNDS {
+            std::thread::sleep(cf_retry_delay(&last_err));
+        }
+    }
+
+    Err(format!("CurseForge下载失败: {}", last_err))
 }
 
 pub fn cf_download_mod_cancelable(
@@ -59,6 +124,7 @@ pub fn cf_download_mod_cancelable(
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+                let expected_sha1 = sha1_from_curseforge_hashes(&json["data"]["hashes"]);
                 if !fname.is_empty() {
                     let safe_fname = safe_path_name(&fname, "文件名")?;
                     // 根据类型判断目标目录
@@ -74,46 +140,13 @@ pub fn cf_download_mod_cancelable(
                         );
                     }
                     let dest = target_dir.join(&safe_fname);
-                    if dest.exists() {
-                        return Ok(false);
-                    }
-                    // 1a) CDN + 文件名（通常比 API 返回的 downloadUrl 更快）
-                    let cdn_urls = cf_cdn_urls(file_id, &fname);
-                    for cdn in &cdn_urls {
-                        if is_cancelled(cancel_name) {
-                            return Err("用户取消下载".to_string());
-                        }
-                        eprintln!("[cf] CDN: {}", cdn);
-                        let download_result = download_file_if_needed_cancelable(
-                            http,
-                            cdn,
-                            &dest,
-                            None,
-                            false,
-                            cancel_name,
-                        );
-                        match download_result {
-                            Ok(r) => return Ok(r),
-                            Err(e) => {
-                                eprintln!("[cf] CDN失败: {}", e);
-                                let _ = std::fs::remove_file(&dest);
-                                continue;
-                            }
-                        }
-                    }
-                    // 1b) 有 downloadUrl 时作为兜底
+                    // CDN + API URL 轮转，避免一个慢 CDN 地址内部连续重试导致长时间卡住。
+                    let mut urls = cf_cdn_urls(file_id, &fname);
                     if !dl_url.is_empty() {
-                        eprintln!("[cf] API downloadUrl fallback: {}", fname);
-                        return download_file_if_needed_cancelable(
-                            http,
-                            &dl_url,
-                            &dest,
-                            None,
-                            false,
-                            cancel_name,
-                        );
+                        urls.push(dl_url);
                     }
-                    // 1c) 尝试 download-url 端点
+
+                    // 尝试 download-url 端点，把结果也加入候选。
                     let dl_api = format!(
                         "https://api.curseforge.com/v1/mods/{}/files/{}/download-url",
                         project_id, file_id
@@ -127,24 +160,19 @@ pub fn cf_download_mod_cancelable(
                             if let Ok(json2) = resp2.json::<serde_json::Value>() {
                                 if let Some(url) = json2["data"].as_str() {
                                     if !url.is_empty() {
-                                        eprintln!("[cf] download-url端点: {}", fname);
-                                        return download_file_if_needed_cancelable(
-                                            http,
-                                            url,
-                                            &dest,
-                                            None,
-                                            false,
-                                            cancel_name,
-                                        );
+                                        urls.push(url.to_string());
                                     }
                                 }
                             }
                         }
                     }
-                    return Err(format!(
-                        "CF无可用URL: p={} f={} n={}",
-                        project_id, file_id, fname
-                    ));
+                    return download_cf_candidates(
+                        http,
+                        &urls,
+                        &dest,
+                        expected_sha1.as_deref(),
+                        cancel_name,
+                    );
                 }
             }
         } else {
@@ -166,104 +194,105 @@ pub fn cf_download_mod_cancelable(
         ((file_id / 1000).to_string(), (file_id % 1000).to_string())
     };
     let base_urls = vec![
-        format!("https://edge.forgecdn.net/files/{}/{}", p1, p2),
         format!("https://mediafilez.forgecdn.net/files/{}/{}", p1, p2),
+        format!("https://edge.forgecdn.net/files/{}/{}", p1, p2),
     ];
-    for base_url in &base_urls {
-        if is_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-        eprintln!("[cf] CDN盲猜: {} p={} f={}", base_url, project_id, file_id);
-        match http.get(base_url).send() {
-            Ok(mut resp) => {
-                if !resp.status().is_success() {
+    let mut last_err = String::new();
+    for round in 0..CF_DOWNLOAD_ROUNDS {
+        for base_url in &base_urls {
+            if is_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
+            eprintln!(
+                "[cf] CDN盲猜 {}/{}: {} p={} f={}",
+                round + 1,
+                CF_DOWNLOAD_ROUNDS,
+                base_url,
+                project_id,
+                file_id
+            );
+            match http.get(base_url).send() {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        last_err = format!("{} HTTP {}", base_url, resp.status());
+                        continue;
+                    }
+                    let final_url = resp.url().to_string();
+                    let filename = final_url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .split('?')
+                        .next()
+                        .unwrap_or("");
+                    let filename = percent_decode_simple(filename);
+                    let filename = if filename.is_empty() || filename == p2 {
+                        resp.headers()
+                            .get("content-disposition")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| {
+                                v.split("filename=")
+                                    .nth(1)
+                                    .or_else(|| v.split("filename*=UTF-8''").nth(1))
+                            })
+                            .map(|s| s.trim_matches('"').to_string())
+                            .unwrap_or_else(|| format!("{}-{}.jar", project_id, file_id))
+                    } else {
+                        filename.to_string()
+                    };
+                    let safe_filename = safe_path_name(&filename, "文件名")?;
+                    // 根据文件名判断目标目录（盲猜模式没有 API 数据，用空 JSON）
+                    let empty_json = serde_json::json!({});
+                    let (target_dir, file_type) =
+                        detect_target_dir(&empty_json, &safe_filename, inst_dir);
+                    std::fs::create_dir_all(&target_dir).ok();
+                    if file_type != "mod" {
+                        eprintln!(
+                            "[cf] CDN盲猜分类: {} → {} ({})",
+                            safe_filename,
+                            target_dir.display(),
+                            file_type
+                        );
+                    }
+                    let dest = target_dir.join(&safe_filename);
+                    match download_file_exact_once_with_stall_timeout(
+                        &final_url,
+                        &dest,
+                        None,
+                        cancel_name,
+                        CF_STALL_TIMEOUT_SECS,
+                        CF_TOTAL_TIMEOUT_SECS,
+                    ) {
+                        Ok(result) => {
+                            eprintln!("[cf] CDN成功: {}", filename);
+                            return Ok(result);
+                        }
+                        Err(e) => {
+                            last_err = format!("{}: {}", final_url, e);
+                            eprintln!("[cf] CDN失败: {}", last_err);
+                            let _ = std::fs::remove_file(&dest);
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_err = format!("{} - {}", base_url, e);
+                    eprintln!("[cf] CDN失败: {}", last_err);
                     continue;
                 }
-                let final_url = resp.url().to_string();
-                let filename = final_url
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                    .split('?')
-                    .next()
-                    .unwrap_or("");
-                let filename = percent_decode_simple(filename);
-                let filename = if filename.is_empty() || filename == p2 {
-                    resp.headers()
-                        .get("content-disposition")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| {
-                            v.split("filename=")
-                                .nth(1)
-                                .or_else(|| v.split("filename*=UTF-8''").nth(1))
-                        })
-                        .map(|s| s.trim_matches('"').to_string())
-                        .unwrap_or_else(|| format!("{}-{}.jar", project_id, file_id))
-                } else {
-                    filename.to_string()
-                };
-                let safe_filename = safe_path_name(&filename, "文件名")?;
-                // 根据文件名判断目标目录（盲猜模式没有 API 数据，用空 JSON）
-                let empty_json = serde_json::json!({});
-                let (target_dir, file_type) =
-                    detect_target_dir(&empty_json, &safe_filename, inst_dir);
-                std::fs::create_dir_all(&target_dir).ok();
-                if file_type != "mod" {
-                    eprintln!(
-                        "[cf] CDN盲猜分类: {} → {} ({})",
-                        safe_filename,
-                        target_dir.display(),
-                        file_type
-                    );
-                }
-                let dest = target_dir.join(&safe_filename);
-                let tmp_path = dest.with_extension("tmp");
-                let written = write_response_cancelable(&mut resp, &tmp_path, cancel_name)
-                    .map_err(|e| {
-                        let _ = std::fs::remove_file(&tmp_path);
-                        e
-                    })?;
-                std::fs::rename(&tmp_path, &dest).map_err(|e| format!("重命名失败: {}", e))?;
-                eprintln!("[cf] CDN成功: {} ({} bytes)", filename, written);
-                return Ok(true);
             }
-            Err(e) => {
-                eprintln!("[cf] CDN失败: {} - {}", base_url, e);
-                continue;
-            }
+        }
+        if round + 1 < CF_DOWNLOAD_ROUNDS {
+            std::thread::sleep(cf_retry_delay(&last_err));
         }
     }
     Err(format!(
-        "CurseForge下载失败: p={} f={}",
-        project_id, file_id
+        "CurseForge下载失败: p={} f={} ({})",
+        project_id, file_id, last_err
     ))
 }
 
 fn is_cancelled(cancel_name: Option<&str>) -> bool {
     cancel_name.is_some_and(crate::instance::is_cancelled)
-}
-
-fn write_response_cancelable(
-    resp: &mut reqwest::blocking::Response,
-    dest: &std::path::Path,
-    cancel_name: Option<&str>,
-) -> Result<u64, String> {
-    let mut file = std::fs::File::create(dest).map_err(|e| format!("创建文件失败: {}", e))?;
-    let mut written = 0u64;
-    let mut buf = [0u8; 128 * 1024];
-    loop {
-        if is_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-        let read = std::io::Read::read(resp, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
-        if read == 0 {
-            break;
-        }
-        std::io::Write::write_all(&mut file, &buf[..read])
-            .map_err(|e| format!("写入失败: {}", e))?;
-        written += read as u64;
-    }
-    Ok(written)
 }
 
 /// 简单的 URL percent-decode

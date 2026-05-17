@@ -1,11 +1,14 @@
 /* ============ 关于页 - 团队与链接 ============ */
 
 .about-mid-row {
-  display: flex; gap: 10px;
+  display: flex;
+  gap: 10px;
 }
 
 .about-team-card {
-  flex: 3;
+  flex: 0 0 calc((100% - 10px) * 0.6);
+  max-width: calc((100% - 10px) * 0.6);
+  min-width: 0;
   background: rgba(255,255,255,0.5);
   border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   border-radius: var(--radius-xl);
@@ -39,7 +42,14 @@
 .about-member-name { font-size: 10px; font-weight: 800; color: var(--pink-700); }
 .about-member-role { font-size: 8px; font-weight: 700; color: var(--pink-400); text-transform: uppercase; letter-spacing: 1px; }
 
-.about-links-card { flex: 2; display: flex; flex-direction: column; gap: 6px; }
+.about-links-card {
+  flex: 0 0 calc((100% - 10px) * 0.4);
+  max-width: calc((100% - 10px) * 0.4);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 .about-link-item {
   flex: 1;

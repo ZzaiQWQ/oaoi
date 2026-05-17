@@ -2,11 +2,12 @@ use super::cf_download::{cf_cdn_urls, cf_download_mod_cancelable};
 use super::{
     build_http_client, detect_target_dir, emit_progress, sanitize_name, ModpackKind, ModpackMeta,
 };
-use crate::installer::{download_file_if_needed_cancelable, mirror_url};
-use crate::instance::{cf_api_key, safe_join, safe_path_name};
-use crate::modpack_sources::{
-    save_source_entry, sha1_from_curseforge_hashes, SourceEntry,
+use crate::installer::{
+    download_file_exact_once_with_stall_timeout, empty_loader_json, merge_loader_install_result,
+    mirror_url,
 };
+use crate::instance::{cf_api_key, safe_join, safe_path_name};
+use crate::modpack_sources::{save_source_entry, sha1_from_curseforge_hashes, SourceEntry};
 
 #[derive(Clone)]
 struct ModpackDownloadTask {
@@ -14,6 +15,76 @@ struct ModpackDownloadTask {
     dest: std::path::PathBuf,
     sha1: Option<String>,
     source: Option<SourceEntry>,
+}
+
+const MODPACK_DOWNLOAD_WORKERS: usize = 32;
+const MODPACK_FILE_DOWNLOAD_ROUNDS: usize = 3;
+const MODPACK_FILE_RETRY_DELAY_SECS: u64 = 15;
+const MODPACK_FILE_STALL_TIMEOUT_SECS: u64 = 15;
+const MODPACK_FILE_TOTAL_TIMEOUT_SECS: u64 = 180;
+
+fn modpack_download_retry_delay(last_err: &str) -> std::time::Duration {
+    let lower = last_err.to_ascii_lowercase();
+    if last_err.contains("429")
+        || last_err.contains("超时")
+        || last_err.contains("下载过慢")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline")
+        || lower.contains("too slow")
+    {
+        std::time::Duration::from_secs(MODPACK_FILE_RETRY_DELAY_SECS)
+    } else {
+        std::time::Duration::from_millis(500)
+    }
+}
+
+fn download_modpack_file_with_rotation(
+    _http: &reqwest::blocking::Client,
+    urls: &[String],
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+    cancel_name: Option<&str>,
+) -> Result<bool, String> {
+    if urls.is_empty() {
+        return Err("没有可用下载地址".to_string());
+    }
+
+    let mut last_err = String::new();
+    for round in 0..MODPACK_FILE_DOWNLOAD_ROUNDS {
+        for url in urls {
+            if cancel_name.is_some_and(crate::instance::is_cancelled) {
+                return Err("用户取消下载".to_string());
+            }
+            eprintln!(
+                "[modpack] file try {}/{}: {}",
+                round + 1,
+                MODPACK_FILE_DOWNLOAD_ROUNDS,
+                url
+            );
+            match download_file_exact_once_with_stall_timeout(
+                url,
+                dest,
+                expected_sha1,
+                cancel_name,
+                MODPACK_FILE_STALL_TIMEOUT_SECS,
+                MODPACK_FILE_TOTAL_TIMEOUT_SECS,
+            ) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_err = format!("{}: {}", url, e);
+                    eprintln!("[modpack] file failed, rotate: {}", last_err);
+                    let _ = std::fs::remove_file(dest);
+                }
+            }
+        }
+
+        if round + 1 < MODPACK_FILE_DOWNLOAD_ROUNDS {
+            std::thread::sleep(modpack_download_retry_delay(&last_err));
+        }
+    }
+
+    Err(format!("所有下载地址均失败: {}", last_err))
 }
 
 pub fn do_install_modpack_inner(
@@ -94,17 +165,29 @@ pub fn do_install_modpack_inner(
 
     let emit = make_emitter(app, display_name);
 
-    // 基础游戏用 game_mirror（镜像优先），mod 下载用原始 use_mirror
-    let mut ver_json = vanilla::install_vanilla(
-        app,
-        display_name,
-        &meta.mc_version,
-        &meta_url,
-        game_dir,
-        inst_dir,
-        &http,
-        game_mirror,
-    )?;
+    // 基础游戏用 game_mirror（镜像优先），mod 下载用原始 use_mirror。
+    // 基础游戏下载放到后台，后面的整合包文件和 loader 会同时开始。
+    let vanilla_handle = {
+        let app = app.clone();
+        let display_name = display_name.to_string();
+        let mc_version = meta.mc_version.clone();
+        let meta_url = meta_url.clone();
+        let game_dir = game_dir.to_path_buf();
+        let inst_dir = inst_dir.to_path_buf();
+        let http = http.clone();
+        std::thread::spawn(move || {
+            vanilla::install_vanilla(
+                &app,
+                &display_name,
+                &mc_version,
+                &meta_url,
+                &game_dir,
+                &inst_dir,
+                &http,
+                game_mirror,
+            )
+        })
+    };
     if crate::instance::is_cancelled(display_name) {
         return Err("用户取消安装".to_string());
     }
@@ -317,7 +400,7 @@ pub fn do_install_modpack_inner(
                                                 resolved.push(ModpackDownloadTask {
                                                     urls,
                                                     dest,
-                                                    sha1: None,
+                                                    sha1: sha1.clone(),
                                                     source: Some(SourceEntry {
                                                         source: "curseforge".to_string(),
                                                         path: rel,
@@ -421,29 +504,31 @@ pub fn do_install_modpack_inner(
         );
     }
 
-    // 启动并行下载
-    let (sem_tx, sem_rx) = std::sync::mpsc::sync_channel::<()>(26);
-    for _ in 0..26 {
-        sem_tx.send(()).ok();
-    }
-    let sem_rx = std::sync::Arc::new(std::sync::Mutex::new(sem_rx));
-    let sem_tx = std::sync::Arc::new(sem_tx);
-    let mod_http = build_http_client(30, 300, 32)?;
+    // 启动固定 worker 队列下载，避免每个文件都创建线程。
+    let mod_http = build_http_client(30, 180, MODPACK_DOWNLOAD_WORKERS)?;
+    let tasks = std::sync::Arc::new(tasks);
+    let next_task = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_count = MODPACK_DOWNLOAD_WORKERS.min(tasks.len());
 
-    all_handles = tasks
-        .into_iter()
-        .map(|task| {
+    all_handles = (0..worker_count)
+        .map(|_| {
+            let tasks = tasks.clone();
+            let next_task = next_task.clone();
             let cats = categories.clone();
             let errors = mod_errors.clone();
             let h = mod_http.clone();
-            let sem_r = sem_rx.clone();
-            let sem_s = sem_tx.clone();
-            let category = classify_path(&task.dest).to_string();
             let cancel_name = display_name.to_string();
             let source_root = game_dir.to_path_buf();
             let source_instance = inst_name.clone();
-            std::thread::spawn(move || {
-                let _ = sem_r.lock().unwrap().recv();
+            std::thread::spawn(move || loop {
+                if crate::instance::is_cancelled(&cancel_name) {
+                    break;
+                }
+                let index = next_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(task) = tasks.get(index) else {
+                    break;
+                };
+                let category = classify_path(&task.dest).to_string();
                 let first_url = task.urls.first().cloned().unwrap_or_default();
                 let result = if crate::instance::is_cancelled(&cancel_name) {
                     Err("用户取消下载".to_string())
@@ -451,7 +536,8 @@ pub fn do_install_modpack_inner(
                     let parts: Vec<&str> = first_url.split(':').collect();
                     let project_id: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     let file_id: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let inst_dir_fallback = task.dest
+                    let inst_dir_fallback = task
+                        .dest
                         .parent()
                         .and_then(|p| p.parent())
                         .unwrap_or(std::path::Path::new("."));
@@ -466,38 +552,19 @@ pub fn do_install_modpack_inner(
                     if let Some(parent) = task.dest.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    let mut last_err = String::new();
-                    let mut done = None;
-                    for url in &task.urls {
-                        if crate::instance::is_cancelled(&cancel_name) {
-                            last_err = "用户取消下载".to_string();
-                            break;
-                        }
-                        eprintln!("[download] try: {}", url);
-                        match download_file_if_needed_cancelable(
-                            &h,
-                            url,
-                            &task.dest,
-                            task.sha1.as_deref(),
-                            false,
-                            Some(&cancel_name),
-                        ) {
-                            Ok(result) => {
-                                done = Some(result);
-                                break;
-                            }
-                            Err(e) => {
-                                last_err = format!("{}: {}", url, e);
-                                eprintln!("[download] failed, try next: {}", last_err);
-                                let _ = std::fs::remove_file(&task.dest);
-                            }
-                        }
-                    }
-                    done.map(Ok).unwrap_or_else(|| Err(last_err))
+                    download_modpack_file_with_rotation(
+                        &h,
+                        &task.urls,
+                        &task.dest,
+                        task.sha1.as_deref(),
+                        Some(&cancel_name),
+                    )
                 };
                 if result.is_ok() {
-                    if let Some(source) = task.source {
-                        if let Err(e) = save_source_entry(&source_root, &source_instance, source) {
+                    if let Some(source) = &task.source {
+                        if let Err(e) =
+                            save_source_entry(&source_root, &source_instance, source.clone())
+                        {
                             eprintln!("[modpack] save source metadata failed: {}", e);
                         }
                     }
@@ -510,7 +577,6 @@ pub fn do_install_modpack_inner(
                         .done
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                let _ = sem_s.send(());
             })
         })
         .collect();
@@ -546,109 +612,156 @@ pub fn do_install_modpack_inner(
         std::thread::sleep(std::time::Duration::from_millis(500));
     });
 
-    // ===== 安装 loader（同时 mod 在后台下载中） =====
-
-    // 自动解析 java 路径（当前端传入为空时从本地查找）
-    let resolved_java: String;
-    let mut java_error: Option<String> = None;
-    let effective_java = if !java_path.is_empty() {
-        java_path
+    // ===== 安装 loader（同时 vanilla 和 mod 文件都在后台下载中） =====
+    let loader_handle = if meta.loader_version.is_empty()
+        || !matches!(
+            meta.loader_type.as_str(),
+            "fabric" | "quilt" | "forge" | "neoforge"
+        ) {
+        None
     } else {
-        let required_major = super::get_required_java_major(&meta.mc_version);
-        let javas = crate::java_detect::find_java_blocking(Some(game_dir_input.to_string()));
-        if let Some(j) = javas.iter().find(|j| j.major == required_major) {
-            resolved_java = j.path.clone();
-            &resolved_java
-        } else {
-            emit_progress(
-                app,
-                display_name,
-                "java",
-                0,
-                1,
-                &format!("正在下载 Java {}...", required_major),
-            );
-            match crate::java_download::download_java_sync_cancelable(
-                required_major,
-                game_dir_input,
-                Some(display_name),
-            ) {
-                Ok(p) => {
-                    resolved_java = p;
+        let app = app.clone();
+        let display_name = display_name.to_string();
+        let mc_version = meta.mc_version.clone();
+        let loader_type = meta.loader_type.clone();
+        let loader_version = meta.loader_version.clone();
+        let game_dir_input = game_dir_input.to_string();
+        let java_path = java_path.to_string();
+        let game_dir = game_dir.to_path_buf();
+        let inst_dir = inst_dir.to_path_buf();
+        let http = http.clone();
+        Some(std::thread::spawn(move || {
+            let resolved_java: String;
+            let mut java_error: Option<String> = None;
+            let effective_java = if !java_path.is_empty() {
+                java_path.as_str()
+            } else {
+                let required_major = super::get_required_java_major(&mc_version);
+                let javas = crate::java_detect::find_java_blocking(Some(game_dir_input.clone()));
+                if let Some(j) = javas.iter().find(|j| j.major == required_major) {
+                    resolved_java = j.path.clone();
                     &resolved_java
+                } else {
+                    emit_progress(
+                        &app,
+                        &display_name,
+                        "java",
+                        0,
+                        1,
+                        &format!("正在下载 Java {}...", required_major),
+                    );
+                    match crate::java_download::download_java_sync_cancelable(
+                        required_major,
+                        &game_dir_input,
+                        Some(&display_name),
+                    ) {
+                        Ok(p) => {
+                            resolved_java = p;
+                            &resolved_java
+                        }
+                        Err(e) => {
+                            java_error = Some(format!(
+                                "找不到 Java {}，自动下载失败: {}",
+                                required_major, e
+                            ));
+                            let _ = crate::instance::cancel_modpack_install(display_name.clone());
+                            resolved_java = String::new();
+                            &resolved_java
+                        }
+                    }
                 }
-                Err(e) => {
-                    java_error = Some(format!(
-                        "找不到 Java {}，自动下载失败: {}",
-                        required_major, e
-                    ));
-                    let _ = crate::instance::cancel_modpack_install(display_name.to_string());
-                    resolved_java = String::new();
-                    &resolved_java
-                }
+            };
+
+            if let Some(e) = java_error {
+                return Err(e);
             }
-        }
-    };
 
-    // 安装 loader（失败时先记录错误，等下载线程结束后再返回）
-    let loader_result: Result<(), String> = if let Some(e) = java_error {
-        Err(e)
-    } else {
-        match meta.loader_type.as_str() {
-            "fabric" if !meta.loader_version.is_empty() => fabric::install_fabric(
-                app,
-                display_name,
-                &meta.mc_version,
-                &meta.loader_version,
-                game_dir,
-                inst_dir,
-                &http,
-                game_mirror,
-                &mut ver_json,
-                false,
-            ),
-            "quilt" if !meta.loader_version.is_empty() => quilt::install_quilt(
-                app,
-                display_name,
-                &meta.mc_version,
-                &meta.loader_version,
-                game_dir,
-                inst_dir,
-                &http,
-                game_mirror,
-                &mut ver_json,
-            ),
-            "forge" if !meta.loader_version.is_empty() => forge::install_forge(
-                app,
-                display_name,
-                &meta.mc_version,
-                &meta.loader_version,
-                game_dir,
-                inst_dir,
-                &http,
-                effective_java,
-                game_mirror,
-                &mut ver_json,
-            ),
-            "neoforge" if !meta.loader_version.is_empty() => neoforge::install_neoforge(
-                app,
-                display_name,
-                &meta.mc_version,
-                &meta.loader_version,
-                game_dir,
-                inst_dir,
-                &http,
-                effective_java,
-                game_mirror,
-                &mut ver_json,
-            ),
-            _ => Ok(()),
-        }
+            let mut loader_json = empty_loader_json();
+            match loader_type.as_str() {
+                "fabric" => fabric::install_fabric(
+                    &app,
+                    &display_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    game_mirror,
+                    &mut loader_json,
+                    false,
+                )?,
+                "quilt" => quilt::install_quilt(
+                    &app,
+                    &display_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    game_mirror,
+                    &mut loader_json,
+                )?,
+                "forge" => forge::install_forge(
+                    &app,
+                    &display_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    effective_java,
+                    game_mirror,
+                    &mut loader_json,
+                )?,
+                "neoforge" => neoforge::install_neoforge(
+                    &app,
+                    &display_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    effective_java,
+                    game_mirror,
+                    &mut loader_json,
+                )?,
+                _ => {}
+            }
+            Ok(loader_json)
+        }))
     };
 
     // 注意: instance.json 的写入移到最后（推荐内存计算后一次性写入）
 
-    // ===== 等待所有文件下载完成 =====
+    // ===== 等待三条下载线完成 =====
+    let mut ver_json = match vanilla_handle.join() {
+        Ok(Ok(ver_json)) => ver_json,
+        Ok(Err(e)) => {
+            let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+            for h in all_handles {
+                let _ = h.join();
+            }
+            progress_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = progress_thread.join();
+            if let Some(handle) = loader_handle {
+                let _ = handle.join();
+            }
+            return Err(e);
+        }
+        Err(_) => {
+            let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+            for h in all_handles {
+                let _ = h.join();
+            }
+            progress_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = progress_thread.join();
+            if let Some(handle) = loader_handle {
+                let _ = handle.join();
+            }
+            return Err("基础游戏安装线程异常退出".to_string());
+        }
+    };
+
     for h in all_handles {
         let _ = h.join();
     }
@@ -656,8 +769,14 @@ pub fn do_install_modpack_inner(
     progress_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = progress_thread.join();
 
-    // loader 安装失败则在线程清理后返回错误
-    loader_result?;
+    if let Some(handle) = loader_handle {
+        let loader_json = match handle.join() {
+            Ok(Ok(loader_json)) => loader_json,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err("Loader 安装线程异常退出".to_string()),
+        };
+        merge_loader_install_result(&mut ver_json, &loader_json);
+    }
     if crate::instance::is_cancelled(display_name) {
         return Err("用户取消安装".to_string());
     }
