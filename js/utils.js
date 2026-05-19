@@ -1,5 +1,69 @@
 // ============ 全局共享工具函数 ============
 
+const OAOI_DEFAULT_JVM_ARGS = [
+  '-XX:+UnlockExperimentalVMOptions',
+  '-XX:+UseG1GC',
+  '-XX:G1NewSizePercent=20',
+  '-XX:G1ReservePercent=20',
+  '-XX:MaxGCPauseMillis=50',
+  '-XX:G1HeapRegionSize=32M',
+  '-XX:-OmitStackTraceInFastThrow',
+  '-Dfml.ignoreInvalidMinecraftCertificates=True',
+  '-Dfml.ignorePatchDiscrepancies=True',
+].join(' ');
+
+const OAOI_COMPAT_JVM_ARGS = [
+  '-XX:+UseG1GC',
+  '-XX:-UseAdaptiveSizePolicy',
+  '-XX:-OmitStackTraceInFastThrow',
+  '-Dfml.ignoreInvalidMinecraftCertificates=True',
+  '-Dfml.ignorePatchDiscrepancies=True',
+].join(' ');
+
+const OAOI_JVM_PRESETS = {
+  recommended: {
+    name: '推荐',
+    description: '适合大多数版本和整合包',
+    args: OAOI_DEFAULT_JVM_ARGS,
+  },
+  compat: {
+    name: '兼容',
+    description: '参数更保守，适合老 Forge 或特殊整合包',
+    args: OAOI_COMPAT_JVM_ARGS,
+  },
+  clean: {
+    name: '纯净',
+    description: '不添加额外 JVM 参数，适合排查问题',
+    args: '',
+  },
+  custom: {
+    name: '自定义',
+    description: '使用你手动编辑的 JVM 参数',
+    args: '',
+  },
+};
+
+function getGlobalJvmArgs() {
+  if (localStorage.getItem('customJvmArgs') === null) {
+    localStorage.setItem('customJvmArgs', OAOI_DEFAULT_JVM_ARGS);
+    localStorage.setItem('jvmArgsPreset', 'recommended');
+  }
+  return localStorage.getItem('customJvmArgs') || '';
+}
+
+function getJvmArgsPreset() {
+  const preset = localStorage.getItem('jvmArgsPreset') || 'recommended';
+  return OAOI_JVM_PRESETS[preset] ? preset : 'custom';
+}
+
+function getJvmArgsPresetByValue(value) {
+  const normalized = String(value || '').trim();
+  for (const key of ['recommended', 'compat', 'clean']) {
+    if ((OAOI_JVM_PRESETS[key].args || '').trim() === normalized) return key;
+  }
+  return 'custom';
+}
+
 /**
  * HTML 转义，防止 XSS
  */

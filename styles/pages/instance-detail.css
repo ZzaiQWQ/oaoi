@@ -464,20 +464,13 @@
   white-space: nowrap;
 }
 
-.instance-settings-panel {
-  background: rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(var(--blur-radius, 16px));
-  border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
-  border-radius: 14px;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-}
-
 .instance-settings-grid {
   display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(130px, 0.8fr) minmax(180px, 1.5fr);
+  grid-template-columns: minmax(140px, 0.8fr) minmax(160px, 1fr);
   gap: 10px;
   align-items: end;
+  flex: 1;
+  min-height: 0;
 }
 
 .instance-setting-field {
@@ -522,6 +515,52 @@
   gap: 6px;
 }
 
+.instance-jvm-preset-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.instance-jvm-preset {
+  height: 30px;
+  padding: 0 8px;
+  border: 1.5px solid rgba(255, 128, 170, 0.32);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--pink-700);
+  font-size: 11px;
+  font-weight: 800;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.instance-jvm-preset.active {
+  color: white;
+  border-color: transparent;
+  background: var(--rose-gradient);
+}
+
+.instance-jvm-args-textarea {
+  width: 100%;
+  height: 104px;
+  resize: none;
+  border: 1.5px solid rgba(245, 67, 128, 0.72);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-dark);
+  font-size: 12px;
+  line-height: 1.55;
+  font-family: Consolas, "Courier New", monospace;
+  outline: none;
+  padding: 10px 12px;
+}
+
+.instance-jvm-args-textarea:focus {
+  border-color: var(--pink-500);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink-300) 22%, transparent);
+}
+
 .instance-path-row button,
 .instance-settings-actions button {
   height: 30px;
@@ -547,10 +586,115 @@
   margin-top: 10px;
 }
 
+.instance-settings-modal .modal-content {
+  pointer-events: auto;
+  width: min(620px, calc(100vw - 72px));
+  height: min(430px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97));
+  border: 1px solid rgba(255, 128, 170, 0.34);
+  border-radius: 18px;
+  box-shadow: 0 18px 42px rgba(132, 52, 83, 0.16);
+  overflow: hidden;
+}
+
+.instance-settings-modal {
+  z-index: 10030;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.instance-settings-modal.hidden {
+  display: none !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.instance-settings-modal .modal-header {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.instance-settings-modal .modal-header h2 {
+  display: none;
+}
+
+.instance-settings-modal .modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 34px 22px 76px;
+  overflow: hidden;
+}
+
+.instance-settings-modal .modal-close {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #f47ca3;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.instance-settings-modal .instance-settings-actions {
+  position: absolute;
+  right: 22px;
+  bottom: 16px;
+  z-index: 3;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+}
+
 #instanceSettingsSave {
   color: white;
   border-color: transparent;
   background: var(--rose-gradient);
+}
+
+.instance-mod-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 0 8px;
+}
+
+.instance-mod-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--pink-700);
+}
+
+.instance-mod-header p {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-light);
 }
 
 #instanceSettingsHint {

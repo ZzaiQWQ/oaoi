@@ -8,6 +8,7 @@ let modListLoadSeq = 0;
 let modListRenderSeq = 0;
 let modUrlLookupSeq = 0;
 let modUrlLookupTimer = null;
+let instanceSettingsModal = null;
 const modpackExportTask = {
   running: false,
   name: '',
@@ -42,7 +43,7 @@ function showInstanceDetail(instanceName) {
       instance.loader_type.charAt(0).toUpperCase() + instance.loader_type.slice(1);
   document.getElementById('instanceDetailLoaderVer').textContent =
     instance.loader_version || '-';
-  loadInstanceSettings();
+  updateInstanceSettingsSummary();
 
   // 切换到详情页
   const pages = document.querySelectorAll('.page');
@@ -89,6 +90,153 @@ function instanceSettingKey(prefix) {
   return `${prefix}_${currentDetailInstance}`;
 }
 
+function updateInstanceSettingsSummary() {
+  if (!currentDetailInstance) return;
+  const summary = document.getElementById('instanceConfigBtn');
+  if (!summary) return;
+  const parts = [];
+  const mem = localStorage.getItem(instanceSettingKey('mem'));
+  const javaMode = localStorage.getItem(instanceSettingKey('javaMode'));
+  const jvmPreset = getInstanceJvmPresetKey();
+  if (mem) parts.push(`${mem} MB`);
+  if (javaMode && javaMode !== 'global') parts.push(javaMode === 'auto' ? '自动 Java' : '指定 Java');
+  if (jvmPreset === 'clean') parts.push('纯净 JVM');
+  else if (jvmPreset !== 'global') parts.push('自定义 JVM');
+  summary.textContent = parts.length ? `参数设置 (${parts.join(' · ')})` : '参数设置';
+}
+
+function getInstanceJvmPresetKey() {
+  if (!currentDetailInstance) return 'global';
+  const saved = localStorage.getItem(instanceSettingKey('jvmPreset'));
+  if (saved && (saved === 'global' || OAOI_JVM_PRESETS?.[saved])) return saved;
+  const value = localStorage.getItem(instanceSettingKey('jvmArgs'));
+  if (value === null) return 'global';
+  return typeof getJvmArgsPresetByValue === 'function'
+    ? getJvmArgsPresetByValue(value)
+    : 'custom';
+}
+
+function updateInstanceJvmPresetUI() {
+  const row = document.getElementById('instanceJvmPresetRow');
+  const input = document.getElementById('instanceJvmArgsInput');
+  if (!row || !input) return;
+  const preset = getInstanceJvmPresetKey();
+  row.querySelectorAll('.instance-jvm-preset').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.preset === preset);
+  });
+  input.disabled = preset === 'global' || preset === 'clean';
+  input.placeholder = preset === 'global'
+    ? '跟随全局 JVM 参数'
+    : preset === 'clean'
+      ? '纯净模式：不添加额外 JVM 参数'
+      : '可继续编辑，编辑后变为自定义';
+}
+
+function setInstanceJvmPreset(preset) {
+  const input = document.getElementById('instanceJvmArgsInput');
+  if (!input) return;
+  localStorage.setItem(instanceSettingKey('jvmPreset'), preset);
+  if (preset === 'global') {
+    input.value = '';
+  } else if (preset === 'clean') {
+    input.value = '';
+  } else if (preset !== 'custom' && OAOI_JVM_PRESETS?.[preset]) {
+    input.value = OAOI_JVM_PRESETS[preset].args || '';
+  }
+  updateInstanceJvmPresetUI();
+}
+
+function ensureInstanceSettingsModal() {
+  if (instanceSettingsModal) return instanceSettingsModal;
+  const modal = document.createElement('div');
+  modal.id = 'instanceSettingsModal';
+  modal.className = 'modal-overlay hidden instance-settings-modal';
+  modal.innerHTML = `
+    <div class="modal-content" data-no-drag>
+      <div class="modal-header">
+        <h2>参数设置</h2>
+        <button class="modal-close" id="instanceSettingsModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="instance-settings-grid">
+          <label class="instance-setting-field">
+            <span>内存 MB</span>
+            <input type="number" id="instanceMemInput" min="512" step="512" placeholder="跟随默认">
+          </label>
+          <label class="instance-setting-field">
+            <span>Java</span>
+            <select id="instanceJavaMode">
+              <option value="global">跟随全局</option>
+              <option value="auto">自动匹配</option>
+              <option value="manual">指定路径</option>
+            </select>
+          </label>
+          <label class="instance-setting-field instance-setting-wide" id="instanceJavaPathRow">
+            <span>Java 路径</span>
+            <div class="instance-path-row">
+              <input type="text" id="instanceJavaPathInput" placeholder="留空则使用全局 Java 路径">
+              <button type="button" id="instanceUseGlobalJavaBtn">使用全局</button>
+            </div>
+          </label>
+          <label class="instance-setting-field instance-setting-wide">
+            <span>JVM 参数</span>
+            <div class="instance-jvm-preset-row" id="instanceJvmPresetRow">
+              <button type="button" class="instance-jvm-preset active" data-preset="global">跟随全局</button>
+              <button type="button" class="instance-jvm-preset" data-preset="recommended">推荐</button>
+              <button type="button" class="instance-jvm-preset" data-preset="compat">兼容</button>
+              <button type="button" class="instance-jvm-preset" data-preset="clean">纯净</button>
+              <button type="button" class="instance-jvm-preset" data-preset="custom">自定义</button>
+            </div>
+            <textarea id="instanceJvmArgsInput" class="instance-jvm-args-textarea" spellcheck="false" placeholder="留空则跟随全局 JVM 参数"></textarea>
+          </label>
+        </div>
+        <div class="instance-settings-actions">
+          <button type="button" id="instanceSettingsSave">保存设置</button>
+          <button type="button" id="instanceSettingsReset">恢复默认</button>
+          <span id="instanceSettingsHint"></span>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  instanceSettingsModal = modal;
+
+  const close = () => {
+    modal.classList.add('hidden');
+    modal.style.display = 'none';
+  };
+  modal.querySelector('#instanceSettingsModalClose')?.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  modal.querySelector('#instanceJavaMode')?.addEventListener('change', updateInstanceJavaPathState);
+  modal.querySelector('#instanceUseGlobalJavaBtn')?.addEventListener('click', () => {
+    const input = modal.querySelector('#instanceJavaPathInput');
+    if (input) input.value = localStorage.getItem('selectedJavaPath') || '';
+  });
+  modal.querySelector('#instanceSettingsSave')?.addEventListener('click', saveInstanceSettings);
+  modal.querySelector('#instanceSettingsReset')?.addEventListener('click', resetInstanceSettings);
+  modal.querySelectorAll('.instance-jvm-preset').forEach(btn => {
+    btn.addEventListener('click', () => setInstanceJvmPreset(btn.dataset.preset));
+  });
+  modal.querySelector('#instanceJvmArgsInput')?.addEventListener('input', () => {
+    const value = modal.querySelector('#instanceJvmArgsInput')?.value || '';
+    const preset = typeof getJvmArgsPresetByValue === 'function'
+      ? getJvmArgsPresetByValue(value)
+      : 'custom';
+    localStorage.setItem(instanceSettingKey('jvmPreset'), preset);
+    updateInstanceJvmPresetUI();
+  });
+  return modal;
+}
+
+function showInstanceSettingsModal() {
+  const modal = ensureInstanceSettingsModal();
+  loadInstanceSettings();
+  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
+}
+
 function updateInstanceJavaPathState() {
   const mode = document.getElementById('instanceJavaMode')?.value || 'global';
   const pathInput = document.getElementById('instanceJavaPathInput');
@@ -124,7 +272,9 @@ function loadInstanceSettings() {
   if (hint) {
     hint.textContent = `留空会使用${fallbackText}，其它项跟随全局`;
   }
+  updateInstanceSettingsSummary();
   updateInstanceJavaPathState();
+  updateInstanceJvmPresetUI();
 }
 
 function saveInstanceSettings() {
@@ -148,21 +298,35 @@ function saveInstanceSettings() {
   else localStorage.removeItem(instanceSettingKey('javaPath'));
 
   const jvmValue = (jvmArgs?.value || '').trim();
-  if (jvmValue) localStorage.setItem(instanceSettingKey('jvmArgs'), jvmValue);
-  else localStorage.removeItem(instanceSettingKey('jvmArgs'));
+  const jvmPreset = getInstanceJvmPresetKey();
+  if (jvmPreset === 'global') {
+    localStorage.removeItem(instanceSettingKey('jvmArgs'));
+    localStorage.removeItem(instanceSettingKey('jvmPreset'));
+  } else if (jvmPreset === 'clean') {
+    localStorage.setItem(instanceSettingKey('jvmArgs'), '');
+    localStorage.setItem(instanceSettingKey('jvmPreset'), 'clean');
+  } else {
+    localStorage.setItem(instanceSettingKey('jvmArgs'), jvmValue);
+    const resolvedPreset = typeof getJvmArgsPresetByValue === 'function'
+      ? getJvmArgsPresetByValue(jvmValue)
+      : 'custom';
+    localStorage.setItem(instanceSettingKey('jvmPreset'), resolvedPreset);
+  }
 
   if (hint) {
     hint.textContent = '已保存';
     setTimeout(() => { if (hint) hint.textContent = '留空则使用全局设置'; }, 1800);
   }
+  updateInstanceSettingsSummary();
 }
 
 function resetInstanceSettings() {
   if (!currentDetailInstance) return;
-  ['mem', 'javaMode', 'javaPath', 'jvmArgs'].forEach(prefix => {
+  ['mem', 'javaMode', 'javaPath', 'jvmArgs', 'jvmPreset'].forEach(prefix => {
     localStorage.removeItem(instanceSettingKey(prefix));
   });
   loadInstanceSettings();
+  updateInstanceSettingsSummary();
   const hint = document.getElementById('instanceSettingsHint');
   if (hint) {
     hint.textContent = '已恢复默认';
@@ -1145,8 +1309,7 @@ function initInstanceDetailPage() {
     const input = document.getElementById('instanceJavaPathInput');
     if (input) input.value = localStorage.getItem('selectedJavaPath') || '';
   });
-  document.getElementById('instanceSettingsSave')?.addEventListener('click', saveInstanceSettings);
-  document.getElementById('instanceSettingsReset')?.addEventListener('click', resetInstanceSettings);
+  document.getElementById('instanceConfigBtn')?.addEventListener('click', showInstanceSettingsModal);
 
   // 在线搜索
   document.getElementById('onlineModSearchBtn')?.addEventListener('click', searchOnlineMods);

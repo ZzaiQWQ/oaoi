@@ -811,9 +811,12 @@ function initLaunchButton() {
         updateLaunchRepairModal(selectedVersion, d);
       });
       const instanceJvmArgs = localStorage.getItem(`jvmArgs_${selectedVersion}`);
+      const globalJvmArgs = typeof getGlobalJvmArgs === 'function'
+        ? getGlobalJvmArgs()
+        : (localStorage.getItem('customJvmArgs') || '');
       const customJvmArgs = instanceJvmArgs !== null
         ? instanceJvmArgs
-        : (localStorage.getItem('customJvmArgs') || null);
+        : (globalJvmArgs || null);
       let result;
       try {
         result = await tauri.core.invoke('launch_minecraft', {

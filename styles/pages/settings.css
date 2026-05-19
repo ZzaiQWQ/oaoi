@@ -66,9 +66,9 @@
 /* Java 模式切换 */
 .java-mode-toggle { display: flex; gap: 6px; margin: 4px 0; }
 .java-mode-btn {
-  padding: 6px 16px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
+  padding: 5px 13px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
   border-radius: 18px; background: rgba(255,255,255,0.5);
-  color: var(--text-mid); font-size: 12px; font-weight: 700;
+  color: var(--text-mid); font-size: 11px; font-weight: 700;
   cursor: pointer; transition: all 0.2s ease; font-family: inherit;
 }
 .java-mode-btn:hover { border-color: color-mix(in srgb, var(--pink-500) 50%, transparent); }

@@ -610,10 +610,6 @@ fn do_launch_minecraft(
             bytes[12], bytes[13], bytes[14], bytes[15])
     };
 
-    // 检测 Java 版本以选择最佳 GC
-    let java_major = detect_java_major(&options.java_path);
-    eprintln!("[launch] 检测到 Java 版本: {}", java_major);
-
     // 构建启动参数
     let xms = std::cmp::max(512, (options.memory_mb as f32 * 0.75) as u32);
     let mut args: Vec<String> = vec![
@@ -622,20 +618,6 @@ fn do_launch_minecraft(
         format!("-Djava.library.path={}", natives_dir.to_string_lossy()),
         "-Dlog4j2.formatMsgNoLookups=true".to_string(),
     ];
-
-    // 根据 Java 版本自动选 GC
-    if java_major >= 21 {
-        // Java 21+: 使用 ZGC（低延迟）
-        args.push("-XX:+UseZGC".to_string());
-        eprintln!("[launch] GC: ZGC (Java {})", java_major);
-    } else {
-        // Java 8/17: 使用 G1GC
-        args.push("-XX:+UnlockExperimentalVMOptions".to_string());
-        args.push("-XX:+UseG1GC".to_string());
-        args.push("-XX:+ParallelRefProcEnabled".to_string());
-        args.push("-XX:MaxGCPauseMillis=200".to_string());
-        eprintln!("[launch] GC: G1GC (Java {})", java_major);
-    }
 
     // 注入用户自定义 JVM 参数
     if let Some(ref custom) = options.custom_jvm_args {
@@ -998,38 +980,6 @@ fn do_launch_minecraft(
         "游戏已启动 (PID: {}), 版本: {}, 库: {}/{}",
         pid, version_name, cp_len, total_libs
     ))
-}
-
-/// 检测 Java 主版本号（如 8, 17, 21, 25）
-fn detect_java_major(java_path: &str) -> u32 {
-    let output = std::process::Command::new(java_path)
-        .arg("-version")
-        .creation_flags(0x08000000)
-        .output();
-    let Ok(out) = output else {
-        return 8;
-    };
-    // java -version 输出到 stderr
-    let ver_str = String::from_utf8_lossy(&out.stderr);
-    // 匹配 "1.8.0" 或 "17.0.1" 或 "25.0.1" 等
-    for line in ver_str.lines() {
-        if let Some(start) = line.find('"') {
-            if let Some(end) = line[start + 1..].find('"') {
-                let ver = &line[start + 1..start + 1 + end];
-                let parts: Vec<&str> = ver.split('.').collect();
-                if let Some(first) = parts.first() {
-                    if let Ok(major) = first.parse::<u32>() {
-                        // "1.8.0" → 8, "17.0.1" → 17
-                        if major == 1 && parts.len() > 1 {
-                            return parts[1].parse().unwrap_or(8);
-                        }
-                        return major;
-                    }
-                }
-            }
-        }
-    }
-    8 // 默认 Java 8
 }
 
 /// 读取最新的 crash-report 文件内容（如果存在且是最近 2 分钟内的）

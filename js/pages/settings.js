@@ -1,13 +1,161 @@
+function getCurrentJvmPresetInfo() {
+  const args = typeof getGlobalJvmArgs === 'function'
+    ? getGlobalJvmArgs()
+    : (localStorage.getItem('customJvmArgs') || '');
+  let preset = localStorage.getItem('jvmArgsPreset') || '';
+  if (!preset || !OAOI_JVM_PRESETS?.[preset]) {
+    preset = typeof getJvmArgsPresetByValue === 'function'
+      ? getJvmArgsPresetByValue(args)
+      : 'custom';
+    localStorage.setItem('jvmArgsPreset', preset);
+  }
+  const info = OAOI_JVM_PRESETS[preset] || OAOI_JVM_PRESETS.custom;
+  const count = args.trim() ? args.trim().split(/\s+/).length : 0;
+  return { preset, args, count, info };
+}
+
+function updateJvmSummary() {
+  const title = document.getElementById('jvmSummaryTitle');
+  const desc = document.getElementById('jvmSummaryDesc');
+  if (!title || !desc || typeof OAOI_JVM_PRESETS !== 'object') return;
+  const { preset, count, info } = getCurrentJvmPresetInfo();
+  title.textContent = `${info.name}模式 · ${count} 个参数`;
+  desc.textContent = preset === 'custom'
+    ? (count > 0 ? '使用手动编辑的 JVM 参数' : '不添加额外 JVM 参数')
+    : info.description;
+}
+
+function ensureJvmArgsModal() {
+  let modal = document.getElementById('jvmArgsModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'jvmArgsModal';
+  modal.className = 'jvm-modal-overlay hidden';
+  modal.innerHTML = `
+    <div class="jvm-modal" data-no-drag>
+      <div class="jvm-modal-header">
+        <div>
+          <h3>JVM 参数设置</h3>
+          <p id="jvmPresetHelp">推荐：适合大多数版本和整合包</p>
+        </div>
+        <button type="button" class="jvm-modal-close" id="jvmModalClose">×</button>
+      </div>
+      <div class="jvm-modal-body">
+        <div class="jvm-preset-row" id="jvmPresetRow">
+          <button type="button" class="jvm-preset-btn" data-preset="recommended">推荐</button>
+          <button type="button" class="jvm-preset-btn" data-preset="compat">兼容</button>
+          <button type="button" class="jvm-preset-btn" data-preset="clean">纯净</button>
+          <button type="button" class="jvm-preset-btn" data-preset="custom">自定义</button>
+        </div>
+        <textarea id="jvmArgsTextarea" class="jvm-args-textarea" spellcheck="false"></textarea>
+      </div>
+      <div class="jvm-modal-footer">
+        <button type="button" class="jvm-secondary-btn" id="jvmResetBtn">恢复推荐</button>
+        <div class="jvm-footer-spacer"></div>
+        <button type="button" class="jvm-secondary-btn" id="jvmCancelBtn">取消</button>
+        <button type="button" class="jvm-save-btn" id="jvmSaveBtn">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function openJvmArgsModal() {
+  if (typeof OAOI_JVM_PRESETS !== 'object') return;
+  const modal = ensureJvmArgsModal();
+  const textarea = modal.querySelector('#jvmArgsTextarea');
+  const help = modal.querySelector('#jvmPresetHelp');
+  const presetButtons = Array.from(modal.querySelectorAll('.jvm-preset-btn'));
+  const state = getCurrentJvmPresetInfo();
+  let selectedPreset = state.preset;
+  textarea.value = state.args;
+
+  function syncPresetUI() {
+    const info = OAOI_JVM_PRESETS[selectedPreset] || OAOI_JVM_PRESETS.custom;
+    presetButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.preset === selectedPreset));
+    help.textContent = `${info.name}：${info.description}`;
+  }
+
+  function setPreset(preset) {
+    selectedPreset = preset;
+    if (preset !== 'custom') textarea.value = OAOI_JVM_PRESETS[preset].args;
+    syncPresetUI();
+  }
+
+  presetButtons.forEach(btn => {
+    btn.onclick = () => setPreset(btn.dataset.preset);
+  });
+
+  textarea.oninput = () => {
+    selectedPreset = getJvmArgsPresetByValue(textarea.value);
+    syncPresetUI();
+  };
+
+  const close = () => {
+    modal.classList.add('hidden');
+    modal.style.display = 'none';
+  };
+  modal.querySelector('#jvmModalClose').onclick = close;
+  modal.querySelector('#jvmCancelBtn').onclick = close;
+  modal.querySelector('#jvmResetBtn').onclick = () => setPreset('recommended');
+  modal.querySelector('#jvmSaveBtn').onclick = () => {
+    const value = textarea.value.trim();
+    const preset = selectedPreset === 'custom' ? getJvmArgsPresetByValue(value) : selectedPreset;
+    localStorage.setItem('customJvmArgs', value);
+    localStorage.setItem('jvmArgsPreset', preset);
+    updateJvmSummary();
+    close();
+  };
+  modal.onclick = (e) => {
+    if (e.target === modal) close();
+  };
+  syncPresetUI();
+  modal.style.display = 'flex';
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => textarea.focus());
+}
+
+function initJvmArgsSettings() {
+  if (typeof getGlobalJvmArgs === 'function') getGlobalJvmArgs();
+  updateJvmSummary();
+  document.getElementById('jvmEditBtn')?.addEventListener('click', openJvmArgsModal);
+  document.getElementById('jvmSummaryCard')?.addEventListener('dblclick', openJvmArgsModal);
+}
+
 // ============ 设置页交互 ============
 function initSettings() {
   // 游戏目录选择
   const gameDirDisplay = document.getElementById('gameDirDisplay');
   const gameDirBtn = document.getElementById('gameDirBtn');
+  const gameDirToggle = document.getElementById('gameDirToggle');
+  const gameDirPanel = document.getElementById('gameDirPanel');
+  const gameDirSummary = document.getElementById('gameDirSummary');
   const cachedGameDir = localStorage.getItem('gameDir');
+
+  function updateGameDirSummary(value) {
+    if (!gameDirSummary) return;
+    if (!value) {
+      gameDirSummary.textContent = '未选择';
+      return;
+    }
+    const parts = value.split(/[\\/]/).filter(Boolean);
+    gameDirSummary.textContent = parts.slice(-2).join('\\') || value;
+    gameDirSummary.title = value;
+  }
 
   if (cachedGameDir && gameDirDisplay) {
     gameDirDisplay.textContent = cachedGameDir;
     gameDirDisplay.title = cachedGameDir;
+  }
+  updateGameDirSummary(cachedGameDir);
+
+  if (gameDirToggle && gameDirPanel) {
+    gameDirPanel.classList.remove('open');
+    gameDirToggle.addEventListener('click', () => {
+      gameDirPanel.classList.toggle('open');
+      gameDirToggle.classList.toggle('open', gameDirPanel.classList.contains('open'));
+    });
   }
 
   if (gameDirBtn && gameDirDisplay) {
@@ -23,6 +171,7 @@ function initSettings() {
           gameDirDisplay.textContent = gameDir;
           gameDirDisplay.title = gameDir;
           localStorage.setItem('gameDir', gameDir);
+          updateGameDirSummary(gameDir);
           console.log('📁 游戏目录:', gameDir);
         }
       } catch (e) {
@@ -374,14 +523,7 @@ function initSettings() {
       }
     })();
   }
-  // 自定义 JVM 参数
-  const jvmArgsInput = document.getElementById('customJvmArgs');
-  if (jvmArgsInput) {
-    jvmArgsInput.value = localStorage.getItem('customJvmArgs') || '';
-    jvmArgsInput.addEventListener('input', () => {
-      localStorage.setItem('customJvmArgs', jvmArgsInput.value);
-    });
-  }
+  initJvmArgsSettings();
 
   // Java 模式切换（自动/手动）
   const javaModeAuto = document.getElementById('javaModeAuto');

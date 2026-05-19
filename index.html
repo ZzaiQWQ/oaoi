@@ -402,10 +402,16 @@
                 <!-- 性能分配内容 -->
                 <div class="set-tab-content" id="setTabPerf">
                   <div class="set-field">
-                    <label>游戏目录 (Game Directory)</label>
-                    <div class="set-path-row">
-                      <div class="set-path-input" id="gameDirDisplay">未选择目录</div>
-                      <button class="set-browse-btn" id="gameDirBtn">选择目录</button>
+                    <button type="button" class="setting-collapse-toggle" id="gameDirToggle">
+                      <span>游戏目录 (Game Directory)</span>
+                      <span class="setting-collapse-summary" id="gameDirSummary">未选择</span>
+                      <span class="setting-collapse-arrow">›</span>
+                    </button>
+                    <div class="setting-collapse-panel" id="gameDirPanel">
+                      <div class="set-path-row">
+                        <div class="set-path-input" id="gameDirDisplay">未选择目录</div>
+                        <button class="set-browse-btn" id="gameDirBtn">选择目录</button>
+                      </div>
                     </div>
                   </div>
                   <div class="set-divider"></div>
@@ -430,9 +436,13 @@
                   <div class="set-divider"></div>
                   <div class="set-field">
                     <label>自定义 JVM 参数 (Custom JVM Arguments)</label>
-                    <input type="text" class="set-text-input" id="customJvmArgs"
-                      placeholder="例如: -XX:+AlwaysPreTouch -Dfml.readTimeout=120"
-                      style="width:100%;padding:5px 10px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:11px;font-family:inherit;color:var(--text-dark);outline:none;">
+                    <div class="jvm-summary-card" id="jvmSummaryCard">
+                      <div class="jvm-summary-main">
+                        <div class="jvm-summary-title" id="jvmSummaryTitle">推荐模式</div>
+                        <div class="jvm-summary-desc" id="jvmSummaryDesc">适合大多数版本和整合包</div>
+                      </div>
+                      <button type="button" class="set-browse-btn jvm-edit-btn" id="jvmEditBtn">编辑</button>
+                    </div>
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
@@ -756,40 +766,14 @@
               <button class="instance-folder-btn" data-sub="resourcepacks" id="folderResourcePacks">材质包</button>
               <button class="instance-folder-btn" data-sub="shaderpacks" id="folderShaders">光影包</button>
               <button class="instance-folder-btn" data-sub="config" id="folderConfig">配置</button>
+              <button class="instance-folder-btn instance-config-btn" id="instanceConfigBtn">参数设置</button>
               <button class="instance-folder-btn instance-export-btn" id="instanceExportBtn">导出整合包</button>
             </div>
 
-            <h3 class="instance-section-title">版本设置</h3>
-            <div class="instance-settings-panel" data-no-drag>
-              <div class="instance-settings-grid">
-                <label class="instance-setting-field">
-                  <span>内存 MB</span>
-                  <input type="number" id="instanceMemInput" min="512" step="512" placeholder="跟随默认">
-                </label>
-                <label class="instance-setting-field">
-                  <span>Java</span>
-                  <select id="instanceJavaMode">
-                    <option value="global">跟随全局</option>
-                    <option value="auto">自动匹配</option>
-                    <option value="manual">指定路径</option>
-                  </select>
-                </label>
-                <label class="instance-setting-field instance-setting-wide" id="instanceJavaPathRow">
-                  <span>Java 路径</span>
-                  <div class="instance-path-row">
-                    <input type="text" id="instanceJavaPathInput" placeholder="留空则使用全局 Java 路径">
-                    <button type="button" id="instanceUseGlobalJavaBtn">使用全局</button>
-                  </div>
-                </label>
-                <label class="instance-setting-field instance-setting-wide">
-                  <span>JVM 参数</span>
-                  <input type="text" id="instanceJvmArgsInput" placeholder="留空则跟随全局 JVM 参数">
-                </label>
-              </div>
-              <div class="instance-settings-actions">
-                <button type="button" id="instanceSettingsSave">保存设置</button>
-                <button type="button" id="instanceSettingsReset">恢复默认</button>
-                <span id="instanceSettingsHint"></span>
+            <div class="instance-mod-header">
+              <div>
+                <h3>Mod 与资源管理</h3>
+                <p>安装与管理 Mod、材质包、光影包；Mod 依赖会自动补齐。</p>
               </div>
             </div>
 
