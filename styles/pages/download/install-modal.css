@@ -188,14 +188,14 @@
 /* Scoped refresh for the new-instance dialog. */
 #newInstanceModal {
   background: rgba(255, 223, 234, 0.42);
-  padding: 22px;
+  padding: 16px;
 }
 
 #newInstanceModal .modal {
   position: relative;
-  width: min(560px, calc(100vw - 48px)) !important;
+  width: min(500px, calc(100% - 36px)) !important;
   max-width: none;
-  max-height: calc(100vh - 44px);
+  max-height: calc(100% - 32px);
   background:
     radial-gradient(circle at 12% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
     radial-gradient(circle at 92% 96%, rgba(255, 110, 154, 0.16), transparent 32%),
@@ -210,15 +210,17 @@
 
 #newInstanceModal .modal-header {
   position: relative;
-  display: block;
-  padding: 22px 28px 16px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 24px 12px;
   background: transparent;
   border-bottom: 1px solid rgba(38, 42, 55, 0.08);
 }
 
 #newInstanceModal .modal-header h3 {
   margin: 0;
-  font-size: 21px;
+  font-size: 19px;
   line-height: 1.15;
   color: #202330;
   font-weight: 800;
@@ -233,31 +235,32 @@
   margin-left: 9px;
   background: linear-gradient(135deg, #ff8db2, rgba(255, 141, 178, 0.1));
   clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
-  vertical-align: 12px;
+  vertical-align: 9px;
 }
 
 #newInstanceModal .modal-header::after {
   content: attr(data-subtitle);
-  display: block;
-  margin-top: 6px;
+  display: inline;
+  min-width: 0;
   color: #8d90a0;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.4;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 #newInstanceModal .modal-close {
   position: absolute;
-  top: 18px;
-  right: 22px;
-  width: 34px;
-  height: 34px;
+  top: 12px;
+  right: 18px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border-radius: 50%;
   background: rgba(32, 35, 48, 0.05);
   color: #6f7280;
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1;
 }
 
@@ -267,9 +270,9 @@
 }
 
 #newInstanceModal .modal-body {
-  padding: 18px 28px 10px;
+  padding: 14px 24px 8px;
   display: grid;
-  gap: 14px;
+  gap: 11px;
 }
 
 #newInstanceModal .form-group {
@@ -281,8 +284,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 7px;
-  font-size: 14px;
+  margin-bottom: 6px;
+  font-size: 13px;
   line-height: 1.2;
   color: #2a2d38;
   font-weight: 700;
@@ -299,13 +302,13 @@
 #newInstanceModal .form-group input[type="text"],
 #newInstanceModal .custom-select {
   width: 100%;
-  min-height: 44px;
-  padding: 0 16px;
-  border-radius: 10px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(32, 35, 48, 0.12);
   color: #242733;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.9) inset,
@@ -321,22 +324,41 @@
     0 10px 26px rgba(255, 95, 145, 0.08);
 }
 
+#newInstanceModal .field-hint {
+  min-height: 14px;
+  margin-top: 4px;
+  color: #9b6580;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#newInstanceModal .field-hint.error {
+  color: #ef4444;
+}
+
+#newInstanceModal #instNameInput.has-error {
+  border-color: #ef4444;
+  box-shadow:
+    0 0 0 3px rgba(239, 68, 68, 0.12),
+    0 10px 26px rgba(239, 68, 68, 0.08);
+}
+
 #newInstanceModal .loader-radios {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
+  gap: 7px;
 }
 
 #newInstanceModal .loader-radio-btn {
   position: relative;
   min-width: 0;
-  min-height: 54px;
-  padding: 6px 5px;
+  min-height: 48px;
+  padding: 5px 4px;
   border-radius: 9px;
   background: rgba(255, 255, 255, 0.86);
   border: 1px solid rgba(32, 35, 48, 0.11);
   color: #222631;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   gap: 3px;
   box-shadow:
@@ -372,8 +394,8 @@
   position: absolute;
   top: -8px;
   right: -6px;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: linear-gradient(135deg, #ff6f9e, #ef3f79);
   box-shadow: 0 8px 18px rgba(239, 63, 121, 0.28);
@@ -393,8 +415,8 @@
 }
 
 #newInstanceModal .loader-icon {
-  width: 21px;
-  height: 21px;
+  width: 19px;
+  height: 19px;
 }
 
 #newInstanceModal #loaderVersionGroup {
@@ -402,18 +424,18 @@
 }
 
 #newInstanceModal .modal-footer {
-  padding: 12px 28px 22px;
+  padding: 10px 24px 16px;
   background: transparent;
   border-top: 0;
-  gap: 14px;
+  gap: 12px;
 }
 
 #newInstanceModal .btn {
-  min-width: 98px;
-  height: 42px;
-  padding: 0 22px;
+  min-width: 88px;
+  height: 38px;
+  padding: 0 18px;
   border-radius: 10px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
 }
 
@@ -439,14 +461,48 @@
 }
 
 @media (max-width: 720px) {
+  #newInstanceModal {
+    padding: 12px;
+  }
+
   #newInstanceModal .modal-header,
   #newInstanceModal .modal-body,
   #newInstanceModal .modal-footer {
-    padding-left: 24px;
-    padding-right: 24px;
+    padding-left: 18px;
+    padding-right: 18px;
   }
 
-  #newInstanceModal .loader-radios {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  #newInstanceModal .modal-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 14px;
+    padding-bottom: 10px;
+  }
+
+  #newInstanceModal .modal-header::after {
+    max-width: calc(100% - 36px);
+    white-space: normal;
+  }
+
+  #newInstanceModal .modal-body {
+    padding-top: 12px;
+    padding-bottom: 6px;
+    gap: 9px;
+  }
+
+  #newInstanceModal .loader-radio-btn {
+    min-height: 44px;
+  }
+
+  #newInstanceModal .modal-footer {
+    padding-top: 8px;
+    padding-bottom: 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  #newInstanceModal .modal {
+    border-radius: 16px;
   }
 }

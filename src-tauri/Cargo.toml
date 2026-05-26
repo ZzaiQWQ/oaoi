@@ -1,6 +1,6 @@
 [package]
 name = "oaoi"
-version = "1.0.10"
+version = "1.1.1"
 description = "oaoi - Minecraft Launcher"
 authors = ["ZzaiQWQ"]
 license-file = "../LICENSE"

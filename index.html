@@ -501,20 +501,20 @@
               <div class="set-card set-card-display">
                 <h2 class="set-card-title">账户管理</h2>
                 <div class="set-field">
+                  <label>离线模式 (Offline Mode)</label>
+                  <div class="set-path-row">
+                    <input type="text" class="set-player-input" id="playerNameInput" placeholder="输入玩家名..."
+                      maxlength="16" style="flex:1">
+                  </div>
+                </div>
+                <div class="set-divider"></div>
+                <div class="set-field">
                   <label>正版账号列表 (Microsoft Accounts)</label>
                   <div class="account-list" id="accountList">
                     <!-- 动态生成账号卡片 -->
                   </div>
                   <button class="set-browse-btn" id="msLoginBtn" style="margin-top:8px;width:100%">添加微软账号</button>
                   <div id="msLoginStatus" style="font-size:11px;color:var(--text-light);margin-top:4px;display:none">
-                  </div>
-                </div>
-                <div class="set-divider"></div>
-                <div class="set-field">
-                  <label>离线模式 (Offline Mode)</label>
-                  <div class="set-path-row">
-                    <input type="text" class="set-player-input" id="playerNameInput" placeholder="输入玩家名..."
-                      maxlength="16" style="flex:1">
                   </div>
                 </div>
               </div>
@@ -834,6 +834,7 @@
             <div class="form-group">
               <label>版本名称</label>
               <input type="text" id="instNameInput" placeholder="例如：我的世界 1.20">
+              <div class="field-hint" id="instNameHint"></div>
             </div>
             <div class="form-group">
               <label>运行环境 (Loader)</label>

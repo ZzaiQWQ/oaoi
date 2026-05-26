@@ -10,6 +10,16 @@ function initDownloadPage() {
   if (!['official', 'bmcl'].includes(dlSource)) dlSource = 'official';
   let versionFetchToken = 0;
   let loaderFetchToken = 0;
+  let nameCheckToken = 0;
+  let validateInstanceName = async () => true;
+
+  async function getInstalledNameSet() {
+    const tauri = await waitForTauri();
+    const gameDir = localStorage.getItem('gameDir') || '';
+    if (!gameDir) return new Set();
+    const instances = await tauri.core.invoke('list_installed_versions', { gameDir });
+    return new Set((instances || []).map(item => item.name));
+  }
 
   // 下载源切换按钮
   const sourceFilters = document.getElementById('dlSourceFilters');
@@ -149,8 +159,11 @@ function initDownloadPage() {
         if (modal) {
           modal.dataset.mcVersion = ver;
           modal.dataset.downloadSource = dlSource;
+          modal.dataset.loaderReady = '1';
+          modal.dataset.nameValid = '0';
         }
-        document.getElementById('instNameInput').value = `${ver}`;
+        const nameInput = document.getElementById('instNameInput');
+        nameInput.value = `${ver}`;
         document.getElementById('instMetaUrl').value = url;
         modal
           ?.querySelector('.modal-header')
@@ -165,8 +178,9 @@ function initDownloadPage() {
         loaderFetchToken++;
 
         const createBtn = document.getElementById('createInstBtn');
-        createBtn.disabled = false;
+        createBtn.disabled = true;
         createBtn.textContent = '确认创建';
+        validateInstanceName();
 
         modal?.classList.remove('hidden');
       });
@@ -192,12 +206,66 @@ function initDownloadPage() {
     const loaderVersionGroup = document.getElementById('loaderVersionGroup');
     const loaderSelect = document.getElementById('instLoaderVersion');
     const loaderTargetSpinner = document.getElementById('loaderTargetVersion');
+    const nameInput = document.getElementById('instNameInput');
+    const nameHint = document.getElementById('instNameHint');
+
+    function updateCreateButtonState() {
+      const loaderReady = modal.dataset.loaderReady !== '0';
+      const nameValid = modal.dataset.nameValid === '1';
+      createBtn.disabled = !loaderReady || !nameValid;
+    }
+
+    validateInstanceName = async function() {
+      const token = ++nameCheckToken;
+      const name = (nameInput?.value || '').trim();
+      modal.dataset.nameValid = '0';
+      nameInput?.classList.remove('has-error');
+      if (nameHint) {
+        nameHint.textContent = '';
+        nameHint.classList.remove('error');
+      }
+      if (!name) {
+        if (nameHint) {
+          nameHint.textContent = '版本名称不能为空';
+          nameHint.classList.add('error');
+        }
+        nameInput?.classList.add('has-error');
+        updateCreateButtonState();
+        return false;
+      }
+      try {
+        const installedNames = await getInstalledNameSet();
+        if (token !== nameCheckToken) return false;
+        if (installedNames.has(name)) {
+          if (nameHint) {
+            nameHint.textContent = '这个版本名称已经存在，请换一个名称';
+            nameHint.classList.add('error');
+          }
+          nameInput?.classList.add('has-error');
+          updateCreateButtonState();
+          return false;
+        }
+        modal.dataset.nameValid = '1';
+        updateCreateButtonState();
+        return true;
+      } catch (err) {
+        if (token !== nameCheckToken) return false;
+        if (nameHint) {
+          nameHint.textContent = '暂时无法检查重名，请稍后再试';
+          nameHint.classList.add('error');
+        }
+        nameInput?.classList.add('has-error');
+        updateCreateButtonState();
+        return false;
+      }
+    };
 
     function closeModal() {
       modal.classList.add('hidden');
     }
     closeBtn.addEventListener('click', closeModal);
     cancelBtn.addEventListener('click', closeModal);
+    nameInput?.addEventListener('input', validateInstanceName);
 
     // 监听加载器切换
     document.querySelectorAll('input[name="loader"]').forEach(radio => {
@@ -207,16 +275,17 @@ function initDownloadPage() {
 
         const loader = e.target.value;
         const mcVer = modal.dataset.mcVersion || '';
-        const nameInput = document.getElementById('instNameInput');
 
         nameInput.value = loader === 'vanilla' ? mcVer : `${mcVer}-${loader}`;
+        validateInstanceName();
 
         if (loader === 'vanilla') {
           loaderFetchToken++;
           loaderVersionGroup.style.display = 'none';
           loaderSelect.innerHTML = '';
           loaderTargetSpinner.textContent = '';
-          createBtn.disabled = false;
+          modal.dataset.loaderReady = '1';
+          updateCreateButtonState();
           return;
         }
 
@@ -224,7 +293,8 @@ function initDownloadPage() {
         loaderVersionGroup.style.display = 'block';
         loaderSelect.innerHTML = '';
         loaderTargetSpinner.textContent = '加载中...';
-        createBtn.disabled = true;
+        modal.dataset.loaderReady = '0';
+        updateCreateButtonState();
 
         try {
           const tauri = await waitForTauri();
@@ -246,7 +316,8 @@ function initDownloadPage() {
 
           if (versions.length === 0) {
             loaderTargetSpinner.textContent = ' 无可用版本';
-            createBtn.disabled = true;
+            modal.dataset.loaderReady = '0';
+            updateCreateButtonState();
           } else {
             loaderTargetSpinner.textContent = '';
             versions.forEach(v => {
@@ -254,12 +325,14 @@ function initDownloadPage() {
               opt.value = opt.textContent = v;
               loaderSelect.appendChild(opt);
             });
-            createBtn.disabled = false;
+            modal.dataset.loaderReady = '1';
+            updateCreateButtonState();
           }
         } catch (err) {
           if (fetchToken !== loaderFetchToken) return;
           loaderTargetSpinner.textContent = ' 获取失败';
-          createBtn.disabled = true;
+          modal.dataset.loaderReady = '0';
+          updateCreateButtonState();
           console.error(err);
         }
       });
@@ -273,6 +346,8 @@ function initDownloadPage() {
       const downloadSource = modal.dataset.downloadSource || dlSource;
       const loaderType = document.querySelector('input[name="loader"]:checked').value;
       const loaderVer = loaderSelect.value || '';
+
+      if (!(await validateInstanceName())) return;
 
       createBtn.disabled = true;
       createBtn.textContent = '✨ 创建中...';

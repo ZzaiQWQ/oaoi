@@ -119,11 +119,21 @@ fn do_install_update(url: &str, mirror_url: Option<&str>, sha256: &str) -> Resul
 
     std::fs::copy(&current_exe, &updater_exe).map_err(|e| format!("创建更新器失败: {}", e))?;
 
-    let mut cmd = std::process::Command::new(&updater_exe);
+    spawn_update_helper(&updater_exe, &current_exe, &new_exe)?;
+    Ok(())
+}
+
+fn spawn_update_helper(
+    updater_exe: &std::path::Path,
+    current_exe: &std::path::Path,
+    new_exe: &std::path::Path,
+) -> Result<(), String> {
+    let pid = std::process::id().to_string();
+    let mut cmd = std::process::Command::new(updater_exe);
     cmd.arg("--apply-update")
-        .arg(&current_exe)
-        .arg(&new_exe)
-        .arg(std::process::id().to_string())
+        .arg(current_exe)
+        .arg(new_exe)
+        .arg(&pid)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -132,8 +142,75 @@ fn do_install_update(url: &str, mirror_url: Option<&str>, sha256: &str) -> Resul
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
-    cmd.spawn().map_err(|e| format!("启动更新器失败: {}", e))?;
-    Ok(())
+
+    match cmd.spawn() {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            #[cfg(windows)]
+            {
+                if err.raw_os_error() == Some(740) {
+                    return shell_execute_update_helper(updater_exe, current_exe, new_exe, &pid);
+                }
+            }
+            Err(format!("启动更新器失败: {}", err))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn shell_execute_update_helper(
+    updater_exe: &std::path::Path,
+    current_exe: &std::path::Path,
+    new_exe: &std::path::Path,
+    pid: &str,
+) -> Result<(), String> {
+    use std::ffi::{c_void, OsStr};
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> *mut c_void;
+    }
+
+    fn wide(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let params = format!(
+        "--apply-update \"{}\" \"{}\" {}",
+        current_exe.display(),
+        new_exe.display(),
+        pid
+    );
+    let operation = wide(OsStr::new("runas"));
+    let file = wide(updater_exe.as_os_str());
+    let parameters = wide(OsStr::new(&params));
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            std::ptr::null(),
+            1,
+        )
+    } as isize;
+
+    if result <= 32 {
+        Err(format!(
+            "启动更新器失败: 需要管理员权限，但提权启动失败 ({})",
+            result
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn fetch_update_manifest() -> Result<UpdateManifest, String> {

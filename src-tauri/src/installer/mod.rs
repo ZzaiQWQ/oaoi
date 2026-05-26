@@ -731,7 +731,9 @@ where
                                 &mut on_progress,
                             )
                         }
-                        Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => Err(e),
+                        Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => {
+                            Err(e)
+                        }
                         Err(ParallelDownloadError::Failed(e)) => {
                             allow_parallel = false;
                             eprintln!(
@@ -748,7 +750,13 @@ where
                         }
                     }
                 } else {
-                    do_download_with_progress(http, &fallback_url, dest, cancel_name, &mut on_progress)
+                    do_download_with_progress(
+                        http,
+                        &fallback_url,
+                        dest,
+                        cancel_name,
+                        &mut on_progress,
+                    )
                 };
                 match download_result {
                     Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
@@ -821,10 +829,7 @@ where
     }
 
     if official != mirror {
-        eprintln!(
-            "[download] 镜像源失败 2 次，回退官方源: {}",
-            official
-        );
+        eprintln!("[download] 镜像源失败 2 次，回退官方源: {}", official);
         match download_exact_with_progress(
             http,
             &official,
@@ -879,10 +884,7 @@ pub fn download_file_mirror_then_official(
     }
 
     if official != mirror {
-        eprintln!(
-            "[download] 镜像源失败 2 次，回退官方源: {}",
-            official
-        );
+        eprintln!("[download] 镜像源失败 2 次，回退官方源: {}", official);
         match download_exact(
             http,
             &official,
@@ -927,7 +929,13 @@ where
         }
 
         let download_result = if allow_parallel {
-            match do_parallel_download_with_progress(http, exact_url, dest, cancel_name, on_progress) {
+            match do_parallel_download_with_progress(
+                http,
+                exact_url,
+                dest,
+                cancel_name,
+                on_progress,
+            ) {
                 Ok(()) => Ok(()),
                 Err(ParallelDownloadError::Unsupported(reason)) => {
                     allow_parallel = false;
@@ -1075,7 +1083,10 @@ fn unique_temp_part_path(dest: &std::path::Path, part: usize) -> std::path::Path
     ))
 }
 
-fn replace_downloaded_file(tmp_path: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+fn replace_downloaded_file(
+    tmp_path: &std::path::Path,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     if dest.exists() {
         std::fs::remove_file(dest).map_err(|e| format!("删除旧文件失败: {}", e))?;
     }
@@ -1167,7 +1178,8 @@ fn download_range_part_with_stall_timeout(
             .user_agent("OAOI-Launcher/1.0")
             .build()
             .map_err(|e| format!("创建下载客户端失败: {}", e))?;
-        let stall_timeout = std::time::Duration::from_secs(PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS);
+        let stall_timeout =
+            std::time::Duration::from_secs(PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS);
         let send = client
             .get(url)
             .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end))
@@ -1234,7 +1246,10 @@ where
 {
     let (total, resolved_url) = probe_range_size(http, url, cancel_name)?;
     let workers = PARALLEL_DOWNLOAD_WORKERS
-        .min(((total + PARALLEL_DOWNLOAD_MIN_PART_BYTES - 1) / PARALLEL_DOWNLOAD_MIN_PART_BYTES) as usize)
+        .min(
+            ((total + PARALLEL_DOWNLOAD_MIN_PART_BYTES - 1) / PARALLEL_DOWNLOAD_MIN_PART_BYTES)
+                as usize,
+        )
         .max(2);
     let part_size = (total + workers as u64 - 1) / workers as u64;
     let progress = std::sync::Arc::new(
@@ -1737,9 +1752,12 @@ pub fn create_instance(
             let inst_dir = resolve_game_dir(&game_dir)
                 .join("instances")
                 .join(&safe_name);
-            if inst_dir.exists() {
+            let install_marker = inst_dir.join(".oaoi_installing");
+            if install_marker.exists() {
                 let _ = std::fs::remove_dir_all(&inst_dir);
                 eprintln!("[install] 已清理残留目录: {}", inst_dir.display());
+            } else if inst_dir.exists() {
+                eprintln!("[install] 跳过清理非本次安装目录: {}", inst_dir.display());
             }
             let stage = if was_cancelled { "cancelled" } else { "error" };
             let _ = app_handle.emit(
@@ -1920,6 +1938,12 @@ fn do_create_instance(
         return Err(format!("版本 '{}' 已存在，请换一个名称！", name));
     }
     std::fs::create_dir_all(&inst_dir).map_err(|e| e.to_string())?;
+    let install_marker_path = inst_dir.join(".oaoi_installing");
+    std::fs::write(
+        &install_marker_path,
+        format!("pid={}\nversion={}\n", std::process::id(), mc_version),
+    )
+    .map_err(|e| format!("创建安装标记失败: {}", e))?;
     let inst_json_path = inst_dir.join("instance.json");
 
     let http = reqwest::blocking::Client::builder()
@@ -1986,5 +2010,6 @@ fn do_create_instance(
     .map_err(|e| format!("保存版本配置失败: {}", e))?;
 
     emit("done", 1, 1, &format!("版本 '{}' 创建完成！", name));
+    let _ = std::fs::remove_file(&install_marker_path);
     Ok(format!("版本 {} 创建成功", name))
 }

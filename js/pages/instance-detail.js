@@ -997,12 +997,12 @@ function ensureOnlineModVersionModal() {
           <h2 id="onlineModVersionTitle">选择版本</h2>
         </div>
         <div class="modal-body">
-          <input class="mod-search-input online-mod-version-filter" id="onlineModVersionFilter" placeholder="筛选 Minecraft 版本或文件名">
           <div id="onlineModVersionList" class="online-mod-version-list">
             <div class="mod-list-empty">加载中...</div>
           </div>
         </div>
         <div class="modal-footer">
+          <input class="mod-search-input online-mod-version-filter" id="onlineModVersionFilter" placeholder="筛选 Minecraft 版本或文件名">
           <button id="onlineModVersionCancel" class="btn btn-secondary">取消</button>
         </div>
       </div>

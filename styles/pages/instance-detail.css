@@ -932,8 +932,10 @@
 }
 
 .online-mod-version-modal {
+  --online-mod-scale: clamp(0.62, var(--app-ui-scale, 1), 1);
   background: rgba(255, 223, 234, 0.42);
   backdrop-filter: blur(var(--blur-radius, 8px));
+  padding: clamp(10px, calc(16px * var(--online-mod-scale)), 16px);
 }
 
 .online-mod-version-modal .modal-content {
@@ -947,21 +949,32 @@
   box-shadow:
     0 24px 60px rgba(132, 52, 83, 0.18),
     0 0 0 1px rgba(255, 255, 255, 0.82) inset;
-  max-height: 82vh;
+  width: min(calc(500px * var(--online-mod-scale)), calc(100% - 32px));
+  height: min(360px, calc(100% - 28px));
+  max-width: none !important;
+  max-height: calc(100% - 32px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .online-mod-version-modal .modal-header {
-  padding: 22px 24px 18px;
+  padding:
+    clamp(11px, calc(18px * var(--online-mod-scale)), 18px)
+    clamp(14px, calc(22px * var(--online-mod-scale)), 22px)
+    clamp(8px, calc(12px * var(--online-mod-scale)), 12px);
   background: transparent;
   border-bottom: 1px solid rgba(38, 42, 55, 0.08);
 }
 
 .online-mod-version-modal .modal-header h2 {
   margin: 0;
-  font-size: 22px;
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: clamp(12px, calc(16px * var(--online-mod-scale)), 16px);
+  min-width: 0;
   line-height: 1.2;
   font-weight: 800;
   color: #202330;
@@ -971,47 +984,81 @@
 .online-mod-version-modal .modal-body {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  padding: 18px 24px 14px;
+  padding:
+    clamp(8px, calc(12px * var(--online-mod-scale)), 12px)
+    clamp(14px, calc(20px * var(--online-mod-scale)), 20px)
+    clamp(7px, calc(10px * var(--online-mod-scale)), 10px);
 }
 
 .online-mod-version-modal .modal-footer {
-  padding: 14px 24px 20px;
+  padding:
+    clamp(7px, calc(10px * var(--online-mod-scale)), 10px)
+    clamp(14px, calc(20px * var(--online-mod-scale)), 20px)
+    clamp(9px, calc(14px * var(--online-mod-scale)), 14px);
   background: transparent;
   border-top: 1px solid rgba(38, 42, 55, 0.06);
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, calc(10px * var(--online-mod-scale)), 10px);
 }
 
 .online-mod-version-modal .btn-secondary {
-  min-width: 92px;
-  height: 40px;
-  border-radius: 10px;
+  flex: 0 0 auto;
+  min-width: clamp(56px, calc(76px * var(--online-mod-scale)), 76px);
+  height: clamp(26px, calc(32px * var(--online-mod-scale)), 32px);
+  padding: 0 clamp(12px, calc(16px * var(--online-mod-scale)), 16px);
+  border-radius: clamp(7px, calc(10px * var(--online-mod-scale)), 10px);
+  font-size: clamp(10px, calc(12px * var(--online-mod-scale)), 12px);
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: rgba(255, 255, 255, 0.92);
   color: #f04480;
   border: 1px solid rgba(255, 95, 145, 0.34);
 }
 
-.online-mod-version-filter {
-  width: 100%;
-  margin-bottom: 10px;
+.online-mod-version-modal .online-mod-version-filter {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
+  height: clamp(26px, calc(32px * var(--online-mod-scale)), 32px);
+  min-height: 0;
+  margin: 0;
+  padding: 0 clamp(8px, calc(11px * var(--online-mod-scale)), 11px);
+  border-radius: clamp(7px, calc(10px * var(--online-mod-scale)), 10px);
+  font-size: clamp(10px, calc(12px * var(--online-mod-scale)), 12px);
+}
+
+.online-mod-version-modal .modal-footer .online-mod-version-filter {
+  flex: 1 1 auto;
 }
 
 .online-mod-version-list {
-  max-height: 52vh;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding-right: 4px;
+  gap: clamp(4px, calc(6px * var(--online-mod-scale)), 6px);
+  padding-right: clamp(3px, calc(4px * var(--online-mod-scale)), 4px);
 }
 
 .online-mod-version-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
+  gap: clamp(6px, calc(9px * var(--online-mod-scale)), 9px);
+  padding:
+    clamp(5px, calc(8px * var(--online-mod-scale)), 8px)
+    clamp(7px, calc(9px * var(--online-mod-scale)), 9px);
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(32, 35, 48, 0.08);
-  border-radius: 10px;
+  border-radius: clamp(7px, calc(10px * var(--online-mod-scale)), 10px);
   transition: all 0.16s ease;
 }
 
@@ -1027,7 +1074,8 @@
 }
 
 .online-mod-version-name {
-  font-size: 12px;
+  font-size: clamp(10px, calc(12px * var(--online-mod-scale)), 12px);
+  line-height: 1.2;
   font-weight: 800;
   color: #252835;
   white-space: nowrap;
@@ -1038,9 +1086,10 @@
 .online-mod-version-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 3px;
-  font-size: 10px;
+  gap: clamp(4px, calc(6px * var(--online-mod-scale)), 6px);
+  margin-top: clamp(2px, calc(3px * var(--online-mod-scale)), 3px);
+  font-size: clamp(8px, calc(10px * var(--online-mod-scale)), 10px);
+  line-height: 1.2;
   font-weight: 600;
   color: #858897;
 }
@@ -1049,12 +1098,13 @@
   color: white;
   background: var(--rose-gradient);
   border-radius: 999px;
-  padding: 0 6px;
+  padding: 0 clamp(4px, calc(6px * var(--online-mod-scale)), 6px);
 }
 
 .online-mod-version-file {
-  margin-top: 2px;
-  font-size: 9px;
+  margin-top: clamp(1px, calc(2px * var(--online-mod-scale)), 2px);
+  font-size: clamp(7px, calc(9px * var(--online-mod-scale)), 9px);
+  line-height: 1.2;
   color: #b98395;
   white-space: nowrap;
   overflow: hidden;
@@ -1062,12 +1112,14 @@
 }
 
 .online-mod-version-pick {
-  padding: 5px 14px;
+  min-width: clamp(30px, calc(38px * var(--online-mod-scale)), 38px);
+  height: clamp(20px, calc(26px * var(--online-mod-scale)), 26px);
+  padding: 0 clamp(6px, calc(9px * var(--online-mod-scale)), 9px);
   border: none;
-  border-radius: 7px;
+  border-radius: clamp(5px, calc(7px * var(--online-mod-scale)), 7px);
   background: var(--rose-gradient);
   color: white;
-  font-size: 11px;
+  font-size: clamp(9px, calc(11px * var(--online-mod-scale)), 11px);
   font-weight: 700;
   cursor: pointer;
   flex-shrink: 0;

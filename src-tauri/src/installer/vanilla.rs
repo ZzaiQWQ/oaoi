@@ -416,7 +416,10 @@ impl ResourceDownloadState {
     }
 
     fn is_mirror_cooling_down(&self) -> bool {
-        current_unix_millis() < self.mirror_cooldown_until_ms.load(std::sync::atomic::Ordering::Relaxed)
+        current_unix_millis()
+            < self
+                .mirror_cooldown_until_ms
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn mirror_cooldown_remaining_ms(&self) -> u64 {
@@ -556,10 +559,7 @@ fn download_resource_source_once(
     expected_sha1: Option<&str>,
     cancel_name: Option<&str>,
 ) -> Result<bool, String> {
-    eprintln!(
-        "[assets] {}尝试 {}/{}: {}",
-        label, attempt, retries, url
-    );
+    eprintln!("[assets] {}尝试 {}/{}: {}", label, attempt, retries, url);
     download_file_exact_once_with_stall_timeout(
         url,
         dest,
@@ -717,9 +717,14 @@ fn parallel_download_resources(
                 let Some((url, dest, sha1)) = tasks.get(index) else {
                     break;
                 };
-                if let Err(e) =
-                    download_resource_file(url, dest, sha1.as_deref(), use_mirror, cancel_name.as_deref(), &state)
-                {
+                if let Err(e) = download_resource_file(
+                    url,
+                    dest,
+                    sha1.as_deref(),
+                    use_mirror,
+                    cancel_name.as_deref(),
+                    &state,
+                ) {
                     eprintln!("[assets] 失败: {} -> {}", url, e);
                     errors.lock().unwrap().push(format!("{} -> {}", url, e));
                 }

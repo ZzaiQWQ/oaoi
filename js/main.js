@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 以 800x480 为基准计算缩放比
     const scale = Math.min(winW / baseW, winH / baseH);
+    const uiScale = Math.max(0.55, Math.min(1, scale));
+    document.documentElement.style.setProperty('--app-ui-scale', uiScale.toFixed(4));
 
     const container = document.getElementById('app-scale-container');
     if (container) {

@@ -1,7 +1,7 @@
+use crate::installer::download_file_with_progress;
 use crate::instance::{
     cf_api_key, is_cancelled, register_cancel, safe_path_name, unregister_cancel,
 };
-use crate::installer::download_file_with_progress;
 use std::sync::atomic::Ordering;
 
 // ===== 整合包在线搜索 =====

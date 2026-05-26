@@ -6,6 +6,7 @@ use crate::installer::{
 use crate::instance::{resolve_game_dir, safe_path_name};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::time::Duration;
 use tauri::Emitter;
 
 #[derive(serde::Deserialize)]
@@ -20,6 +21,83 @@ pub struct LaunchOptions {
     pub access_token: Option<String>,
     pub uuid: Option<String>,
     pub custom_jvm_args: Option<String>,
+}
+
+struct OfflineSkinProfile {
+    uuid: String,
+    user_properties: String,
+}
+
+fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
+    let name = player_name.trim();
+    if name.len() < 3
+        || name.len() > 16
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let profile_url = format!(
+        "https://api.mojang.com/users/profiles/minecraft/{}",
+        urlencoding::encode(name)
+    );
+    let profile_resp = client.get(profile_url).send().ok()?;
+    if !profile_resp.status().is_success() {
+        return None;
+    }
+    let profile_json: serde_json::Value = profile_resp.json().ok()?;
+    let uuid = profile_json.get("id")?.as_str()?.to_string();
+
+    let texture_url = format!(
+        "https://sessionserver.mojang.com/session/minecraft/profile/{}?unsigned=false",
+        uuid
+    );
+    let texture_resp = client.get(texture_url).send().ok()?;
+    if !texture_resp.status().is_success() {
+        return Some(OfflineSkinProfile {
+            uuid,
+            user_properties: "{}".to_string(),
+        });
+    }
+    let texture_json: serde_json::Value = texture_resp.json().ok()?;
+    let textures = texture_json
+        .get("properties")
+        .and_then(|p| p.as_array())
+        .and_then(|properties| {
+            properties
+                .iter()
+                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("textures"))
+        });
+
+    let user_properties = if let Some(texture) = textures {
+        let value = texture.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let signature = texture
+            .get("signature")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        serde_json::json!({
+            "textures": [{
+                "name": "textures",
+                "value": value,
+                "signature": signature,
+            }]
+        })
+        .to_string()
+    } else {
+        "{}".to_string()
+    };
+
+    Some(OfflineSkinProfile {
+        uuid,
+        user_properties,
+    })
 }
 
 fn split_command_args(input: &str) -> Result<Vec<String>, String> {
@@ -265,7 +343,13 @@ fn repair_launch_files(
                 let mut last_index_err = String::new();
                 let mut index_done = false;
                 for url in index_urls {
-                    match download_file_mirror_then_official(&http, &url, &index_path, index_sha1, None) {
+                    match download_file_mirror_then_official(
+                        &http,
+                        &url,
+                        &index_path,
+                        index_sha1,
+                        None,
+                    ) {
                         Ok(_) => {
                             index_done = true;
                             break;
@@ -515,8 +599,14 @@ fn do_launch_minecraft(
                             .user_agent("OAOI-Launcher/1.0")
                             .build()
                             .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
-                        download_file_mirror_then_official(&http, url, &native_jar_path, sha1, None)
-                            .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
+                        download_file_mirror_then_official(
+                            &http,
+                            url,
+                            &native_jar_path,
+                            sha1,
+                            None,
+                        )
+                        .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
                     }
                 }
                 if native_jar_path.exists() {
@@ -609,6 +699,26 @@ fn do_launch_minecraft(
             bytes[8], bytes[9], bytes[10], bytes[11],
             bytes[12], bytes[13], bytes[14], bytes[15])
     };
+    let offline_skin_profile = if options.access_token.is_none() && options.uuid.is_none() {
+        fetch_offline_skin_profile(&options.player_name)
+    } else {
+        None
+    };
+    let launch_uuid = options
+        .uuid
+        .clone()
+        .or_else(|| offline_skin_profile.as_ref().map(|profile| profile.uuid.clone()))
+        .unwrap_or_else(|| uuid.clone());
+    let user_properties = offline_skin_profile
+        .as_ref()
+        .map(|profile| profile.user_properties.clone())
+        .unwrap_or_else(|| "{}".to_string());
+    if offline_skin_profile.is_some() {
+        eprintln!(
+            "[launch] offline skin profile resolved for {}",
+            options.player_name
+        );
+    }
 
     // 构建启动参数
     let xms = std::cmp::max(512, (options.memory_mb as f32 * 0.75) as u32);
@@ -738,7 +848,7 @@ fn do_launch_minecraft(
             .replace("${game_directory}", &ver_dir.to_string_lossy())
             .replace("${assets_root}", &game_dir.join("res").to_string_lossy())
             .replace("${assets_index_name}", asset_index)
-            .replace("${auth_uuid}", options.uuid.as_deref().unwrap_or(&uuid))
+            .replace("${auth_uuid}", &launch_uuid)
             .replace(
                 "${auth_access_token}",
                 options.access_token.as_deref().unwrap_or("0"),
@@ -752,7 +862,7 @@ fn do_launch_minecraft(
                 },
             )
             .replace("${version_type}", "release")
-            .replace("${user_properties}", "{}");
+            .replace("${user_properties}", &user_properties);
         for part in split_command_args(&replaced)? {
             args.push(part.to_string());
         }
@@ -773,7 +883,7 @@ fn do_launch_minecraft(
             "--assetIndex".to_string(),
             asset_index.to_string(),
             "--uuid".to_string(),
-            options.uuid.clone().unwrap_or(uuid.clone()),
+            launch_uuid.clone(),
             "--accessToken".to_string(),
             options.access_token.clone().unwrap_or("0".to_string()),
             "--userType".to_string(),
@@ -805,6 +915,20 @@ fn do_launch_minecraft(
                     }
                 }
             }
+        }
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--userProperties" {
+                let needs_value = args
+                    .get(i + 1)
+                    .map(|next| next.starts_with("--"))
+                    .unwrap_or(true);
+                if needs_value {
+                    args.insert(i + 1, user_properties.clone());
+                    i += 1;
+                }
+            }
+            i += 1;
         }
     }
 

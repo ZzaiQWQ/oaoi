@@ -261,7 +261,7 @@ function ensureLaunchRepairModal() {
       <div class="java-download-card">
         <div class="java-download-header">
           <div>
-            <div class="java-download-title" id="launchRepairTitle">启动前修复</div>
+            <div class="java-download-title" id="launchRepairTitle">正在修复缺失文件</div>
             <div class="java-download-subtitle" id="launchRepairSubtitle">准备检查文件...</div>
           </div>
           <div class="java-download-percent" id="launchRepairPercent">0%</div>
@@ -293,7 +293,7 @@ function updateLaunchRepairModal(version, payload) {
   const barEl = document.getElementById('launchRepairBar');
   const detailEl = document.getElementById('launchRepairDetail');
 
-  if (titleEl) titleEl.textContent = '启动前修复';
+  if (titleEl) titleEl.textContent = '正在修复缺失文件';
   if (subtitleEl) subtitleEl.textContent = version || '当前版本';
   if (barEl) barEl.classList.remove('error');
 

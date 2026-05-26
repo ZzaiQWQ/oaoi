@@ -456,6 +456,30 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+fn create_unique_instance_dir(
+    game_dir: &std::path::Path,
+    base_name: &str,
+) -> Result<(String, std::path::PathBuf), String> {
+    let instances_dir = game_dir.join("instances");
+    std::fs::create_dir_all(&instances_dir).map_err(|e| e.to_string())?;
+
+    for index in 0..1000 {
+        let name = if index == 0 {
+            base_name.to_string()
+        } else {
+            format!("{}-{}", base_name, index)
+        };
+        let inst_dir = instances_dir.join(&name);
+        match std::fs::create_dir(&inst_dir) {
+            Ok(()) => return Ok((name, inst_dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("创建版本目录失败: {}", e)),
+        }
+    }
+
+    Err(format!("无法为 '{}' 找到可用版本名", base_name))
+}
+
 pub fn do_import_modpack_named(
     app: &tauri::AppHandle,
     zip_path: &str,
@@ -469,16 +493,20 @@ pub fn do_import_modpack_named(
     emit_progress(app, temp_name, "detecting", 0, 1, "正在识别整合包格式...");
 
     let meta = detect_modpack(zip_file)?;
-    let inst_name = safe_path_name(&sanitize_name(&meta.name), "版本名")?;
+    let base_inst_name = safe_path_name(&sanitize_name(&meta.name), "版本名")?;
     let game_dir = resolve_game_dir(game_dir_input);
-    let inst_dir = game_dir.join("instances").join(&inst_name);
+    let (inst_name, inst_dir) = create_unique_instance_dir(&game_dir, &base_inst_name)?;
 
     // 使用传入的 display_name 或 inst_name
     let name = display_name.unwrap_or(&inst_name);
     emit_progress(app, name, "detecting", 1, 1, "识别完成");
-
-    if inst_dir.exists() {
-        return Err(format!("版本 '{}' 已存在", inst_name));
+    let install_marker_path = inst_dir.join(".oaoi_installing");
+    if let Err(e) = std::fs::write(
+        &install_marker_path,
+        format!("pid={}\nmodpack={}\n", std::process::id(), inst_name),
+    ) {
+        let _ = std::fs::remove_dir_all(&inst_dir);
+        return Err(format!("创建安装标记失败: {}", e));
     }
 
     // 包装安装，失败时自动清理目录
@@ -494,9 +522,11 @@ pub fn do_import_modpack_named(
         name,
     );
     if let Err(ref e) = result {
-        if inst_dir.exists() {
+        if install_marker_path.exists() {
             let _ = std::fs::remove_dir_all(&inst_dir);
             eprintln!("[modpack] 安装失败，已清理: {}", inst_dir.display());
+        } else if inst_dir.exists() {
+            eprintln!("[modpack] 跳过清理非本次安装目录: {}", inst_dir.display());
         }
         let stage = if crate::instance::is_cancelled(name) {
             "cancelled"
@@ -504,6 +534,8 @@ pub fn do_import_modpack_named(
             "error"
         };
         emit_progress(app, name, stage, 0, 0, e);
+    } else {
+        let _ = std::fs::remove_file(&install_marker_path);
     }
     result
 }

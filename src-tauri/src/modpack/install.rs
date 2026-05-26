@@ -1,7 +1,5 @@
 use super::cf_download::{cf_cdn_urls, cf_download_mod_cancelable};
-use super::{
-    build_http_client, detect_target_dir, emit_progress, sanitize_name, ModpackKind, ModpackMeta,
-};
+use super::{build_http_client, detect_target_dir, emit_progress, ModpackKind, ModpackMeta};
 use crate::installer::{
     download_file_exact_once_with_stall_timeout, empty_loader_json, merge_loader_install_result,
     mirror_url,
@@ -105,7 +103,11 @@ pub fn do_install_modpack_inner(
     use crate::installer::quilt;
     use crate::installer::vanilla;
 
-    let inst_name = safe_path_name(&sanitize_name(&meta.name), "版本名")?;
+    let inst_name = inst_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .ok_or_else(|| "整合包名称无效".to_string())?;
     if crate::instance::is_cancelled(display_name) {
         return Err("用户取消安装".to_string());
     }

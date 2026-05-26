@@ -144,9 +144,12 @@ pub fn install_fabric(
     emit("fabric-api", 0, 1, "下载 Fabric API...");
     let mods_dir = inst_dir.join("mods");
     std::fs::create_dir_all(&mods_dir).ok();
+    let game_versions_filter = format!("[\"{}\"]", mc_version);
+    let loader_filter = urlencoding::encode("[\"fabric\"]");
+    let game_version_filter = urlencoding::encode(&game_versions_filter);
     let api_url = format!(
-        "https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders=[\"fabric\"]&game_versions=[\"{}\"]",
-        mc_version
+        "https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders={}&game_versions={}",
+        loader_filter, game_version_filter
     );
     match http.get(&api_url).send() {
         Ok(resp) => {
@@ -154,10 +157,20 @@ pub fn install_fabric(
                 if let Some(arr) = versions.as_array() {
                     if let Some(first) = arr.first() {
                         if let Some(files) = first["files"].as_array() {
-                            if let Some(file) = files.first() {
+                            let file = files
+                                .iter()
+                                .find(|file| {
+                                    file["primary"].as_bool() == Some(true)
+                                        && is_fabric_api_runtime_file(file)
+                                })
+                                .or_else(|| {
+                                    files.iter().find(|file| is_fabric_api_runtime_file(file))
+                                });
+                            if let Some(file) = file {
                                 let dl_url = file["url"].as_str().unwrap_or("");
                                 let filename =
                                     file["filename"].as_str().unwrap_or("fabric-api.jar");
+                                let sha1 = file["hashes"]["sha1"].as_str();
                                 if !dl_url.is_empty() {
                                     if let Ok(safe_filename) = safe_path_name(filename, "文件名")
                                     {
@@ -166,7 +179,7 @@ pub fn install_fabric(
                                             http,
                                             dl_url,
                                             &dest,
-                                            None,
+                                            sha1,
                                             use_mirror,
                                             Some(name),
                                         ) {
@@ -194,13 +207,29 @@ pub fn install_fabric(
                                     }
                                 }
                             }
+                        } else {
+                            eprintln!("[install] Fabric API 文件列表为空");
                         }
+                    } else {
+                        eprintln!("[install] 未找到适配 {} 的 Fabric API 版本", mc_version);
                     }
+                } else {
+                    eprintln!("[install] Fabric API 响应不是数组");
                 }
+            } else {
+                eprintln!("[install] Fabric API 响应解析失败");
             }
         }
         Err(e) => eprintln!("[install] Fabric API 下载失败(非致命): {}", e),
     }
 
     Ok(())
+}
+
+fn is_fabric_api_runtime_file(file: &serde_json::Value) -> bool {
+    let filename = file["filename"].as_str().unwrap_or("").to_lowercase();
+    filename.ends_with(".jar")
+        && !filename.contains("-sources")
+        && !filename.contains("-dev")
+        && !filename.contains("-javadoc")
 }
