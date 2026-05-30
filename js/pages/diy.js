@@ -285,6 +285,7 @@ function initDiyPage() {
   }
 
   function applyRadius(val) {
+    document.documentElement.style.setProperty('--window-radius', val + 'px');
     const launcher = document.querySelector('.launcher');
     if (launcher) launcher.style.borderRadius = val + 'px';
   }

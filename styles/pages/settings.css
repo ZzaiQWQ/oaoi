@@ -1,6 +1,5 @@
 @import url('settings/performance.css');
 @import url('settings/account.css');
-@import url('settings/visual.css');
 /* ============ 设置页 - 入口 ============ */
 
 /* 设置页全局布局 */
@@ -74,7 +73,8 @@
 .java-mode-btn:hover { border-color: color-mix(in srgb, var(--pink-500) 50%, transparent); }
 .java-mode-btn.active {
   background: var(--rose-gradient);
-  color: #fff; border-color: transparent;
+  color: #fff;
+  border-color: var(--pink-500);
 }
 .memory-mode-row {
   display: flex;
@@ -103,18 +103,6 @@
 }
 
 /* AI 崩溃分析设置 */
-.ai-provider-toggle { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
-.ai-provider-btn {
-  padding: 6px 16px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
-  border-radius: 18px; background: rgba(255,255,255,0.5);
-  color: var(--text-mid); font-size: 12px; font-weight: 700;
-  cursor: pointer; transition: all 0.2s ease; font-family: inherit;
-}
-.ai-provider-btn:hover { border-color: color-mix(in srgb, var(--pink-500) 50%, transparent); }
-.ai-provider-btn.active {
-  background: var(--rose-gradient);
-  color: #fff; border-color: transparent;
-}
 .ai-hint {
   margin: 6px 0 0; font-size: 11px; color: var(--text-light);
 }

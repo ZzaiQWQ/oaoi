@@ -5,92 +5,11 @@
   padding-right: 4px;
 }
 
-.modpack-ver-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
-  border: 1px solid rgba(32, 35, 48, 0.08);
-  margin-bottom: 6px;
-  transition: all 0.2s;
-}
-
-.modpack-ver-row:hover {
-  background: rgba(255, 255, 255, 0.96);
-  border-color: rgba(255, 112, 158, 0.26);
-  transform: translateX(2px);
-}
-
-.modpack-ver-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.modpack-ver-name {
-  font-size: 12px;
-  font-weight: 700;
-  color: #252835;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.modpack-ver-meta {
-  font-size: 10px;
-  color: #858897;
-  margin-top: 2px;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.modpack-ver-install {
-  padding: 5px 16px;
-  border: none;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 700;
-  font-family: inherit;
-  cursor: pointer;
-  background: var(--rose-gradient, linear-gradient(135deg, var(--pink-400), var(--pink-500), var(--pink-600)));
-  color: #fff;
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--pink-500) calc(0.2 * 100%), transparent);
-  transition: all 0.2s;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.modpack-ver-install:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.35 * 100%), transparent);
-}
-
 /* 整合包版本弹窗蒙层 */
-#modpackVersionModal {
-  background: rgba(255, 223, 234, 0.42);
-  backdrop-filter: blur(var(--blur-radius, 8px));
-  padding: 16px;
-}
-
 #modpackVersionModal .modal-content {
-  background:
-    radial-gradient(circle at 10% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
-    radial-gradient(circle at 92% 96%, rgba(255, 110, 154, 0.14), transparent 32%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97));
-  backdrop-filter: blur(var(--blur-radius, 12px));
-  border: 1px solid rgba(255, 128, 170, 0.34);
-  border-radius: 18px;
-  box-shadow:
-    0 24px 60px rgba(132, 52, 83, 0.18),
-    0 0 0 1px rgba(255, 255, 255, 0.82) inset;
-  overflow: hidden;
-  width: min(520px, calc(100% - 36px));
-  max-width: none !important;
-  max-height: calc(100% - 32px);
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 #modpackVersionModal .modal-header {
@@ -128,50 +47,4 @@
   background: rgba(255, 255, 255, 0.92);
   color: #f04480;
   border: 1px solid rgba(255, 95, 145, 0.34);
-}
-
-@media (max-width: 720px) {
-  #modpackVersionModal {
-    padding: 12px;
-  }
-
-  #modpackVersionModal .modal-content {
-    width: calc(100% - 24px);
-  }
-
-  #modpackVersionModal .modal-header {
-    padding: 18px 18px 14px;
-  }
-
-  #modpackVersionModal .modal-header h2 {
-    font-size: 18px;
-  }
-
-  #modpackVersionModal .modal-body {
-    padding: 14px 18px 10px;
-  }
-
-  #modpackVersionModal .modal-footer {
-    padding: 12px 18px 16px;
-  }
-
-  .modpack-ver-row {
-    gap: 8px;
-    padding: 9px 10px;
-  }
-}
-
-@media (max-width: 520px) {
-  #modpackVersionModal .modal-content {
-    border-radius: 16px;
-  }
-
-  .modpack-ver-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .modpack-ver-install {
-    align-self: flex-end;
-  }
 }

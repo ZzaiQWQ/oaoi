@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const scale = Math.min(winW / baseW, winH / baseH);
     const uiScale = Math.max(0.55, Math.min(1, scale));
     document.documentElement.style.setProperty('--app-ui-scale', uiScale.toFixed(4));
+    document.documentElement.style.setProperty('--app-modal-scale', Math.min(1, scale).toFixed(4));
 
     const container = document.getElementById('app-scale-container');
     if (container) {
@@ -25,6 +26,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   window.addEventListener('resize', autoScale);
   autoScale();
+
+  ['newInstanceModal', 'modpackVersionModal'].forEach((id) => {
+    const modal = document.getElementById(id);
+    if (modal && modal.parentElement !== document.body) {
+      document.body.appendChild(modal);
+    }
+  });
 
 
   // Tauri 窗口控制
@@ -45,6 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 导航
   try { initNavigation(); } catch (e) { console.error('导航初始化失败:', e); }
   try { initP2PLink(); } catch (e) { console.error('联机工具初始化失败:', e); }
+  try { initAboutPage(); } catch (e) { console.error('关于页初始化失败:', e); }
 
   // 主页
   try { initLaunchButton(); } catch (e) { console.error('启动按钮初始化失败:', e); }
@@ -75,11 +84,6 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log('🌸 oaoi 启动器已加载！');
 });
 
-const UPDATE_MANIFEST_URLS = [
-  'https://gitee.com/iszaizai/oaoi/raw/main/update/latest.json',
-  'https://gitee.com/iszaizai/oaoi/raw/master/update/latest.json'
-];
-
 async function checkForUpdates() {
   const tauri = await waitForTauri();
   const currentVersion = await tauri.core.invoke('get_app_version');
@@ -93,7 +97,13 @@ async function checkForUpdates() {
   const notes = manifest.notes ? `\n\n${manifest.notes}` : '';
   const confirmed = await showConfirm(
     `发现新版本 ${manifest.version}，当前版本 ${currentVersion}。${notes}`,
-    { title: '发现更新', confirmText: '立即更新', cancelText: '稍后', kind: 'info' }
+    {
+      title: '发现更新',
+      confirmText: '立即更新',
+      cancelText: '稍后',
+      kind: 'info',
+      dialogClass: 'oaoi-update-confirm',
+    }
   );
   if (!confirmed) {
     sessionStorage.setItem('update_skip_version', manifest.version);

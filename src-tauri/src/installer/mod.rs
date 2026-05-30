@@ -275,7 +275,7 @@ use std::sync::Mutex;
 use tauri::Emitter;
 
 /// Forge / NeoForge 安装器全局锁 — 同一时间只能运行一个安装
-pub static FORGE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
+pub static FORGE_LOCK: Mutex<()> = Mutex::new(());
 static DOWNLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 2 * 1024 * 1024;
 const PARALLEL_DOWNLOAD_MIN_PART_BYTES: u64 = 512 * 1024;

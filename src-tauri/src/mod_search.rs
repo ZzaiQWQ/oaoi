@@ -368,46 +368,6 @@ fn run_curseforge_search(
     }
 }
 
-/// 直接按 slug 精确查询 Modrinth 项目（不走搜索API）
-#[allow(dead_code)]
-fn do_modrinth_direct_lookup(
-    http: &reqwest::blocking::Client,
-    slug: &str,
-) -> Option<OnlineModResult> {
-    let url = format!(
-        "https://api.modrinth.com/v2/project/{}",
-        urlencoding::encode(slug)
-    );
-    let resp = http
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let json: serde_json::Value = resp.json().ok()?;
-    let project_type = json["project_type"].as_str().unwrap_or("");
-    if project_type != "mod" {
-        return None;
-    }
-    let slug_val = json["slug"].as_str().unwrap_or("").to_string();
-    let id = json["id"].as_str().unwrap_or("").to_string();
-    eprintln!("[modrinth_direct] 精确命中: {} ({})", slug_val, id);
-    Some(OnlineModResult {
-        slug: slug_val.clone(),
-        title: json["title"].as_str().unwrap_or("").to_string(),
-        description: json["description"].as_str().unwrap_or("").to_string(),
-        author: String::new(),
-        downloads: json["downloads"].as_u64().unwrap_or(0),
-        icon_url: json["icon_url"].as_str().unwrap_or("").to_string(),
-        project_id: id,
-        mr_url: format!("https://modrinth.com/mod/{}", slug_val),
-        cf_url: String::new(),
-        cn_title: String::new(),
-    })
-}
-
 fn do_modrinth_search(
     http: &reqwest::blocking::Client,
     query: &str,

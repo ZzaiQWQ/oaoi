@@ -14,7 +14,24 @@
 .about-changelog-header h3 { font-size: 12px; font-weight: 800; color: var(--pink-700); }
 .about-changelog-header span { font-size: 9px; font-weight: 700; color: var(--pink-400); text-transform: uppercase; letter-spacing: 1.5px; }
 
-.about-changelog-list { display: flex; flex-direction: column; gap: 8px; }
+.about-changelog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 96px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--pink-300) transparent;
+}
+
+.about-changelog-list::-webkit-scrollbar { width: 4px; }
+.about-changelog-list::-webkit-scrollbar-track { background: transparent; }
+.about-changelog-list::-webkit-scrollbar-thumb {
+  background: var(--pink-300);
+  border-radius: 999px;
+}
 
 .about-log-item { display: flex; align-items: flex-start; gap: 8px; }
 

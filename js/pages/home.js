@@ -840,7 +840,6 @@ function initLaunchButton() {
       console.log('🎮 ' + result);
       finishLaunchRepairModal(true, '文件检查完成，正在启动游戏。');
       btn.innerHTML = `
-        <span class="launch-icon">✅</span>
         <span>启动成功！</span>
       `;
       btn.style.background = 'linear-gradient(135deg, #86efac 0%, #4ade80 50%, #22c55e 100%)';

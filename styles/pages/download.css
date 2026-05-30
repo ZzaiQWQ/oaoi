@@ -80,137 +80,9 @@
   overflow-y: auto;
 }
 
-/* 右栏 Mod 加载器卡片 */
 .dl-right .dl-section-title {
   margin-bottom: 8px;
   font-size: 0.85rem;
-}
-
-.dl-loader-card {
-  background: rgba(255, 255, 255, 0.6);
-  backdrop-filter: blur(var(--blur-radius, 20px));
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 14px;
-  padding: 12px;
-  margin-bottom: 10px;
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--pink-500) calc(0.06 * 100%), transparent);
-  transition: transform 0.2s;
-}
-
-.dl-loader-card:hover {
-  transform: translateY(-2px);
-}
-
-.dl-loader-forge {
-  border-left: 4px solid var(--pink-700);
-}
-
-.dl-loader-fabric {
-  border-left: 4px solid var(--pink-400);
-}
-
-.dl-loader-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 8px;
-}
-
-.dl-loader-name {
-  display: block;
-  font-weight: 800;
-  font-size: 0.85rem;
-  color: var(--pink-700);
-}
-
-.dl-loader-desc {
-  display: block;
-  font-size: 0.6rem;
-  color: var(--pink-600);
-  margin-top: 1px;
-}
-
-.dl-loader-icon {
-  font-size: 1.4rem;
-  opacity: 0.6;
-}
-
-.dl-loader-card-body {}
-
-.dl-loader-ver-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: rgba(255, 255, 255, 0.4);
-  padding: 5px 8px;
-  border-radius: 8px;
-  font-size: 0.68rem;
-  margin-bottom: 8px;
-}
-
-.dl-loader-ver-row span:first-child {
-  color: var(--pink-600);
-  font-weight: 500;
-}
-
-.dl-loader-ver {
-  font-weight: 700;
-  color: var(--pink-700);
-}
-
-.dl-loader-install-btn {
-  width: 100%;
-  padding: 7px 0;
-  border: none;
-  border-radius: 10px;
-  font-weight: 700;
-  font-size: 0.72rem;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-family: inherit;
-  letter-spacing: 0.05em;
-}
-
-.dl-loader-forge .dl-loader-install-btn {
-  background: var(--rose-gradient);
-  color: #fff;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
-}
-
-.dl-loader-forge .dl-loader-install-btn:hover {
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--pink-500) calc(0.45 * 100%), transparent);
-  transform: translateY(-1px);
-}
-
-.dl-loader-fabric .dl-loader-install-btn {
-  background: color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
-  color: var(--pink-700);
-}
-
-.dl-loader-fabric .dl-loader-install-btn:hover {
-  background: color-mix(in srgb, var(--pink-300) calc(0.5 * 100%), transparent);
-}
-
-/* 小贴士 */
-.dl-protip {
-  background: linear-gradient(135deg, var(--pink-700), var(--pink-700));
-  border-radius: 14px;
-  padding: 12px;
-  color: #fff;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--pink-700) calc(0.3 * 100%), transparent);
-}
-
-.dl-protip strong {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 0.75rem;
-}
-
-.dl-protip p {
-  font-size: 0.68rem;
-  opacity: 0.85;
-  margin: 0;
-  line-height: 1.4;
 }
 
 /* ============ Tab 切换 ============ */
@@ -320,25 +192,6 @@
   color: var(--pink-400);
   margin-top: 3px;
   align-items: center;
-}
-
-.modpack-source-tag {
-  display: inline-block;
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 4px;
-  line-height: 1.4;
-}
-
-.modpack-source-tag.mr {
-  background: rgba(30, 200, 100, 0.15);
-  color: #1db954;
-}
-
-.modpack-source-tag.cf {
-  background: rgba(241, 100, 54, 0.15);
-  color: #f16436;
 }
 
 .modpack-actions {

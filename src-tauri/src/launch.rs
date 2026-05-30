@@ -263,6 +263,10 @@ fn repair_launch_files(
                 }
             }
 
+            if lib.get("natives").and_then(|v| v.as_object()).is_some() {
+                continue;
+            }
+
             if let Some(name) = lib.get("name").and_then(|v| v.as_str()) {
                 let rel_path = maven_name_to_path(name);
                 let Ok(rel_path_buf) = safe_maven_path(&rel_path) else {

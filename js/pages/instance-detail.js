@@ -150,9 +150,9 @@ function ensureInstanceSettingsModal() {
   if (instanceSettingsModal) return instanceSettingsModal;
   const modal = document.createElement('div');
   modal.id = 'instanceSettingsModal';
-  modal.className = 'modal-overlay hidden instance-settings-modal';
+  modal.className = 'hidden instance-settings-modal oaoi-modal-host';
   modal.innerHTML = `
-    <div class="modal-content" data-no-drag>
+    <div class="modal-content oaoi-modal-card" data-no-drag>
       <div class="modal-header">
         <h2>参数设置</h2>
         <button class="modal-close" id="instanceSettingsModalClose">&times;</button>
@@ -202,8 +202,8 @@ function ensureInstanceSettingsModal() {
   instanceSettingsModal = modal;
 
   const close = () => {
-    modal.classList.add('hidden');
-    modal.style.display = 'none';
+    modal.remove();
+    instanceSettingsModal = null;
   };
   modal.querySelector('#instanceSettingsModalClose')?.addEventListener('click', close);
   modal.addEventListener('click', (e) => {
@@ -339,8 +339,8 @@ function ensureModpackExportModal() {
   if (modal) return modal;
 
   document.body.insertAdjacentHTML('beforeend', `
-    <div class="hidden modpack-export-modal" id="modpackExportModal" data-no-drag>
-      <div class="modal-content" data-no-drag>
+    <div class="hidden modpack-export-modal oaoi-modal-host" id="modpackExportModal" data-no-drag>
+      <div class="modal-content oaoi-modal-card" data-no-drag>
         <div class="modal-header">
           <button class="modal-close" id="modpackExportClose">&times;</button>
         </div>
@@ -465,8 +465,12 @@ function showModpackExportModal() {
   const outputBtn = document.getElementById('modpackExportOutputBtn');
   const outputPathEl = document.getElementById('modpackExportOutputPath');
   let exportItems = [];
+  let closed = false;
 
-  const close = () => modal.classList.add('hidden');
+  const close = () => {
+    closed = true;
+    modal.remove();
+  };
   modal.classList.remove('hidden');
   listEl.innerHTML = '<div class="mod-list-empty">正在扫描当前版本文件夹...</div>';
   summaryEl.textContent = '扫描中...';
@@ -553,6 +557,7 @@ function showModpackExportModal() {
       gameDir,
       name: requestedInstance,
     });
+    if (closed) return;
     if (modal.dataset.exportLoadToken !== loadToken || currentDetailInstance !== requestedInstance) return;
 
     if (!exportItems.length) {
@@ -645,6 +650,7 @@ function showModpackExportModal() {
       }
     };
     } catch (err) {
+    if (closed) return;
     listEl.innerHTML = `<div class="mod-list-empty">扫描失败: ${escapeHtml(err)}</div>`;
     summaryEl.textContent = '扫描失败';
     }

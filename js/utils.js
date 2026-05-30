@@ -51,11 +51,6 @@ function getGlobalJvmArgs() {
   return localStorage.getItem('customJvmArgs') || '';
 }
 
-function getJvmArgsPreset() {
-  const preset = localStorage.getItem('jvmArgsPreset') || 'recommended';
-  return OAOI_JVM_PRESETS[preset] ? preset : 'custom';
-}
-
 function getJvmArgsPresetByValue(value) {
   const normalized = String(value || '').trim();
   for (const key of ['recommended', 'compat', 'clean']) {
@@ -299,13 +294,18 @@ function showToast(message, type = 'warn', duration = 4000) {
  * @returns {Promise<boolean>}
  */
 function showConfirm(message, options = {}) {
-  const { title = '确认', confirmText = '确定', cancelText = '取消', kind = 'warning' } = options;
+  const { title = '确认', confirmText = '确定', cancelText = '取消', kind = 'warning', dialogClass = '' } = options;
+  const safeDialogClass = String(dialogClass)
+    .split(/\s+/)
+    .map(cls => cls.replace(/[^a-zA-Z0-9_-]/g, ''))
+    .filter(Boolean)
+    .join(' ');
 
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'oaoi-confirm-overlay';
     overlay.innerHTML = `
-      <div class="oaoi-confirm-card">
+      <div class="oaoi-confirm-card${safeDialogClass ? ` ${safeDialogClass}` : ''}">
         <div class="oaoi-confirm-header">
           <span class="oaoi-confirm-title">${escapeHtml(title)}</span>
         </div>
@@ -319,7 +319,11 @@ function showConfirm(message, options = {}) {
 
     document.body.appendChild(overlay);
 
+    let closed = false;
     function close(result) {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
       overlay.querySelector('.oaoi-confirm-card').classList.add('oaoi-confirm-out');
       overlay.classList.add('oaoi-confirm-overlay-out');
       setTimeout(() => { overlay.remove(); resolve(result); }, 200);
@@ -330,10 +334,54 @@ function showConfirm(message, options = {}) {
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
 
     // ESC 取消
-    function onKey(e) { if (e.key === 'Escape') { close(false); document.removeEventListener('keydown', onKey); } }
+    function onKey(e) { if (e.key === 'Escape') close(false); }
     document.addEventListener('keydown', onKey);
 
     // 自动聚焦确认按钮
+    requestAnimationFrame(() => overlay.querySelector('.oaoi-confirm-btn.confirm').focus());
+  });
+}
+
+function showAlert(message, options = {}) {
+  const { title = '提示', confirmText = '我知道了', kind = 'info' } = options;
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'oaoi-confirm-overlay';
+    overlay.innerHTML = `
+      <div class="oaoi-confirm-card">
+        <div class="oaoi-confirm-header">
+          <span class="oaoi-confirm-title">${escapeHtml(title)}</span>
+        </div>
+        <div class="oaoi-confirm-body">${escapeHtml(message)}</div>
+        <div class="oaoi-confirm-actions">
+          <button class="oaoi-confirm-btn confirm">${escapeHtml(confirmText)}</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    let closed = false;
+    function close() {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      overlay.querySelector('.oaoi-confirm-card').classList.add('oaoi-confirm-out');
+      overlay.classList.add('oaoi-confirm-overlay-out');
+      setTimeout(() => { overlay.remove(); resolve(true); }, 200);
+    }
+
+    overlay.querySelector('.oaoi-confirm-btn.confirm').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    function onKey(e) {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        close();
+      }
+    }
+    document.addEventListener('keydown', onKey);
+
     requestAnimationFrame(() => overlay.querySelector('.oaoi-confirm-btn.confirm').focus());
   });
 }
@@ -374,6 +422,11 @@ function showConfirm(message, options = {}) {
       overflow: hidden;
       animation: confirmCardIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
+    .oaoi-confirm-card.oaoi-update-confirm {
+      width: 460px;
+      max-width: calc(100vw - 48px);
+      max-height: calc(100vh - 48px);
+    }
     .oaoi-confirm-out {
       animation: confirmCardOut 0.2s ease forwards;
     }
@@ -404,6 +457,12 @@ function showConfirm(message, options = {}) {
       line-height: 1.6;
       color: var(--text-mid, #8a5070);
       word-break: break-word;
+      white-space: pre-line;
+    }
+    .oaoi-confirm-card.oaoi-update-confirm .oaoi-confirm-body {
+      max-height: min(260px, calc(100vh - 190px));
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .oaoi-confirm-actions {
       display: flex;

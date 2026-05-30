@@ -153,6 +153,37 @@ pub async fn refresh_ms_login(refresh_token: String) -> Result<McProfile, String
 }
 
 /// Xbox Live → XSTS → Minecraft 认证 → 获取玩家档案（共用流程）
+fn no_minecraft_profile_message() -> String {
+    "这个微软账号没有 Minecraft Java 版，无法作为正版账号登录。请确认这个账号已经购买 Minecraft Java 版，并且已经在 Minecraft 官网创建过游戏名。".to_string()
+}
+
+fn minecraft_service_error(prefix: &str, status: u16, body: &serde_json::Value) -> String {
+    let detail = body
+        .get("errorMessage")
+        .or_else(|| body.get("message"))
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("error").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    match status {
+        401 => format!("{}失败：登录状态已失效，请重新登录微软账号。", prefix),
+        429 => format!("{}失败：请求太频繁，请稍后再试。", prefix),
+        500..=599 => format!("{}失败：Minecraft 官方服务暂时异常，请稍后再试。", prefix),
+        _ if !detail.is_empty() => format!("{}失败({}): {}", prefix, status, detail),
+        _ => format!("{}失败({})，请稍后重试。", prefix, status),
+    }
+}
+
+fn friendly_xsts_error(xsts_json: &serde_json::Value) -> String {
+    match xsts_json.get("XErr").and_then(|v| v.as_i64()) {
+        Some(2148916233) => "这个微软账号还没有 Xbox 档案，无法完成 Minecraft 正版登录。请先打开 Xbox 官网或 Minecraft 官网完成账号档案设置。".to_string(),
+        Some(2148916235) => "这个微软账号所在地区暂时无法使用 Xbox Live，请检查账号地区设置。".to_string(),
+        Some(2148916236) | Some(2148916237) => "这个微软账号需要成人账号完成家庭/年龄验证后，才能用于 Minecraft 正版登录。".to_string(),
+        Some(2148916238) => "这个微软账号是儿童账号，当前家庭设置不允许登录 Xbox Live / Minecraft。请在 Microsoft 家庭安全设置里放行。".to_string(),
+        _ => no_minecraft_profile_message(),
+    }
+}
+
 fn exchange_to_mc_profile(
     client: &reqwest::blocking::Client,
     ms_token: &str,
@@ -190,7 +221,7 @@ fn exchange_to_mc_profile(
         .map_err(|e| format!("XSTS解析失败: {}", e))?;
     let xsts_token = xsts_json["Token"]
         .as_str()
-        .ok_or(format!("XSTS Token空: {}", xsts_json))?;
+        .ok_or_else(|| friendly_xsts_error(&xsts_json))?;
 
     // Minecraft 认证
     let mc_resp = client.post("https://api.minecraftservices.com/authentication/login_with_xbox")
@@ -200,15 +231,7 @@ fn exchange_to_mc_profile(
     let mc_status = mc_resp.status().as_u16();
     let mc_json: serde_json::Value = mc_resp.json().map_err(|e| format!("MC解析失败: {}", e))?;
     if mc_status != 200 {
-        let err = mc_json
-            .get("error")
-            .map(|e| e.to_string())
-            .unwrap_or_default();
-        let msg = mc_json
-            .get("errorMessage")
-            .and_then(|m| m.as_str())
-            .unwrap_or("未知错误");
-        return Err(format!("MC登录失败({}): {} - {}", mc_status, err, msg));
+        return Err(minecraft_service_error("Minecraft 认证", mc_status, &mc_json));
     }
     let mc_token = mc_json["access_token"]
         .as_str()
@@ -220,15 +243,22 @@ fn exchange_to_mc_profile(
         .header("Authorization", format!("Bearer {}", mc_token))
         .send()
         .map_err(|e| format!("档案失败: {}", e))?;
+    let profile_status = profile_resp.status().as_u16();
     let profile_json: serde_json::Value = profile_resp
         .json()
         .map_err(|e| format!("档案解析失败: {}", e))?;
+    if profile_status != 200 {
+        if profile_status == 404 {
+            return Err(no_minecraft_profile_message());
+        }
+        return Err(minecraft_service_error("读取 Minecraft 档案", profile_status, &profile_json));
+    }
     let name = profile_json["name"]
         .as_str()
-        .ok_or(format!("无玩家名: {}", profile_json))?;
+        .ok_or_else(|| "Minecraft 档案信息不完整：没有玩家名。请先在 Minecraft 官网创建游戏名。".to_string())?;
     let uuid = profile_json["id"]
         .as_str()
-        .ok_or(format!("无UUID: {}", profile_json))?;
+        .ok_or_else(|| "Minecraft 档案信息不完整：没有 UUID。请稍后重试。".to_string())?;
 
     Ok(McProfile {
         name: name.to_string(),

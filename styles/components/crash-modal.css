@@ -41,18 +41,6 @@
   border-bottom: 1px solid rgba(255, 200, 215, 0.3);
 }
 
-.crash-modal-icon {
-  font-size: 28px;
-  width: 48px;
-  height: 48px;
-  background: linear-gradient(135deg, #fce4ec, #f8bbd0);
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
 .crash-modal-title {
   font-size: 16px;
   font-weight: 800;

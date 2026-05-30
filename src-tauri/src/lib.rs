@@ -37,6 +37,11 @@ const UPDATE_MANIFEST_URLS: [&str; 2] = [
     "https://gitee.com/iszaizai/oaoi/raw/master/update/latest.json",
 ];
 
+const CHANGELOG_URLS: [&str; 2] = [
+    "https://gitee.com/iszaizai/oaoi/raw/main/update/changelog.json",
+    "https://gitee.com/iszaizai/oaoi/raw/master/update/changelog.json",
+];
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UpdateManifest {
     version: String,
@@ -54,6 +59,13 @@ fn get_app_version() -> String {
 #[tauri::command]
 async fn get_update_manifest() -> Result<UpdateManifest, String> {
     tokio::task::spawn_blocking(fetch_update_manifest)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_changelog() -> Result<serde_json::Value, String> {
+    tokio::task::spawn_blocking(fetch_changelog)
         .await
         .map_err(|e| e.to_string())?
 }
@@ -242,6 +254,35 @@ fn fetch_update_manifest() -> Result<UpdateManifest, String> {
     })
 }
 
+fn fetch_changelog() -> Result<serde_json::Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("OAOI-Launcher/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut last_err = String::new();
+    for url in CHANGELOG_URLS {
+        let cache_bust = match url.contains('?') {
+            true => format!("{}&t={}", url, current_unix_millis()),
+            false => format!("{}?t={}", url, current_unix_millis()),
+        };
+        match client.get(&cache_bust).send() {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.json::<serde_json::Value>().map_err(|e| e.to_string());
+            }
+            Ok(resp) => last_err = format!("HTTP {}", resp.status()),
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(if last_err.is_empty() {
+        "无法获取更新日志".to_string()
+    } else {
+        last_err
+    })
+}
+
 fn current_unix_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -382,6 +423,7 @@ pub fn run() {
             call_ai_api,
             get_app_version,
             get_update_manifest,
+            get_changelog,
             install_update,
             p2p::step1_get_ip,
             p2p::detect_mc_port,

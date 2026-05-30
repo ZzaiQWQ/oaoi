@@ -66,15 +66,6 @@
   margin-bottom: 4px;
 }
 
-.dl-progress-detail {
-  font-size: 10px;
-  color: var(--pink-600);
-  margin-bottom: 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .dl-progress-bar-wrap {
   width: 100%;
   height: 6px;
@@ -88,65 +79,6 @@
   border-radius: 99px;
   background: var(--rose-gradient);
   transition: width 0.3s ease;
-}
-
-/* 单个下载任务 */
-.dl-active-task {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 0;
-}
-
-.dl-active-task+.dl-active-task {
-  border-top: 1px solid color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
-}
-
-.dl-active-task-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  background: var(--rose-gradient);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 22px;
-  flex-shrink: 0;
-}
-
-.dl-active-task-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.dl-active-task-name {
-  font-weight: 700;
-  color: var(--pink-700);
-  font-size: 0.95rem;
-}
-
-.dl-active-task-status {
-  font-size: 0.7rem;
-  color: var(--pink-700);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.dl-active-task-bar {
-  height: 8px;
-  background: color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
-  border-radius: 99px;
-  overflow: hidden;
-  margin-top: 6px;
-}
-
-.dl-active-task-bar-fill {
-  height: 100%;
-  border-radius: 99px;
-  background: var(--rose-gradient);
-  transition: width 0.4s ease;
 }
 
 /* 多阶段进度行 */

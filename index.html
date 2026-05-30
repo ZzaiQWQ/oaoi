@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="styles/pages/instance-detail.css">
   <link rel="stylesheet" href="styles/components/drop-pill.css">
   <link rel="stylesheet" href="styles/components/crash-modal.css">
+  <link rel="stylesheet" href="styles/components/modal-framework.css">
 </head>
 
 <body>
@@ -251,6 +252,7 @@
                     <span class="p2p-status-chip" id="p2p-signal-status">未连接</span>
                   </div>
                   <div class="p2p-guide">
+                    <p><strong>提示</strong> 目前联机已经停止使用。</p>
                     <p><strong>房主</strong> 先在游戏里打开“对局域网开放”，再点侦测端口和创建房间。</p>
                     <p><strong>访客</strong> 输入房间码加入，成功后去游戏局域网列表找房间。</p>
                   </div>
@@ -821,8 +823,8 @@
       </div>
 
       <!-- 新建实例 Modal -->
-      <div id="newInstanceModal" class="modal-overlay hidden">
-        <div class="modal" data-no-drag style="width: 500px;">
+      <div id="newInstanceModal" class="modal-overlay hidden oaoi-modal-host">
+        <div class="modal oaoi-modal-card" data-no-drag>
           <div class="modal-header" data-subtitle="取个名，选个 Loader，就可以开整。">
             <h3>新建版本</h3>
             <button id="closeModalBtn" class="modal-close">&times;</button>
@@ -897,8 +899,8 @@
       </div>
 
       <!-- 整合包版本选择弹窗 -->
-      <div class="modal-overlay hidden" id="modpackVersionModal">
-        <div class="modal-content" data-no-drag style="max-width: 520px;">
+      <div class="modal-overlay hidden oaoi-modal-host" id="modpackVersionModal">
+        <div class="modal-content oaoi-modal-card" data-no-drag>
           <div class="modal-header">
             <h2 id="modpackVersionTitle">选择版本</h2>
           </div>
@@ -929,6 +931,7 @@
       <script src="js/pages/home.js"></script>
       <script src="js/pages/servers.js"></script>
       <script src="js/pages/p2p-link.js"></script>
+      <script src="js/pages/about.js"></script>
       <script src="js/pages/settings.js"></script>
       <script src="js/pages/download.js"></script>
       <script src="js/pages/modpack.js"></script>
@@ -944,8 +947,7 @@
       <div class="crash-modal-overlay" id="crashModal" style="display:none;">
         <div class="crash-modal">
           <div class="crash-modal-header">
-            <span class="crash-modal-icon">🤖</span>
-            <div>
+              <div>
               <h3 class="crash-modal-title">AI 崩溃分析</h3>
               <p class="crash-modal-subtitle" id="crashModalVersion"></p>
             </div>

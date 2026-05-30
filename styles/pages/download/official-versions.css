@@ -51,59 +51,6 @@
   border-color: var(--pink-400);
 }
 
-/* Mod 加载器选择器 */
-.dl-loader-selector {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-.dl-loader-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-mid);
-  white-space: nowrap;
-}
-.dl-loader-btns {
-  display: flex;
-  gap: 6px;
-}
-.dl-loader-btn {
-  padding: 6px 16px;
-  border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.5);
-  font-size: 12px;
-  font-weight: 600;
-  font-family: inherit;
-  color: var(--text-mid);
-  cursor: pointer;
-  transition: all 0.25s ease;
-}
-.dl-loader-btn:hover:not(:disabled) {
-  border-color: var(--pink-400);
-  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
-  color: var(--pink-600);
-}
-.dl-loader-btn.active {
-  background: var(--rose-gradient);
-  color: white;
-  border-color: transparent;
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
-}
-.dl-loader-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.dl-loader-btn[data-loader="fabric"].active {
-  background: linear-gradient(135deg, #c4a35a 0%, #dbb978 100%);
-  box-shadow: 0 2px 10px rgba(196, 163, 90, 0.3);
-}
-.dl-loader-btn[data-loader="forge"].active {
-  background: linear-gradient(135deg, #e67e22 0%, #f39c12 100%);
-  box-shadow: 0 2px 10px rgba(230, 126, 34, 0.3);
-}
-
 /* 版本区 */
 .dl-versions-section {
   background: rgba(255,255,255,0.6);

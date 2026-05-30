@@ -30,9 +30,9 @@ function ensureJvmArgsModal() {
   if (modal) return modal;
   modal = document.createElement('div');
   modal.id = 'jvmArgsModal';
-  modal.className = 'jvm-modal-overlay hidden';
+  modal.className = 'jvm-modal-overlay hidden oaoi-modal-host';
   modal.innerHTML = `
-    <div class="jvm-modal" data-no-drag>
+    <div class="jvm-modal oaoi-modal-card" data-no-drag>
       <div class="jvm-modal-header">
         <div>
           <h3>JVM 参数设置</h3>
@@ -92,10 +92,7 @@ function openJvmArgsModal() {
     syncPresetUI();
   };
 
-  const close = () => {
-    modal.classList.add('hidden');
-    modal.style.display = 'none';
-  };
+  const close = () => modal.remove();
   modal.querySelector('#jvmModalClose').onclick = close;
   modal.querySelector('#jvmCancelBtn').onclick = close;
   modal.querySelector('#jvmResetBtn').onclick = () => setPreset('recommended');
@@ -408,7 +405,12 @@ function initSettings() {
         msLoginPending = false;
         msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
-        if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = `登录失败: ${e}`; }
+        if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = '登录失败'; }
+        await showAlert(String(e || '登录失败'), {
+          title: '正版账号登录失败',
+          confirmText: '我知道了',
+          kind: 'danger',
+        });
       }
     });
   }
