@@ -1,7 +1,8 @@
 pub mod cf_download;
+pub mod download_mirror;
 pub mod install;
 
-use crate::instance::{register_cancel, resolve_game_dir, safe_path_name, unregister_cancel};
+use crate::instance::{resolve_game_dir, safe_path_name, try_register_cancel, unregister_cancel};
 use tauri::Emitter;
 
 /// 构建 HTTP client
@@ -113,9 +114,18 @@ fn detect_modpack(zip_path: &std::path::Path) -> Result<ModpackMeta, String> {
             .iter()
             .filter_map(|f| {
                 let path = f["path"].as_str()?.to_string();
-                let url = f["downloads"].as_array()?.first()?.as_str()?.to_string();
+                let urls: Vec<String> = f["downloads"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if urls.is_empty() {
+                    return None;
+                }
                 let sha1 = f["hashes"]["sha1"].as_str().map(|s| s.to_string());
-                Some(MrpackFile { path, url, sha1 })
+                Some(MrpackFile { path, urls, sha1 })
             })
             .collect();
         // 尝试读取 Modrinth 推荐内存（部分整合包会在 summary 或自定义字段中指定）
@@ -248,7 +258,7 @@ fn detect_modpack(zip_path: &std::path::Path) -> Result<ModpackMeta, String> {
 
 pub(crate) struct MrpackFile {
     pub path: String,
-    pub url: String,
+    pub urls: Vec<String>,
     pub sha1: Option<String>,
 }
 pub(crate) struct CfFile {
@@ -410,7 +420,18 @@ pub async fn import_modpack(
                 .unwrap_or("整合包")
                 .to_string()
         });
-    let cancel_flag = register_cancel(&progress_name);
+    let cancel_flag = match try_register_cancel(&progress_name) {
+        Ok(flag) => flag,
+        Err(error) => {
+            let _ = app2.emit(
+                "install-progress",
+                serde_json::json!({
+                    "name": &progress_name, "stage": "error", "current": 0, "total": 0, "detail": &error
+                }),
+            );
+            return Err(error);
+        }
+    };
     std::thread::spawn(move || {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             do_import_modpack_named(
@@ -429,18 +450,28 @@ pub async fn import_modpack(
             )),
         };
         unregister_cancel(&progress_name);
-        if let Err(ref e) = result {
-            let stage = if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                "cancelled"
-            } else {
-                "error"
-            };
-            let _ = app2.emit(
-                "install-progress",
-                serde_json::json!({
-                    "name": &progress_name, "stage": stage, "current": 0, "total": 0, "detail": e
-                }),
-            );
+        match &result {
+            Ok(message) => {
+                let _ = app2.emit(
+                    "install-progress",
+                    serde_json::json!({
+                        "name": &progress_name, "stage": "done", "current": 1, "total": 1, "detail": message
+                    }),
+                );
+            }
+            Err(e) => {
+                let stage = if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    "cancelled"
+                } else {
+                    "error"
+                };
+                let _ = app2.emit(
+                    "install-progress",
+                    serde_json::json!({
+                        "name": &progress_name, "stage": stage, "current": 0, "total": 0, "detail": e
+                    }),
+                );
+            }
         }
     });
     Ok("importing".to_string())
@@ -454,6 +485,36 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     } else {
         "未知错误".to_string()
     }
+}
+
+fn cleanup_install_dir(inst_dir: &std::path::Path) -> Result<(), String> {
+    if !inst_dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(inst_dir).map_err(|e| format!("清理安装目录失败: {}", e))
+}
+
+fn remove_install_marker(marker: &std::path::Path) -> Result<(), String> {
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        match std::fs::remove_file(marker) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last_error = e.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+    }
+
+    // 删除失败时，至少把“安装中”标记改成“已完成”标记。
+    let done_marker = marker.with_file_name(".oaoi_install_complete");
+    std::fs::rename(marker, &done_marker).map_err(|e| {
+        format!(
+            "移除安装标记失败: {}; 重命名完成标记也失败: {}",
+            last_error, e
+        )
+    })
 }
 
 fn create_unique_instance_dir(
@@ -505,37 +566,67 @@ pub fn do_import_modpack_named(
         &install_marker_path,
         format!("pid={}\nmodpack={}\n", std::process::id(), inst_name),
     ) {
-        let _ = std::fs::remove_dir_all(&inst_dir);
-        return Err(format!("创建安装标记失败: {}", e));
+        let cleanup_result = cleanup_install_dir(&inst_dir);
+        return Err(match cleanup_result {
+            Ok(()) => format!("创建安装标记失败: {}", e),
+            Err(cleanup_error) => format!("创建安装标记失败: {}; {}", e, cleanup_error),
+        });
     }
 
     // 包装安装，失败时自动清理目录
-    let result = install::do_install_modpack_inner(
-        app,
-        zip_file,
-        game_dir_input,
-        java_path,
-        use_mirror,
-        &meta,
-        &inst_dir,
-        &game_dir,
-        name,
-    );
-    if let Err(ref e) = result {
-        if install_marker_path.exists() {
-            let _ = std::fs::remove_dir_all(&inst_dir);
-            eprintln!("[modpack] 安装失败，已清理: {}", inst_dir.display());
-        } else if inst_dir.exists() {
-            eprintln!("[modpack] 跳过清理非本次安装目录: {}", inst_dir.display());
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        install::do_install_modpack_inner(
+            app,
+            zip_file,
+            game_dir_input,
+            java_path,
+            use_mirror,
+            &meta,
+            &inst_dir,
+            &game_dir,
+            name,
+        )
+    })) {
+        Ok(result) => result,
+        Err(payload) => Err(format!(
+            "安装线程崩溃: {}",
+            panic_payload_to_string(payload)
+        )),
+    };
+    match result {
+        Err(e) => {
+            let mut final_error = e;
+            if install_marker_path.exists() {
+                match cleanup_install_dir(&inst_dir) {
+                    Ok(()) => eprintln!("[modpack] 安装失败，已清理: {}", inst_dir.display()),
+                    Err(cleanup_error) => {
+                        eprintln!(
+                            "[modpack] 安装失败，清理失败: {} ({})",
+                            inst_dir.display(),
+                            cleanup_error
+                        );
+                        final_error = format!("{}; {}", final_error, cleanup_error);
+                    }
+                }
+            } else if inst_dir.exists() {
+                eprintln!("[modpack] 跳过清理非本次安装目录: {}", inst_dir.display());
+            }
+            let stage = if crate::instance::is_cancelled(name) {
+                "cancelled"
+            } else {
+                "error"
+            };
+            emit_progress(app, name, stage, 0, 0, &final_error);
+            Err(final_error)
         }
-        let stage = if crate::instance::is_cancelled(name) {
-            "cancelled"
-        } else {
-            "error"
-        };
-        emit_progress(app, name, stage, 0, 0, e);
-    } else {
-        let _ = std::fs::remove_file(&install_marker_path);
+        Ok(message) => match remove_install_marker(&install_marker_path) {
+            Ok(()) => Ok(message),
+            Err(marker_error) => {
+                let final_error = format!("安装已完成，但{}", marker_error);
+                eprintln!("[modpack] {}", final_error);
+                emit_progress(app, name, "error", 0, 0, &final_error);
+                Err(final_error)
+            }
+        },
     }
-    result
 }

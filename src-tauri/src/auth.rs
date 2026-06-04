@@ -231,7 +231,11 @@ fn exchange_to_mc_profile(
     let mc_status = mc_resp.status().as_u16();
     let mc_json: serde_json::Value = mc_resp.json().map_err(|e| format!("MC解析失败: {}", e))?;
     if mc_status != 200 {
-        return Err(minecraft_service_error("Minecraft 认证", mc_status, &mc_json));
+        return Err(minecraft_service_error(
+            "Minecraft 认证",
+            mc_status,
+            &mc_json,
+        ));
     }
     let mc_token = mc_json["access_token"]
         .as_str()
@@ -251,11 +255,15 @@ fn exchange_to_mc_profile(
         if profile_status == 404 {
             return Err(no_minecraft_profile_message());
         }
-        return Err(minecraft_service_error("读取 Minecraft 档案", profile_status, &profile_json));
+        return Err(minecraft_service_error(
+            "读取 Minecraft 档案",
+            profile_status,
+            &profile_json,
+        ));
     }
-    let name = profile_json["name"]
-        .as_str()
-        .ok_or_else(|| "Minecraft 档案信息不完整：没有玩家名。请先在 Minecraft 官网创建游戏名。".to_string())?;
+    let name = profile_json["name"].as_str().ok_or_else(|| {
+        "Minecraft 档案信息不完整：没有玩家名。请先在 Minecraft 官网创建游戏名。".to_string()
+    })?;
     let uuid = profile_json["id"]
         .as_str()
         .ok_or_else(|| "Minecraft 档案信息不完整：没有 UUID。请稍后重试。".to_string())?;

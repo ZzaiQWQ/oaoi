@@ -1,8 +1,13 @@
-use crate::installer::download_file_with_progress;
+use crate::downloader::event::{DownloadEvent, DownloadOutcome};
+use crate::downloader::{
+    DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
+};
 use crate::instance::{
-    cf_api_key, is_cancelled, register_cancel, safe_path_name, unregister_cancel,
+    cf_api_key, install_download_pool, is_cancelled, register_download_manager, safe_path_name,
+    try_register_cancel, unregister_cancel,
 };
 use std::sync::atomic::Ordering;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ===== 整合包在线搜索 =====
 
@@ -398,16 +403,36 @@ pub fn install_modpack_direct(
 ) -> Result<String, String> {
     let file_name = safe_path_name(&file_name, "文件名")?;
     let download_urls = normalize_download_urls(download_url, download_urls);
-    let cancel_flag = register_cancel(&file_name);
+    let cancel_flag = match try_register_cancel(&file_name) {
+        Ok(flag) => flag,
+        Err(error) => {
+            let _ = tauri::Emitter::emit(
+                &app_handle,
+                "install-progress",
+                serde_json::json!({
+                    "name": &file_name, "stage": "error", "current": 0, "total": 0, "detail": &error
+                }),
+            );
+            return Err(error);
+        }
+    };
     std::thread::spawn(move || {
-        let result = do_install_modpack_direct(
-            &app_handle,
-            download_urls,
-            &file_name,
-            &game_dir,
-            &java_path,
-            use_mirror,
-        );
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            do_install_modpack_direct(
+                &app_handle,
+                download_urls,
+                &file_name,
+                &game_dir,
+                &java_path,
+                use_mirror,
+            )
+        })) {
+            Ok(result) => result,
+            Err(payload) => Err(format!(
+                "安装线程崩溃: {}",
+                panic_payload_to_string(payload)
+            )),
+        };
         unregister_cancel(&file_name);
         match result {
             Ok(msg) => eprintln!("[modpack-dl] {}", msg),
@@ -429,6 +454,88 @@ pub fn install_modpack_direct(
         }
     });
     Ok("downloading".to_string())
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "未知错误".to_string()
+    }
+}
+
+fn modpack_direct_temp_dir(file_name: &str) -> std::path::PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    std::env::temp_dir().join("oaoi_modpack_dl").join(format!(
+        "{}-{}-{}",
+        std::process::id(),
+        stamp,
+        file_name
+    ))
+}
+
+struct TempDirGuard {
+    path: std::path::PathBuf,
+    cleaned: bool,
+}
+
+impl TempDirGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            cleaned: false,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        if !self.path.exists() {
+            self.cleaned = true;
+            return Ok(());
+        }
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                self.cleaned = true;
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "临时目录清理失败: {} ({})",
+                self.path.display(),
+                error
+            )),
+        }
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if self.cleaned || !self.path.exists() {
+            return;
+        }
+        // panic 或提前返回时兜底清理在线整合包临时目录。
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            eprintln!(
+                "[modpack-dl] 临时目录兜底清理失败: {} ({})",
+                self.path.display(),
+                error
+            );
+        }
+    }
+}
+
+fn append_cleanup_error(error: String, cleanup_result: Result<(), String>) -> String {
+    match cleanup_result {
+        Ok(()) => error,
+        Err(cleanup_error) => format!("{}; {}", error, cleanup_error),
+    }
 }
 
 fn do_install_modpack_direct(
@@ -455,16 +562,22 @@ fn do_install_modpack_direct(
         .map_err(|e| e.to_string())?;
 
     // 保存到临时文件（流式写入）
-    let tmp_dir = std::env::temp_dir().join("oaoi_modpack_dl");
-    std::fs::create_dir_all(&tmp_dir).ok();
-    let tmp_path = tmp_dir.join(file_name);
-    let downloaded = download_modpack_archive_with_fallbacks(
+    let mut tmp_dir = TempDirGuard::new(modpack_direct_temp_dir(file_name));
+    std::fs::create_dir_all(tmp_dir.path()).map_err(|e| format!("创建临时目录失败: {}", e))?;
+    let tmp_path = tmp_dir.path().join(file_name);
+    let downloaded = match download_modpack_archive_with_fallbacks(
         app_handle,
         &http,
         &download_urls,
         file_name,
         &tmp_path,
-    )?;
+    ) {
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            let cleanup_result = tmp_dir.cleanup();
+            return Err(append_cleanup_error(error, cleanup_result));
+        }
+    };
     let total_size = std::fs::metadata(&tmp_path)
         .map(|m| m.len())
         .unwrap_or(downloaded);
@@ -480,8 +593,11 @@ fn do_install_modpack_direct(
 
     // 再次检查取消
     if is_cancelled(file_name) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err("用户取消安装".to_string());
+        let cleanup_result = tmp_dir.cleanup();
+        return Err(append_cleanup_error(
+            "用户取消安装".to_string(),
+            cleanup_result,
+        ));
     }
 
     eprintln!(
@@ -499,56 +615,27 @@ fn do_install_modpack_direct(
         Some(file_name),
     );
 
-    // 清理临时文件
-    let _ = std::fs::remove_file(&tmp_path);
-    let _ = std::fs::remove_dir(&tmp_dir);
-
-    result
-}
-
-const MODPACK_PARALLEL_WORKERS: u64 = 8;
-
-fn download_modpack_archive(
-    app_handle: &tauri::AppHandle,
-    http: &reqwest::blocking::Client,
-    download_url: &str,
-    file_name: &str,
-    tmp_path: &std::path::Path,
-) -> Result<u64, String> {
-    let _ = std::fs::remove_file(tmp_path);
-    download_file_with_progress(
-        http,
-        download_url,
-        tmp_path,
-        None,
-        false,
-        Some(file_name),
-        |downloaded, total| {
-            emit_download_progress(app_handle, file_name, downloaded, total.unwrap_or(0));
+    match result {
+        Ok(message) => match tmp_dir.cleanup() {
+            Ok(()) => {
+                let _ = tauri::Emitter::emit(
+                    app_handle,
+                    "install-progress",
+                    serde_json::json!({
+                        "name": file_name, "stage": "done", "current": 1, "total": 1, "detail": message
+                    }),
+                );
+                Ok(message)
+            }
+            Err(cleanup_error) => {
+                eprintln!("[modpack-dl] {}", cleanup_error);
+                Err(format!("安装已完成，但{}", cleanup_error))
+            }
         },
-    )
-    .map_err(|e| format!("下载整合包失败: {}", e))?;
-
-    let downloaded = std::fs::metadata(tmp_path)
-        .map(|m| m.len())
-        .map_err(|e| format!("读取整合包文件失败: {}", e))?;
-    if downloaded == 0 {
-        return Err("下载整合包失败: 文件为空".to_string());
-    }
-    Ok(downloaded)
-}
-
-fn part_path(tmp_path: &std::path::Path, index: usize) -> std::path::PathBuf {
-    let file_name = tmp_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("modpack.zip");
-    tmp_path.with_file_name(format!("{}.part{}", file_name, index))
-}
-
-fn remove_part_files(tmp_path: &std::path::Path, count: usize) {
-    for index in 0..count {
-        let _ = std::fs::remove_file(part_path(tmp_path, index));
+        Err(error) => {
+            let cleanup_result = tmp_dir.cleanup();
+            Err(append_cleanup_error(error, cleanup_result))
+        }
     }
 }
 
@@ -582,29 +669,74 @@ fn emit_download_progress(
     }
 }
 
+fn modpack_archive_download_options() -> DownloadEngineOptions {
+    let mut options = DownloadEngineOptions::default();
+    options.max_global_connections = 64;
+    options.max_connections_per_file = 64;
+    options.max_active_files = 1;
+    options.candidate_no_progress_timeout = Duration::from_secs(10);
+    options.candidate_retry_delay = Duration::from_secs(15);
+    options.source_cooldown_duration = Duration::from_secs(15);
+    options.read_timeout = Duration::from_secs(15);
+    options
+}
+
 fn download_modpack_archive_with_fallbacks(
     app_handle: &tauri::AppHandle,
-    http: &reqwest::blocking::Client,
+    _http: &reqwest::blocking::Client,
     download_urls: &[String],
     file_name: &str,
     tmp_path: &std::path::Path,
 ) -> Result<u64, String> {
-    let mut last_err = String::new();
-    for url in download_urls {
-        eprintln!("[modpack-dl] try archive: {}", url);
-        match download_modpack_archive(app_handle, http, url, file_name, tmp_path) {
-            Ok(downloaded) => return Ok(downloaded),
-            Err(err) => {
-                last_err = format!("{}: {}", url, err);
-                eprintln!("[modpack-dl] archive failed, try next: {}", last_err);
+    let candidates = download_urls
+        .iter()
+        .filter(|url| !url.trim().is_empty())
+        .cloned()
+        .map(DownloadCandidate::new)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err("没有可用整合包下载地址".to_string());
+    }
+    let _ = std::fs::remove_file(tmp_path);
+
+    let options = modpack_archive_download_options();
+    let pool = install_download_pool(file_name, 64);
+    let manager = DownloadManager::with_options_and_pool(options, pool)?;
+    let _manager_registration = register_download_manager(file_name, &manager);
+
+    let request = DownloadRequest::new("modpack-archive", candidates, tmp_path);
+    let app_for_event = app_handle.clone();
+    let file_name_for_event = file_name.to_string();
+    let outcomes = manager.download_many(vec![request], move |event| {
+        if let DownloadEvent::Progress(progress) = event {
+            emit_download_progress(
+                &app_for_event,
+                &file_name_for_event,
+                progress.downloaded,
+                progress.total.unwrap_or(0),
+            );
+        }
+    });
+    if is_cancelled(file_name) {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err("用户取消下载".to_string());
+    }
+
+    match outcomes.into_iter().next() {
+        Some(DownloadOutcome::Finished(result)) => {
+            if result.bytes == 0 {
                 let _ = std::fs::remove_file(tmp_path);
-                remove_part_files(tmp_path, MODPACK_PARALLEL_WORKERS as usize);
+                return Err("下载整合包失败: 文件为空".to_string());
             }
+            Ok(result.bytes)
+        }
+        Some(DownloadOutcome::Failed { error, .. }) => {
+            let _ = std::fs::remove_file(tmp_path);
+            Err(format!("下载整合包失败: {}", error))
+        }
+        None => {
+            let _ = std::fs::remove_file(tmp_path);
+            Err("下载整合包失败: 没有下载结果".to_string())
         }
     }
-    Err(if last_err.is_empty() {
-        "没有可用整合包下载地址".to_string()
-    } else {
-        last_err
-    })
 }

@@ -657,6 +657,104 @@ function showModpackExportModal() {
   }, 250);
 }
 
+function formatAnalyzeIssues(items, formatter, limit = 8) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  const shown = items.slice(0, limit).map(formatter);
+  const remain = items.length > limit ? `\n还有 ${items.length - limit} 项未显示` : '';
+  return `${shown.join('\n')}${remain}`;
+}
+
+function formatAnalyzeModFileName(file) {
+  return String(file || '')
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.jar$/i, '');
+}
+
+function formatInstanceAnalyzeResult(result) {
+  const scanned = Number(result?.scannedFiles || 0);
+  const parsed = Number(result?.parsedMods || 0);
+  const issueCount = Number(result?.issueCount || 0);
+  const duplicates = result?.duplicates || [];
+  const missing = result?.missingDependencies || [];
+  const mismatches = result?.loaderMismatches || [];
+  const warnings = result?.warnings || [];
+
+  const parts = [
+    `扫描文件：${scanned}`,
+    `识别 Mod：${parsed}`,
+    `发现问题：${issueCount}`,
+  ];
+
+  if (!issueCount) {
+    parts.push('', '没有发现明显的重复 Mod、缺失前置或 Loader 不匹配。');
+    return parts.join('\n');
+  }
+
+  if (duplicates.length) {
+    parts.push('', `重复 Mod：${duplicates.length}`);
+    parts.push(formatAnalyzeIssues(duplicates, item => {
+      return (item.files || []).map(file => formatAnalyzeModFileName(file.file)).join('\n');
+    }));
+  }
+
+  if (missing.length) {
+    parts.push('', `缺少前置：${missing.length}`);
+    parts.push(formatAnalyzeIssues(missing, item => {
+      const req = item.versionReq ? ` ${item.versionReq}` : '';
+      return `- ${item.modName || item.modId} 缺少 ${item.dependencyId}${req}`;
+    }));
+  }
+
+  if (mismatches.length) {
+    parts.push('', `运行环境不匹配：${mismatches.length}`);
+    parts.push(formatAnalyzeIssues(mismatches, item => {
+      return `- ${item.modName || item.modId}: ${item.modLoader} 不能用于 ${item.instanceLoader}`;
+    }));
+  }
+
+  if (warnings.length) {
+    parts.push('', `无法识别/读取：${warnings.length}`);
+    parts.push(formatAnalyzeIssues(warnings, item => `- ${item.file}: ${item.message}`, 6));
+  }
+
+  return parts.filter(part => part !== '').join('\n');
+}
+
+async function analyzeCurrentInstanceMods() {
+  if (!currentDetailInstance) return;
+  const btn = document.getElementById('instanceAnalyzeBtn');
+  const originalText = btn?.textContent || '一键检测';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '检测中...';
+  }
+  try {
+    const tauri = await waitForTauri();
+    const gameDir = localStorage.getItem('gameDir') || '';
+    const result = await tauri.core.invoke('analyze_instance_mods', {
+      gameDir,
+      name: currentDetailInstance,
+      mcVersion: currentDetailInfo?.mc_version || '',
+      loader: currentDetailInfo?.loader_type || '',
+    });
+    await showAlert(formatInstanceAnalyzeResult(result), {
+      title: '一键检测结果',
+      confirmText: '我知道了',
+    });
+  } catch (err) {
+    await showAlert(`检测失败：${err}`, {
+      title: '一键检测失败',
+      confirmText: '我知道了',
+    });
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  }
+}
+
 // Tab 切换
 function switchModTab(tab) {
   document.querySelectorAll('.mod-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
@@ -1287,7 +1385,7 @@ function initInstanceDetailPage() {
   // 文件夹按钮
   document.querySelectorAll('.instance-folder-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (btn.id === 'instanceExportBtn') return;
+      if (btn.id === 'instanceExportBtn' || btn.id === 'instanceAnalyzeBtn' || btn.id === 'instanceConfigBtn') return;
       if (!currentDetailInstance) return;
       try {
         const tauri = await waitForTauri();
@@ -1299,6 +1397,7 @@ function initInstanceDetailPage() {
     });
   });
   document.getElementById('instanceExportBtn')?.addEventListener('click', showModpackExportModal);
+  document.getElementById('instanceAnalyzeBtn')?.addEventListener('click', analyzeCurrentInstanceMods);
 
   // Tab 切换
   document.querySelectorAll('.mod-tab').forEach(tab => {

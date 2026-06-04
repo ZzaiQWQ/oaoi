@@ -1,8 +1,14 @@
-use super::{
-    download_file_exact_once_with_stall_timeout, download_file_with_progress, library_allowed,
-    make_emitter, mirror_url, parallel_download, safe_maven_path,
+use super::{library_allowed, make_emitter, mirror_url, safe_maven_path};
+use crate::downloader::event::{DownloadEvent, DownloadOutcome};
+use crate::downloader::{
+    DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
 };
-use crate::instance::safe_path_name;
+use crate::instance::{install_download_pool, register_download_manager, safe_path_name};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Emitter;
 
 /// 安装 vanilla 基础（meta + client.jar + libraries + assets）
@@ -172,12 +178,14 @@ fn join_vanilla_stages(
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         if first_error.is_none() {
+                            eprintln!("[vanilla] {} 阶段失败，取消基础游戏下载: {}", stage, e);
                             let _ = crate::instance::cancel_modpack_install(name.to_string());
                             first_error = Some(format!("{}: {}", stage, e));
                         }
                     }
                     Err(_) => {
                         if first_error.is_none() {
+                            eprintln!("[vanilla] {} 阶段线程异常退出，取消基础游戏下载", stage);
                             let _ = crate::instance::cancel_modpack_install(name.to_string());
                             first_error = Some(format!("{} 线程异常退出", stage));
                         }
@@ -201,11 +209,227 @@ fn join_vanilla_stages(
     }
 }
 
+#[derive(Clone)]
+struct VanillaDownloadTask {
+    candidates: Vec<String>,
+    dest: PathBuf,
+    sha1: Option<String>,
+}
+
+#[derive(Clone)]
+struct VanillaTaskInfo {
+    first_url: String,
+}
+
+fn vanilla_source_candidates(url: &str, use_mirror: bool) -> Vec<String> {
+    let official = mirror_url(url, false);
+    let mirror = mirror_url(url, true);
+    let mut out = Vec::new();
+    if use_mirror && mirror != official {
+        out.push(mirror);
+        out.push(official);
+    } else {
+        out.push(official);
+        if mirror != out[0] {
+            out.push(mirror);
+        }
+    }
+    out
+}
+
+fn vanilla_download_options(
+    max_global_connections: usize,
+    max_connections_per_file: usize,
+    max_active_files: usize,
+) -> DownloadEngineOptions {
+    let mut options = DownloadEngineOptions::default();
+    options.max_global_connections = max_global_connections.max(1);
+    options.max_connections_per_file = max_connections_per_file.max(1);
+    options.max_active_files = max_active_files.max(1);
+    options.candidate_no_progress_timeout = Duration::from_secs(15);
+    options.candidate_retry_delay = Duration::from_secs(15);
+    options.source_cooldown_duration = Duration::from_secs(15);
+    options.read_timeout = Duration::from_secs(15);
+    options
+}
+
+fn build_vanilla_request(stage: &str, index: usize, task: &VanillaDownloadTask) -> DownloadRequest {
+    let candidates = task
+        .candidates
+        .iter()
+        .cloned()
+        .map(DownloadCandidate::new)
+        .collect::<Vec<_>>();
+    let mut request = DownloadRequest::new(format!("{stage}-{index}"), candidates, &task.dest);
+    if let Some(sha1) = task.sha1.as_deref().filter(|sha1| !sha1.trim().is_empty()) {
+        request = request.with_expected_sha1(sha1.trim().to_string());
+    }
+    request
+}
+
+fn mark_vanilla_task_done(
+    request_id: &str,
+    done: &AtomicUsize,
+    completed: &Mutex<HashSet<String>>,
+) -> usize {
+    let mut completed = completed.lock().unwrap();
+    if completed.insert(request_id.to_string()) {
+        done.fetch_add(1, Ordering::Relaxed) + 1
+    } else {
+        done.load(Ordering::Relaxed)
+    }
+}
+
+fn is_cancel_related_error(error: &str) -> bool {
+    error.contains("cancelled")
+        || error.contains("download cancelled")
+        || error.contains("用户取消")
+}
+
+fn run_vanilla_downloads(
+    app_handle: &tauri::AppHandle,
+    name: &str,
+    stage: &str,
+    detail_label: &str,
+    tasks: Vec<VanillaDownloadTask>,
+    max_global_connections: usize,
+    max_connections_per_file: usize,
+    max_active_files: usize,
+    report_bytes: bool,
+) -> Result<(), String> {
+    let emit = make_emitter(app_handle, name);
+    let total = tasks.len();
+    if total == 0 {
+        emit(stage, 0, 0, detail_label);
+        return Ok(());
+    }
+
+    let mut requests = Vec::with_capacity(tasks.len());
+    let mut info_by_id = HashMap::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let request = build_vanilla_request(stage, index, task);
+        info_by_id.insert(
+            request.id.clone(),
+            VanillaTaskInfo {
+                first_url: task.candidates.first().cloned().unwrap_or_default(),
+            },
+        );
+        requests.push(request);
+    }
+
+    let options = vanilla_download_options(
+        max_global_connections,
+        max_connections_per_file,
+        max_active_files,
+    );
+    let pool = install_download_pool(
+        name,
+        DownloadEngineOptions::default_global_connection_limit(),
+    );
+    let manager = DownloadManager::with_options_and_pool(options, pool)?;
+    let _manager_registration = register_download_manager(name, &manager);
+
+    let done = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(Mutex::new(HashSet::new()));
+    let info_for_event = Arc::new(info_by_id.clone());
+    let app_for_event = app_handle.clone();
+    let name_for_event = name.to_string();
+    let stage_for_event = stage.to_string();
+    let detail_for_event = detail_label.to_string();
+    let done_for_event = done.clone();
+    let completed_for_event = completed.clone();
+    let info_for_failed_event = info_for_event.clone();
+    let outcomes = manager.download_many(requests, move |event| match event {
+        DownloadEvent::Progress(progress) if report_bytes => {
+            let total_bytes = progress
+                .total
+                .unwrap_or_else(|| progress.downloaded.max(1))
+                .max(progress.downloaded)
+                .max(1);
+            let _ = app_for_event.emit(
+                "install-progress",
+                serde_json::json!({
+                    "name": name_for_event,
+                    "stage": stage_for_event,
+                    "current": progress_usize(progress.downloaded),
+                    "total": progress_usize(total_bytes),
+                    "detail": detail_for_event
+                }),
+            );
+        }
+        DownloadEvent::FileFinished(result) => {
+            let finished =
+                mark_vanilla_task_done(&result.request_id, &done_for_event, &completed_for_event);
+            if !report_bytes {
+                let _ = app_for_event.emit(
+                    "install-progress",
+                    serde_json::json!({
+                        "name": name_for_event,
+                        "stage": stage_for_event,
+                        "current": finished,
+                        "total": total,
+                        "detail": format!("{} {}/{}", detail_for_event, finished, total)
+                    }),
+                );
+            }
+        }
+        DownloadEvent::FileFailed {
+            request_id, error, ..
+        } => {
+            if !is_cancel_related_error(&error) {
+                let first_url = info_for_failed_event
+                    .get(&request_id)
+                    .map(|info| info.first_url.as_str())
+                    .unwrap_or("");
+                eprintln!(
+                    "[vanilla] {} 文件下载失败事件: {} -> {}",
+                    stage_for_event, first_url, error
+                );
+            }
+        }
+        _ => {}
+    });
+
+    let mut errors = Vec::new();
+    for outcome in outcomes {
+        if let DownloadOutcome::Failed {
+            request_id, error, ..
+        } = outcome
+        {
+            let first_url = info_by_id
+                .get(&request_id)
+                .map(|info| info.first_url.clone())
+                .unwrap_or_default();
+            errors.push(format!("{} -> {}", first_url, error));
+        }
+    }
+    let was_cancelled = crate::instance::is_cancelled(name);
+    if errors.is_empty() {
+        if was_cancelled {
+            return Err("用户取消下载".to_string());
+        }
+        Ok(())
+    } else if was_cancelled && errors.iter().all(|error| is_cancel_related_error(error)) {
+        Err("用户取消下载".to_string())
+    } else {
+        for error in &errors {
+            eprintln!("[vanilla] {} 下载失败: {}", stage, error);
+        }
+        let sample = errors
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(format!("{} files failed: {}", errors.len(), sample))
+    }
+}
+
 fn download_client_stage(
     app_handle: &tauri::AppHandle,
     name: &str,
     inst_dir: &std::path::Path,
-    http: &reqwest::blocking::Client,
+    _http: &reqwest::blocking::Client,
     use_mirror: bool,
     client_info: &serde_json::Value,
 ) -> Result<(), String> {
@@ -217,25 +441,21 @@ fn download_client_stage(
         .ok_or("缺少 client url")?;
     let client_sha1 = client_info.get("sha1").and_then(|v| v.as_str());
     let jar_path = inst_dir.join("client.jar");
-    download_file_with_progress(
-        http,
-        client_url,
-        &jar_path,
-        client_sha1,
-        use_mirror,
-        Some(name),
-        |downloaded, total| {
-            let total = total
-                .unwrap_or_else(|| downloaded.max(1))
-                .max(downloaded)
-                .max(1);
-            emit(
-                "client",
-                progress_usize(downloaded),
-                progress_usize(total),
-                "下载 client.jar...",
-            );
-        },
+    let task = VanillaDownloadTask {
+        candidates: vanilla_source_candidates(client_url, use_mirror),
+        dest: jar_path,
+        sha1: client_sha1.map(|sha1| sha1.to_string()),
+    };
+    run_vanilla_downloads(
+        app_handle,
+        name,
+        "client",
+        "下载 client.jar...",
+        vec![task],
+        16,
+        16,
+        1,
+        true,
     )
     .map_err(|e| format!("下载 client.jar 失败: {}", e))?;
     emit("client", 1, 1, "client.jar 完成");
@@ -246,12 +466,12 @@ fn download_libraries_stage(
     app_handle: &tauri::AppHandle,
     name: &str,
     game_dir: &std::path::Path,
-    http: &reqwest::blocking::Client,
+    _http: &reqwest::blocking::Client,
     use_mirror: bool,
     libs: Vec<serde_json::Value>,
 ) -> Result<(), String> {
     let emit = make_emitter(app_handle, name);
-    let mut tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut tasks = Vec::new();
     for lib in libs.iter() {
         let rules = lib
             .get("rules")
@@ -266,7 +486,11 @@ fn download_libraries_stage(
             if !path.is_empty() && !url.is_empty() {
                 let rel_path = safe_maven_path(path)?;
                 let dest = game_dir.join("libs").join(rel_path);
-                tasks.push((url.to_string(), dest, sha1.map(|s| s.to_string())));
+                tasks.push(VanillaDownloadTask {
+                    candidates: vanilla_source_candidates(url, use_mirror),
+                    dest,
+                    sha1: sha1.map(|s| s.to_string()),
+                });
             }
         }
     }
@@ -277,25 +501,18 @@ fn download_libraries_stage(
         total,
         &format!("下载 {} 个依赖库...", total),
     );
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let app_clone = app_handle.clone();
-    let done_reporter = done.clone();
-    let inst_name_copy = name.to_string();
-    let reporter =
-        std::thread::spawn(move || loop {
-            let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = app_clone.emit("install-progress", serde_json::json!({
-            "name": inst_name_copy, "stage": "libraries", "current": finished, "total": total,
-            "detail": format!("依赖库 {}/{}", finished, total)
-        }));
-            if finished >= total {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        });
-    let download_result = parallel_download(http, tasks, &done, 32, use_mirror, Some(name));
-    let _ = reporter.join();
-    download_result.map_err(|e| format!("libraries: {}", e))?;
+    run_vanilla_downloads(
+        app_handle,
+        name,
+        "libraries",
+        "依赖库",
+        tasks,
+        32,
+        1,
+        32,
+        false,
+    )
+    .map_err(|e| format!("libraries: {}", e))?;
     emit("libraries", total, total, "依赖库下载完成");
     Ok(())
 }
@@ -324,23 +541,34 @@ fn download_assets_stage(
     emit("assetIndex", 0, 0, "下载资源索引...");
     let mut index_urls = Vec::new();
     if use_mirror && !index_id.is_empty() && index_id != "unknown" {
-        index_urls.push((
-            "镜像".to_string(),
-            format!("https://bmclapi2.bangbang93.com/indexes/{}.json", index_id),
-            2,
-            true,
+        index_urls.push(format!(
+            "https://bmclapi2.bangbang93.com/indexes/{}.json",
+            index_id
         ));
     }
     if !index_url.is_empty() {
-        index_urls.push((
-            "官方".to_string(),
-            index_url.to_string(),
-            if use_mirror { 3 } else { 5 },
-            false,
-        ));
+        for url in vanilla_source_candidates(index_url, false) {
+            if !index_urls.iter().any(|item| item == &url) {
+                index_urls.push(url);
+            }
+        }
     }
-    download_resource_file_candidates(&index_urls, &index_path, index_sha1, Some(name), None)
-        .map_err(|e| format!("下载资源索引失败: {}", e))?;
+    run_vanilla_downloads(
+        app_handle,
+        name,
+        "assetIndex",
+        "资源索引",
+        vec![VanillaDownloadTask {
+            candidates: index_urls,
+            dest: index_path.clone(),
+            sha1: index_sha1.map(|sha1| sha1.to_string()),
+        }],
+        1,
+        1,
+        1,
+        false,
+    )
+    .map_err(|e| format!("下载资源索引失败: {}", e))?;
     emit("assetIndex", 1, 1, "资源索引完成");
 
     let index_content =
@@ -350,10 +578,15 @@ fn download_assets_stage(
     let Some(objects) = index_json.get("objects").and_then(|v| v.as_object()) else {
         return Ok(());
     };
-    let mut asset_tasks: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    let mut asset_tasks = Vec::new();
+    let mut seen_hashes = HashSet::new();
     for (_name, info) in objects.iter() {
         let hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
         if !is_valid_sha1(hash) {
+            continue;
+        }
+        // 资源索引可能多个资源名指向同一个 hash，目标文件只需要下载一次。
+        if !seen_hashes.insert(hash.to_string()) {
             continue;
         }
         let prefix = &hash[..2];
@@ -362,421 +595,28 @@ fn download_assets_stage(
             "https://resources.download.minecraft.net/{}/{}",
             prefix, hash
         );
-        asset_tasks.push((url, dest, hash.to_string()));
+        asset_tasks.push(VanillaDownloadTask {
+            candidates: vanilla_source_candidates(&url, use_mirror),
+            dest,
+            sha1: Some(hash.to_string()),
+        });
     }
     let total = asset_tasks.len();
     emit("assets", 0, total, &format!("下载 {} 个资源...", total));
-
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let app_clone = app_handle.clone();
-    let done_reporter = done.clone();
-    let inst_name_copy = name.to_string();
-    let reporter = std::thread::spawn(move || loop {
-        let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
-        let _ = app_clone.emit(
-            "install-progress",
-            serde_json::json!({
-                "name": inst_name_copy, "stage": "assets", "current": finished, "total": total,
-                "detail": format!("资源 {}/{}", finished, total)
-            }),
-        );
-        if finished >= total {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
-    });
-
-    let asset_dl_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = asset_tasks
-        .into_iter()
-        .map(|(url, dest, hash)| (url, dest, Some(hash)))
-        .collect();
-    let download_result =
-        parallel_download_resources(asset_dl_tasks, &done, 64, use_mirror, Some(name));
-    let _ = reporter.join();
-    download_result.map_err(|e| format!("assets: {}", e))?;
+    run_vanilla_downloads(
+        app_handle,
+        name,
+        "assets",
+        "资源",
+        asset_tasks,
+        32,
+        1,
+        32,
+        false,
+    )
+    .map_err(|e| format!("assets: {}", e))?;
     emit("assets", total, total, "资源下载完成");
     Ok(())
-}
-
-const RESOURCE_DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 15;
-const RESOURCE_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 90;
-const RESOURCE_MIRROR_RETRIES: usize = 2;
-const RESOURCE_OFFICIAL_RETRIES: usize = 3;
-const RESOURCE_RETRY_DELAY_SECS: u64 = 15;
-
-struct ResourceDownloadState {
-    mirror_cooldown_until_ms: std::sync::atomic::AtomicU64,
-}
-
-impl ResourceDownloadState {
-    fn new() -> Self {
-        Self {
-            mirror_cooldown_until_ms: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-
-    fn is_mirror_cooling_down(&self) -> bool {
-        current_unix_millis()
-            < self
-                .mirror_cooldown_until_ms
-                .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn mirror_cooldown_remaining_ms(&self) -> u64 {
-        self.mirror_cooldown_until_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(current_unix_millis())
-    }
-
-    fn cool_down_mirror(&self) {
-        let until = current_unix_millis() + RESOURCE_RETRY_DELAY_SECS * 1000;
-        let previous = self
-            .mirror_cooldown_until_ms
-            .fetch_max(until, std::sync::atomic::Ordering::Relaxed);
-        if until > previous {
-            eprintln!(
-                "[assets] BMCLAPI 进入全局冷却 {} 秒，冷却期间新资源改走官方源",
-                RESOURCE_RETRY_DELAY_SECS
-            );
-        }
-    }
-}
-
-fn current_unix_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
-}
-
-fn is_resource_limit_error(last_err: &str) -> bool {
-    let lower = last_err.to_ascii_lowercase();
-    last_err.contains("429")
-        || last_err.contains("超时")
-        || last_err.contains("下载卡住")
-        || last_err.contains("下载过慢")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("deadline")
-        || lower.contains("too slow")
-}
-
-fn resource_retry_delay(last_err: &str) -> std::time::Duration {
-    if is_resource_limit_error(last_err) {
-        std::time::Duration::from_secs(RESOURCE_RETRY_DELAY_SECS)
-    } else {
-        std::time::Duration::from_millis(500)
-    }
-}
-
-fn download_resource_file_candidates(
-    candidates: &[(String, String, usize, bool)],
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-    state: Option<&ResourceDownloadState>,
-) -> Result<bool, String> {
-    if candidates.is_empty() {
-        return Err("没有可用下载地址".to_string());
-    }
-
-    let mut last_err = String::new();
-    for (label, url, retries, is_mirror) in candidates {
-        for attempt in 0..*retries {
-            if cancel_name.is_some_and(crate::instance::is_cancelled) {
-                return Err("用户取消下载".to_string());
-            }
-            if *is_mirror {
-                if let Some(state) = state {
-                    wait_for_resource_mirror_cooldown(state, cancel_name)?;
-                }
-            }
-            eprintln!(
-                "[assets] {}尝试 {}/{}: {}",
-                label,
-                attempt + 1,
-                retries,
-                url
-            );
-            match download_file_exact_once_with_stall_timeout(
-                url,
-                dest,
-                expected_sha1,
-                cancel_name,
-                RESOURCE_DOWNLOAD_STALL_TIMEOUT_SECS,
-                RESOURCE_DOWNLOAD_TOTAL_TIMEOUT_SECS,
-            ) {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    last_err = format!("{}: {}", url, e);
-                    let _ = std::fs::remove_file(dest);
-                    eprintln!("[assets] {}失败: {}", label, last_err);
-                    if *is_mirror && is_resource_limit_error(&last_err) {
-                        if let Some(state) = state {
-                            state.cool_down_mirror();
-                        }
-                        break;
-                    }
-                    if attempt + 1 < *retries {
-                        std::thread::sleep(resource_retry_delay(&last_err));
-                    }
-                }
-            }
-        }
-    }
-
-    Err(format!("所有资源下载地址均失败: {}", last_err))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResourceSource {
-    Mirror,
-    Official,
-}
-
-fn wait_for_resource_mirror_cooldown(
-    state: &ResourceDownloadState,
-    cancel_name: Option<&str>,
-) -> Result<(), String> {
-    loop {
-        if cancel_name.is_some_and(crate::instance::is_cancelled) {
-            return Err("用户取消下载".to_string());
-        }
-        let remaining = state.mirror_cooldown_remaining_ms();
-        if remaining == 0 {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(remaining.min(250)));
-    }
-}
-
-fn download_resource_source_once(
-    label: &str,
-    attempt: usize,
-    retries: usize,
-    url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-) -> Result<bool, String> {
-    eprintln!("[assets] {}尝试 {}/{}: {}", label, attempt, retries, url);
-    download_file_exact_once_with_stall_timeout(
-        url,
-        dest,
-        expected_sha1,
-        cancel_name,
-        RESOURCE_DOWNLOAD_STALL_TIMEOUT_SECS,
-        RESOURCE_DOWNLOAD_TOTAL_TIMEOUT_SECS,
-    )
-}
-
-fn download_resource_file(
-    url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    use_mirror: bool,
-    cancel_name: Option<&str>,
-    state: &ResourceDownloadState,
-) -> Result<bool, String> {
-    let official = mirror_url(url, false);
-    let mirror = mirror_url(url, true);
-    if !use_mirror || mirror == official {
-        let candidates = vec![(
-            "官方".to_string(),
-            official,
-            RESOURCE_MIRROR_RETRIES + RESOURCE_OFFICIAL_RETRIES,
-            false,
-        )];
-        return download_resource_file_candidates(
-            &candidates,
-            dest,
-            expected_sha1,
-            cancel_name,
-            None,
-        );
-    }
-
-    let max_mirror_attempts = RESOURCE_MIRROR_RETRIES + RESOURCE_OFFICIAL_RETRIES;
-    let max_official_attempts = RESOURCE_OFFICIAL_RETRIES;
-    let mut mirror_attempts = 0usize;
-    let mut official_attempts = 0usize;
-    let mut last_err = String::new();
-    let mut next_source = if state.is_mirror_cooling_down() {
-        ResourceSource::Official
-    } else {
-        ResourceSource::Mirror
-    };
-    let mut previous_failed_source: Option<ResourceSource> = None;
-
-    while mirror_attempts < max_mirror_attempts || official_attempts < max_official_attempts {
-        if cancel_name.is_some_and(crate::instance::is_cancelled) {
-            return Err("用户取消下载".to_string());
-        }
-
-        match next_source {
-            ResourceSource::Mirror => {
-                if mirror_attempts >= max_mirror_attempts {
-                    next_source = ResourceSource::Official;
-                    continue;
-                }
-                wait_for_resource_mirror_cooldown(state, cancel_name)?;
-                mirror_attempts += 1;
-                match download_resource_source_once(
-                    "镜像",
-                    mirror_attempts,
-                    max_mirror_attempts,
-                    &mirror,
-                    dest,
-                    expected_sha1,
-                    cancel_name,
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        last_err = format!("{}: {}", mirror, e);
-                        let came_from_official =
-                            previous_failed_source == Some(ResourceSource::Official);
-                        previous_failed_source = Some(ResourceSource::Mirror);
-                        let _ = std::fs::remove_file(dest);
-                        eprintln!("[assets] 镜像失败: {}", last_err);
-                        if is_resource_limit_error(&last_err) {
-                            state.cool_down_mirror();
-                        }
-                        next_source = if came_from_official {
-                            ResourceSource::Mirror
-                        } else if official_attempts < max_official_attempts {
-                            ResourceSource::Official
-                        } else {
-                            ResourceSource::Mirror
-                        };
-                    }
-                }
-            }
-            ResourceSource::Official => {
-                if official_attempts >= max_official_attempts {
-                    next_source = ResourceSource::Mirror;
-                    continue;
-                }
-                official_attempts += 1;
-                match download_resource_source_once(
-                    "官方",
-                    official_attempts,
-                    max_official_attempts,
-                    &official,
-                    dest,
-                    expected_sha1,
-                    cancel_name,
-                ) {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        last_err = format!("{}: {}", official, e);
-                        previous_failed_source = Some(ResourceSource::Official);
-                        let _ = std::fs::remove_file(dest);
-                        eprintln!("[assets] 官方失败，回到镜像: {}", last_err);
-                        next_source = ResourceSource::Mirror;
-                    }
-                }
-            }
-        }
-    }
-
-    Err(format!("所有资源下载地址均失败: {}", last_err))
-}
-
-fn parallel_download_resources(
-    tasks: Vec<(String, std::path::PathBuf, Option<String>)>,
-    done: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    max_workers: usize,
-    use_mirror: bool,
-    cancel_name: Option<&str>,
-) -> Result<(), String> {
-    if tasks.is_empty() {
-        return Ok(());
-    }
-    let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let cancel_name = cancel_name.map(|name| name.to_string());
-    let tasks = std::sync::Arc::new(tasks);
-    let next_task = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let state = std::sync::Arc::new(ResourceDownloadState::new());
-    let worker_count = max_workers.max(1).min(tasks.len());
-    let handles: Vec<_> = (0..worker_count)
-        .map(|_| {
-            let tasks = tasks.clone();
-            let next_task = next_task.clone();
-            let done = done.clone();
-            let errors = errors.clone();
-            let cancel_name = cancel_name.clone();
-            let state = state.clone();
-            std::thread::spawn(move || loop {
-                if cancel_name
-                    .as_deref()
-                    .is_some_and(crate::instance::is_cancelled)
-                {
-                    break;
-                }
-                let index = next_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((url, dest, sha1)) = tasks.get(index) else {
-                    break;
-                };
-                if let Err(e) = download_resource_file(
-                    url,
-                    dest,
-                    sha1.as_deref(),
-                    use_mirror,
-                    cancel_name.as_deref(),
-                    &state,
-                ) {
-                    eprintln!("[assets] 失败: {} -> {}", url, e);
-                    errors.lock().unwrap().push(format!("{} -> {}", url, e));
-                }
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            })
-        })
-        .collect();
-
-    let mut cancelled = false;
-    loop {
-        if cancel_name
-            .as_deref()
-            .is_some_and(crate::instance::is_cancelled)
-        {
-            cancelled = true;
-            break;
-        }
-        if handles.iter().all(|handle| handle.is_finished()) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-
-    for handle in handles {
-        if handle.join().is_err() {
-            errors
-                .lock()
-                .unwrap()
-                .push("asset download worker panicked".to_string());
-        }
-    }
-    if cancel_name
-        .as_deref()
-        .is_some_and(crate::instance::is_cancelled)
-        || cancelled
-    {
-        done.store(tasks.len(), std::sync::atomic::Ordering::Relaxed);
-        return Err("用户取消下载".to_string());
-    }
-
-    let errors = errors.lock().unwrap();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        let sample = errors
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(format!("{} files failed: {}", errors.len(), sample))
-    }
 }
 
 fn is_valid_sha1(value: &str) -> bool {

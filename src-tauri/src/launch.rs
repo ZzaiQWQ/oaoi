@@ -6,7 +6,7 @@ use crate::installer::{
 use crate::instance::{resolve_game_dir, safe_path_name};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 #[derive(serde::Deserialize)]
@@ -26,6 +26,89 @@ pub struct LaunchOptions {
 struct OfflineSkinProfile {
     uuid: String,
     user_properties: String,
+}
+
+const LAUNCH_WINDOW_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[cfg(windows)]
+type Hwnd = isize;
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, lparam: isize) -> i32;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
+    fn IsWindowVisible(hwnd: Hwnd) -> i32;
+}
+
+#[cfg(windows)]
+struct WindowSearch {
+    pid: u32,
+    found: bool,
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn enum_windows_for_pid(hwnd: Hwnd, lparam: isize) -> i32 {
+    let search = &mut *(lparam as *mut WindowSearch);
+    let mut window_pid = 0_u32;
+    GetWindowThreadProcessId(hwnd, &mut window_pid);
+    if window_pid == search.pid && IsWindowVisible(hwnd) != 0 {
+        search.found = true;
+        return 0;
+    }
+    1
+}
+
+#[cfg(windows)]
+fn process_has_visible_window(pid: u32) -> bool {
+    let mut search = WindowSearch { pid, found: false };
+    unsafe {
+        EnumWindows(
+            enum_windows_for_pid,
+            &mut search as *mut WindowSearch as isize,
+        );
+    }
+    search.found
+}
+
+#[cfg(not(windows))]
+fn process_has_visible_window(_pid: u32) -> bool {
+    true
+}
+
+fn wait_for_game_window(
+    child: &mut std::process::Child,
+    pid: u32,
+    log_path: &std::path::Path,
+    ver_dir: &std::path::Path,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        if process_has_visible_window(pid) {
+            return Ok(());
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("检查游戏进程失败: {}", e))?
+        {
+            let exit_code = status.code().unwrap_or(-1);
+            let launch_log = read_tail_lines(log_path, 120);
+            let game_log = read_tail_lines(&ver_dir.join("logs").join("latest.log"), 80);
+            let combined = format!("{}\n{}", launch_log, game_log);
+            let diagnosis = analyze_crash_log(&combined, exit_code);
+            return Err(format!(
+                "游戏窗口出现前进程已退出（退出码 {}）\n{}",
+                exit_code, diagnosis
+            ));
+        }
+
+        if started.elapsed() >= LAUNCH_WINDOW_WAIT_TIMEOUT {
+            return Err("等待游戏窗口超时，游戏进程仍在后台运行".to_string());
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
@@ -334,7 +417,8 @@ fn repair_launch_files(
                 .join("res")
                 .join("indexes")
                 .join(format!("{}.json", index_id));
-            if !sha1_ok(&index_path, index_sha1) {
+            // 资源索引存在就直接使用，避免版本 JSON 的索引 SHA 变动导致每次启动都修复。
+            if !index_path.exists() {
                 emit("assetIndex", 0, 0, "启动前修复资源索引...");
                 let mut index_urls = Vec::new();
                 if !index_id.is_empty() && index_id != "unknown" {
@@ -711,7 +795,11 @@ fn do_launch_minecraft(
     let launch_uuid = options
         .uuid
         .clone()
-        .or_else(|| offline_skin_profile.as_ref().map(|profile| profile.uuid.clone()))
+        .or_else(|| {
+            offline_skin_profile
+                .as_ref()
+                .map(|profile| profile.uuid.clone())
+        })
         .unwrap_or_else(|| uuid.clone());
     let user_properties = offline_skin_profile
         .as_ref()
@@ -995,6 +1083,23 @@ fn do_launch_minecraft(
     let mut child = cmd.spawn().map_err(|e| format!("启动游戏失败: {}", e))?;
 
     let pid = child.id();
+    let _ = app_handle.emit(
+        "launch-window-waiting",
+        serde_json::json!({
+            "version": version_name,
+            "pid": pid,
+            "timeout_seconds": LAUNCH_WINDOW_WAIT_TIMEOUT.as_secs()
+        }),
+    );
+    wait_for_game_window(&mut child, pid, &log_path, &ver_dir)?;
+    let _ = app_handle.emit(
+        "launch-window-ready",
+        serde_json::json!({
+            "version": version_name,
+            "pid": pid
+        }),
+    );
+
     let cp_len = classpath.len();
     let version_for_log = version_name.to_string();
     let log_path_clone = log_path.clone();
@@ -1103,7 +1208,7 @@ fn do_launch_minecraft(
         }
     });
 
-    // 立即返回启动成功
+    // 窗口已出现后再返回启动成功。
     Ok(format!(
         "游戏已启动 (PID: {}), 版本: {}, 库: {}/{}",
         pid, version_name, cp_len, total_libs

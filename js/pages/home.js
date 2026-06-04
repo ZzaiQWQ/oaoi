@@ -805,10 +805,24 @@ function initLaunchButton() {
     try {
       const tauri = await waitForTauri();
       let repairUnlisten = null;
+      let windowWaitUnlisten = null;
+      let windowReadyUnlisten = null;
       repairUnlisten = await tauri.event.listen('install-progress', (event) => {
         const d = event.payload || {};
         if (d.name !== selectedVersion) return;
         updateLaunchRepairModal(selectedVersion, d);
+      });
+      windowWaitUnlisten = await tauri.event.listen('launch-window-waiting', (event) => {
+        const d = event.payload || {};
+        if (d.version !== selectedVersion) return;
+        finishLaunchRepairModal(true, '文件检查完成，等待游戏窗口出现。');
+        btn.innerHTML = `<span>等待游戏窗口...</span>`;
+        btn.style.background = 'linear-gradient(135deg, #fb7185 0%, #ec4899 50%, #db2777 100%)';
+      });
+      windowReadyUnlisten = await tauri.event.listen('launch-window-ready', (event) => {
+        const d = event.payload || {};
+        if (d.version !== selectedVersion) return;
+        finishLaunchRepairModal(true, '游戏窗口已出现，启动成功。');
       });
       const instanceJvmArgs = localStorage.getItem(`jvmArgs_${selectedVersion}`);
       const globalJvmArgs = typeof getGlobalJvmArgs === 'function'
@@ -819,6 +833,8 @@ function initLaunchButton() {
         : (globalJvmArgs || null);
       let result;
       try {
+        btn.innerHTML = `<span>等待游戏窗口...</span>`;
+        btn.style.background = 'linear-gradient(135deg, #fb7185 0%, #ec4899 50%, #db2777 100%)';
         result = await tauri.core.invoke('launch_minecraft', {
           options: {
             java_path: javaPath,
@@ -835,10 +851,12 @@ function initLaunchButton() {
         });
       } finally {
         if (repairUnlisten) repairUnlisten();
+        if (windowWaitUnlisten) windowWaitUnlisten();
+        if (windowReadyUnlisten) windowReadyUnlisten();
       }
 
       console.log('🎮 ' + result);
-      finishLaunchRepairModal(true, '文件检查完成，正在启动游戏。');
+      finishLaunchRepairModal(true, '游戏窗口已出现，启动成功。');
       btn.innerHTML = `
         <span>启动成功！</span>
       `;

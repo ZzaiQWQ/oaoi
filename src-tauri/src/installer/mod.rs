@@ -284,9 +284,6 @@ const PARALLEL_DOWNLOAD_PROBE_TIMEOUT_SECS: u64 = 15;
 const PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS: u64 = 15;
 const PARALLEL_DOWNLOAD_PART_RETRY_DELAY_SECS: u64 = 15;
 const DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 300;
-const DOWNLOAD_SLOW_SAMPLE_SECS: u64 = 15;
-const DOWNLOAD_SLOW_MIN_FILE_BYTES: u64 = 2 * 1024 * 1024;
-const DOWNLOAD_SLOW_MIN_BYTES_PER_SEC: u64 = 32 * 1024;
 
 fn download_retry_delay_secs(last_err: &str, attempt: usize) -> u64 {
     let lower = last_err.to_ascii_lowercase();
@@ -501,108 +498,6 @@ pub fn download_file_if_needed_cancelable(
     }
 
     Err(format!("下载失败(重试后): {} ({})", last_err, real_url))
-}
-
-pub fn download_file_exact_once_with_stall_timeout(
-    url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-    stall_timeout_secs: u64,
-    total_timeout_secs: u64,
-) -> Result<bool, String> {
-    if existing_file_ok(dest, expected_sha1) {
-        return Ok(false);
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    if is_download_cancelled(cancel_name) {
-        return Err("用户取消下载".to_string());
-    }
-
-    let tmp_path = unique_temp_path(dest);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("创建下载运行时失败: {}", e))?;
-
-    let result = runtime.block_on(async {
-        let stall_timeout = std::time::Duration::from_secs(stall_timeout_secs);
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(total_timeout_secs))
-            .user_agent("OAOI-Launcher/1.0")
-            .build()
-            .map_err(|e| format!("创建下载客户端失败: {}", e))?;
-        let send = client.get(url).send();
-        let mut resp = tokio::time::timeout(stall_timeout, send)
-            .await
-            .map_err(|_| format!("请求超时: {} 秒无响应", stall_timeout_secs))?
-            .map_err(|e| format!("请求失败: {}", e))?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
-        }
-
-        let total = resp.content_length();
-        let mut file =
-            std::fs::File::create(&tmp_path).map_err(|e| format!("创建临时文件失败: {}", e))?;
-        let mut downloaded = 0u64;
-        let check_slow_speed = total
-            .map(|size| size >= DOWNLOAD_SLOW_MIN_FILE_BYTES)
-            .unwrap_or(true);
-        let mut speed_window_start = std::time::Instant::now();
-        let mut speed_window_bytes = 0u64;
-        loop {
-            if is_download_cancelled(cancel_name) {
-                return Err("用户取消下载".to_string());
-            }
-            let chunk = tokio::time::timeout(stall_timeout, resp.chunk())
-                .await
-                .map_err(|_| format!("下载卡住: {} 秒没有新数据", stall_timeout_secs))?
-                .map_err(|e| format!("读取失败: {}", e))?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if chunk.is_empty() {
-                continue;
-            }
-            std::io::Write::write_all(&mut file, chunk.as_ref())
-                .map_err(|e| format!("写入失败: {}", e))?;
-            downloaded += chunk.len() as u64;
-            if check_slow_speed {
-                speed_window_bytes += chunk.len() as u64;
-                let elapsed = speed_window_start.elapsed();
-                if elapsed >= std::time::Duration::from_secs(DOWNLOAD_SLOW_SAMPLE_SECS) {
-                    let seconds = elapsed.as_secs().max(1);
-                    let bytes_per_sec = speed_window_bytes / seconds;
-                    if bytes_per_sec < DOWNLOAD_SLOW_MIN_BYTES_PER_SEC {
-                        return Err(format!(
-                            "下载过慢: {} B/s 低于 {} B/s",
-                            bytes_per_sec, DOWNLOAD_SLOW_MIN_BYTES_PER_SEC
-                        ));
-                    }
-                    speed_window_start = std::time::Instant::now();
-                    speed_window_bytes = 0;
-                }
-            }
-        }
-        if let Some(total) = total {
-            if downloaded != total {
-                return Err(format!("下载不完整: {} / {}", downloaded, total));
-            }
-        }
-        Ok(())
-    });
-
-    if let Err(err) = result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-
-    replace_downloaded_file(&tmp_path, dest)?;
-    verify_downloaded_file(dest, expected_sha1)?;
-    Ok(true)
 }
 
 pub fn download_file_with_progress<F>(
@@ -1054,6 +949,24 @@ fn is_download_cancelled(cancel_name: Option<&str>) -> bool {
     cancel_name.is_some_and(crate::instance::is_cancelled)
 }
 
+fn acquire_install_connection(
+    cancel_name: Option<&str>,
+) -> Result<Option<crate::downloader::pool::ConnectionPermit>, String> {
+    let Some(name) = cancel_name else {
+        return Ok(None);
+    };
+    let Some(cancel_flag) = crate::instance::install_cancel_flag(name) else {
+        return Ok(None);
+    };
+    let pool = crate::instance::install_download_pool(
+        name,
+        crate::downloader::DownloadEngineOptions::default_global_connection_limit(),
+    );
+    pool.acquire(&cancel_flag)
+        .map(Some)
+        .map_err(|_| "用户取消下载".to_string())
+}
+
 fn unique_temp_path(dest: &std::path::Path) -> std::path::PathBuf {
     let file_name = dest
         .file_name()
@@ -1116,6 +1029,7 @@ fn probe_range_size(
     if is_download_cancelled(cancel_name) {
         return Err(ParallelDownloadError::Failed("用户取消下载".to_string()));
     }
+    let _permit = acquire_install_connection(cancel_name).map_err(ParallelDownloadError::Failed)?;
     let resp = http
         .get(url)
         .header(reqwest::header::RANGE, "bytes=0-0")
@@ -1161,6 +1075,7 @@ fn download_range_part_with_stall_timeout(
     part_progress: &std::sync::atomic::AtomicU64,
     cancel_name: Option<&str>,
 ) -> Result<(), String> {
+    let _permit = acquire_install_connection(cancel_name)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1413,6 +1328,7 @@ where
     if is_download_cancelled(cancel_name) {
         return Err("用户取消下载".to_string());
     }
+    let _permit = acquire_install_connection(cancel_name)?;
     let mut resp = http
         .get(url)
         .send()

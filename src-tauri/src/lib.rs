@@ -8,11 +8,13 @@ macro_rules! eprintln {
 
 // ===== 模块声明 =====
 mod auth;
+mod downloader;
 mod installer;
 mod instance;
 mod java_detect;
 mod java_download;
 mod launch;
+mod mod_analyzer;
 mod mod_download;
 mod mod_manager;
 mod mod_search;
@@ -409,6 +411,7 @@ pub fn run() {
             mod_manager::toggle_mod,
             mod_manager::delete_mod,
             mod_manager::lookup_mod_urls,
+            mod_analyzer::analyze_instance_mods,
             mod_search::search_online_mods,
             mod_download::get_online_mod_versions,
             mod_download::download_online_mod,

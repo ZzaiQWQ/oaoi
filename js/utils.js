@@ -128,16 +128,60 @@ function getSourceInfo(item) {
   };
 }
 
+function normalizeExternalHttpUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.href;
+    }
+  } catch {}
+  return '';
+}
+
 /**
- * 用 tauri 打开外部 URL，失败时 fallback 到 window.open
+ * 用系统默认浏览器打开外部 URL，避免 Tauri 内置 WebView 直接跳转。
  */
 async function openExternalUrl(url) {
+  const externalUrl = normalizeExternalHttpUrl(url);
+  if (!externalUrl) {
+    showToast('链接格式无效', 'error');
+    return;
+  }
+
   try {
     const tauri = await waitForTauri();
-    await tauri.core.invoke('open_url', { url });
-  } catch {
-    window.open(url, '_blank');
+    await tauri.core.invoke('open_url', { url: externalUrl });
+  } catch (err) {
+    console.warn('[external-link] 打开外部链接失败:', err);
+    if (window.__TAURI__) {
+      showToast('打开外部链接失败，请检查系统默认浏览器', 'error');
+      return;
+    }
+    window.open(externalUrl, '_blank', 'noopener,noreferrer');
   }
+}
+
+function bindExternalLinkInterceptor() {
+  if (window.__oaoiExternalLinkInterceptorBound) return;
+  window.__oaoiExternalLinkInterceptorBound = true;
+
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest?.('a[href]');
+    if (!link || event.defaultPrevented || event.button !== 0) return;
+    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+
+    const externalUrl = normalizeExternalHttpUrl(link.getAttribute('href'));
+    if (!externalUrl) return;
+
+    event.preventDefault();
+    openExternalUrl(externalUrl);
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bindExternalLinkInterceptor, { once: true });
+} else {
+  bindExternalLinkInterceptor();
 }
 
 // ============ 全局自定义弹窗（替代 alert） ============
@@ -349,7 +393,7 @@ function showAlert(message, options = {}) {
     const overlay = document.createElement('div');
     overlay.className = 'oaoi-confirm-overlay';
     overlay.innerHTML = `
-      <div class="oaoi-confirm-card">
+      <div class="oaoi-confirm-card oaoi-alert-confirm">
         <div class="oaoi-confirm-header">
           <span class="oaoi-confirm-title">${escapeHtml(title)}</span>
         </div>
@@ -427,6 +471,9 @@ function showAlert(message, options = {}) {
       max-width: calc(100vw - 48px);
       max-height: calc(100vh - 48px);
     }
+    .oaoi-confirm-card.oaoi-alert-confirm {
+      max-height: calc(100vh - 48px);
+    }
     .oaoi-confirm-out {
       animation: confirmCardOut 0.2s ease forwards;
     }
@@ -461,6 +508,11 @@ function showAlert(message, options = {}) {
     }
     .oaoi-confirm-card.oaoi-update-confirm .oaoi-confirm-body {
       max-height: min(260px, calc(100vh - 190px));
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .oaoi-confirm-card.oaoi-alert-confirm .oaoi-confirm-body {
+      max-height: min(260px, calc(100vh - 160px));
       overflow-y: auto;
       overscroll-behavior: contain;
     }

@@ -1,8 +1,10 @@
 use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name};
 use crate::modpack_sources::{save_source_entry, SourceEntry};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static MOD_DOWNLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MAX_DEPENDENCY_DEPTH: usize = 8;
 
 #[derive(serde::Serialize, Clone)]
 pub struct OnlineModVersionInfo {
@@ -71,6 +73,7 @@ fn get_online_mod_versions_blocking(
     project_type: &str,
 ) -> Result<Vec<OnlineModVersionInfo>, String> {
     let http = reqwest::blocking::Client::builder()
+        .use_rustls_tls()
         .timeout(std::time::Duration::from_secs(20))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) oaoi-launcher/1.0")
         .build()
@@ -93,6 +96,7 @@ fn download_online_mod_blocking(
     cancel_name: &str,
 ) -> Result<String, String> {
     let http = reqwest::blocking::Client::builder()
+        .use_rustls_tls()
         .timeout(std::time::Duration::from_secs(60))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) oaoi-launcher/1.0")
         .build()
@@ -177,6 +181,7 @@ fn download_online_mod_blocking(
         "shader" => "shaderpacks",
         _ => "mods",
     };
+    let mut downloaded_mod_paths: Vec<String> = Vec::new();
     let main_result = do_download_to_dir(
         &http,
         game_dir,
@@ -186,124 +191,248 @@ fn download_online_mod_blocking(
         sub_dir,
         Some(cancel_name),
     )?;
+    push_downloaded_mod_path(&mut downloaded_mod_paths, sub_dir, file_name);
 
     // 检查并下载前置依赖
     let mut dep_names: Vec<String> = Vec::new();
     let mut dep_errors: Vec<String> = Vec::new();
+    let mut visited_deps: HashSet<String> = HashSet::new();
+    if let Some(version_id) = version["id"].as_str() {
+        visited_deps.insert(format!("mr-version:{}", version_id));
+    }
     if let Some(deps) = version["dependencies"].as_array() {
-        let safe_name = safe_path_name(name, "版本名")?;
-        let mods_dir = resolve_game_dir(game_dir)
-            .join("instances")
-            .join(&safe_name)
-            .join("mods");
-        for dep in deps {
-            let dep_type = dep["dependency_type"].as_str().unwrap_or("");
-            if dep_type != "required" {
-                continue;
-            }
-
-            let dep_project_id = match dep["project_id"].as_str() {
-                Some(id) => id,
-                None => continue,
-            };
-
-            eprintln!("[dep] 检查前置依赖: {}", dep_project_id);
-
-            // 获取依赖项目信息
-            let dep_version_url = if let Some(vid) = dep["version_id"].as_str() {
-                format!("https://api.modrinth.com/v2/version/{}", vid)
-            } else {
-                let mut u = format!(
-                    "https://api.modrinth.com/v2/project/{}/version",
-                    dep_project_id
-                );
-                let mut p = vec![];
-                if !mc_version.is_empty() {
-                    p.push(format!("game_versions=[\"{}\"]", mc_version));
-                }
-                if !loader.is_empty() && loader != "vanilla" {
-                    p.push(format!("loaders=[\"{}\"]", loader));
-                }
-                if !p.is_empty() {
-                    u = format!("{}?{}", u, p.join("&"));
-                }
-                u
-            };
-
-            if let Ok(dep_resp) = http.get(&dep_version_url).send() {
-                if let Ok(dep_json) = dep_resp.json::<serde_json::Value>() {
-                    // 可能是单个 version 或 array
-                    let dep_ver = if dep_json.is_array() {
-                        dep_json.as_array().and_then(|a| a.first()).cloned()
-                    } else {
-                        Some(dep_json)
-                    };
-
-                    if let Some(dv) = dep_ver {
-                        if let Some(dep_files) = dv["files"].as_array() {
-                            let dep_file = dep_files
-                                .iter()
-                                .find(|f| f["primary"].as_bool() == Some(true))
-                                .or_else(|| dep_files.first());
-                            if let Some(df) = dep_file {
-                                let dep_url = df["url"].as_str().unwrap_or("");
-                                let dep_fname = df["filename"].as_str().unwrap_or("");
-                                let safe_dep_fname = match safe_path_name(dep_fname, "文件名") {
-                                    Ok(name) => name,
-                                    Err(e) => {
-                                        eprintln!("[dep] 跳过非法文件名 {}: {}", dep_fname, e);
-                                        continue;
-                                    }
-                                };
-                                if !dep_url.is_empty() && !dep_fname.is_empty() {
-                                    // 检查是否已安装
-                                    if !mods_dir.join(&safe_dep_fname).exists() {
-                                        match do_download_to_dir(
-                                            &http,
-                                            game_dir,
-                                            name,
-                                            dep_url,
-                                            dep_fname,
-                                            "mods",
-                                            Some(cancel_name),
-                                        ) {
-                                            Ok(_) => {
-                                                eprintln!("[dep] 已下载前置: {}", dep_fname);
-                                                dep_names.push(dep_fname.to_string());
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "[dep] 下载前置失败: {} - {}",
-                                                    dep_fname, e
-                                                );
-                                                dep_errors.push(format!("{}: {}", dep_fname, e));
-                                            }
-                                        }
-                                    } else {
-                                        eprintln!("[dep] 前置已存在: {}", dep_fname);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        download_modrinth_required_dependencies(
+            &http,
+            game_dir,
+            name,
+            mc_version,
+            loader,
+            deps,
+            &mut visited_deps,
+            &mut dep_names,
+            &mut dep_errors,
+            &mut downloaded_mod_paths,
+            0,
+            cancel_name,
+        )?;
     }
 
     if !dep_errors.is_empty() {
         return Err(format!("前置依赖下载失败: {}", dep_errors.join("; ")));
     }
 
-    if dep_names.is_empty() {
-        Ok(main_result)
+    let result = if dep_names.is_empty() {
+        main_result
     } else {
-        Ok(format!(
-            "{} (已自动下载前置: {})",
-            main_result,
-            dep_names.join(", ")
-        ))
+        format!("{} (已自动下载前置: {})", main_result, dep_names.join(", "))
+    };
+    crate::mod_analyzer::spawn_cache_downloaded_mods(
+        game_dir.to_string(),
+        name.to_string(),
+        loader.to_string(),
+        downloaded_mod_paths,
+    );
+    Ok(result)
+}
+
+fn download_modrinth_required_dependencies(
+    http: &reqwest::blocking::Client,
+    game_dir: &str,
+    name: &str,
+    mc_version: &str,
+    loader: &str,
+    deps: &[serde_json::Value],
+    visited: &mut HashSet<String>,
+    dep_names: &mut Vec<String>,
+    dep_errors: &mut Vec<String>,
+    downloaded_mod_paths: &mut Vec<String>,
+    depth: usize,
+    cancel_name: &str,
+) -> Result<(), String> {
+    if depth >= MAX_DEPENDENCY_DEPTH {
+        dep_errors.push("前置依赖层级过深，已停止继续解析".to_string());
+        return Ok(());
     }
+
+    let safe_name = safe_path_name(name, "版本名")?;
+    let mods_dir = resolve_game_dir(game_dir)
+        .join("instances")
+        .join(&safe_name)
+        .join("mods");
+
+    for dep in deps {
+        if is_cancelled(Some(cancel_name)) {
+            dep_errors.push("用户取消下载".to_string());
+            break;
+        }
+
+        let dep_type = dep["dependency_type"].as_str().unwrap_or("");
+        if dep_type != "required" {
+            continue;
+        }
+
+        let dep_project_id = match dep["project_id"].as_str() {
+            Some(id) => id,
+            None => {
+                dep_errors.push("Modrinth 前置缺少 project_id".to_string());
+                continue;
+            }
+        };
+
+        eprintln!("[dep] 检查前置依赖: {}", dep_project_id);
+
+        match resolve_modrinth_dependency_version(http, dep, dep_project_id, mc_version, loader) {
+            Ok(dep_version) => {
+                if let Err(e) = download_modrinth_dependency_version(
+                    http,
+                    game_dir,
+                    name,
+                    mc_version,
+                    loader,
+                    dep_project_id,
+                    dep_version,
+                    &mods_dir,
+                    visited,
+                    dep_names,
+                    dep_errors,
+                    downloaded_mod_paths,
+                    depth,
+                    cancel_name,
+                ) {
+                    dep_errors.push(format!("{}: {}", dep_project_id, e));
+                }
+            }
+            Err(e) => dep_errors.push(format!("{}: {}", dep_project_id, e)),
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_modrinth_dependency_version(
+    http: &reqwest::blocking::Client,
+    dep: &serde_json::Value,
+    dep_project_id: &str,
+    mc_version: &str,
+    loader: &str,
+) -> Result<serde_json::Value, String> {
+    let dep_version_url = if let Some(vid) = dep["version_id"].as_str() {
+        format!("https://api.modrinth.com/v2/version/{}", vid)
+    } else {
+        let mut url = format!(
+            "https://api.modrinth.com/v2/project/{}/version",
+            dep_project_id
+        );
+        let mut params = Vec::new();
+        if !mc_version.is_empty() {
+            params.push(format!("game_versions=[\"{}\"]", mc_version));
+        }
+        if !loader.is_empty() && loader != "vanilla" {
+            params.push(format!("loaders=[\"{}\"]", loader));
+        }
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+        url
+    };
+
+    let resp = http
+        .get(&dep_version_url)
+        .send()
+        .map_err(|e| format!("前置版本请求失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("前置版本请求失败: HTTP {}", resp.status()));
+    }
+    let dep_json = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("解析前置版本失败: {}", e))?;
+    if dep_json.is_array() {
+        dep_json
+            .as_array()
+            .and_then(|versions| versions.first())
+            .cloned()
+            .ok_or_else(|| "没有找到匹配的前置版本".to_string())
+    } else {
+        Ok(dep_json)
+    }
+}
+
+fn download_modrinth_dependency_version(
+    http: &reqwest::blocking::Client,
+    game_dir: &str,
+    name: &str,
+    mc_version: &str,
+    loader: &str,
+    dep_project_id: &str,
+    dep_version: serde_json::Value,
+    mods_dir: &std::path::Path,
+    visited: &mut HashSet<String>,
+    dep_names: &mut Vec<String>,
+    dep_errors: &mut Vec<String>,
+    downloaded_mod_paths: &mut Vec<String>,
+    depth: usize,
+    cancel_name: &str,
+) -> Result<(), String> {
+    let dep_key = dep_version["id"]
+        .as_str()
+        .map(|id| format!("mr-version:{}", id))
+        .unwrap_or_else(|| format!("mr-project:{}", dep_project_id));
+    if !visited.insert(dep_key) {
+        return Ok(());
+    }
+
+    let dep_files = dep_version["files"]
+        .as_array()
+        .ok_or_else(|| "前置版本没有文件列表".to_string())?;
+    let dep_file = dep_files
+        .iter()
+        .find(|file| file["primary"].as_bool() == Some(true))
+        .or_else(|| dep_files.first())
+        .ok_or_else(|| "前置版本没有可下载文件".to_string())?;
+    let dep_url = dep_file["url"]
+        .as_str()
+        .ok_or_else(|| "前置版本没有下载链接".to_string())?;
+    let dep_fname = dep_file["filename"]
+        .as_str()
+        .ok_or_else(|| "前置版本没有文件名".to_string())?;
+    let safe_dep_fname = safe_path_name(dep_fname, "文件名")?;
+
+    if mods_dir.join(&safe_dep_fname).exists() {
+        eprintln!("[dep] 前置已存在: {}", dep_fname);
+    } else {
+        do_download_to_dir(
+            http,
+            game_dir,
+            name,
+            dep_url,
+            dep_fname,
+            "mods",
+            Some(cancel_name),
+        )
+        .map_err(|e| format!("下载前置失败 {}: {}", dep_fname, e))?;
+        eprintln!("[dep] 已下载前置: {}", dep_fname);
+        dep_names.push(dep_fname.to_string());
+    }
+    push_downloaded_mod_path(downloaded_mod_paths, "mods", dep_fname);
+
+    if let Some(child_deps) = dep_version["dependencies"].as_array() {
+        download_modrinth_required_dependencies(
+            http,
+            game_dir,
+            name,
+            mc_version,
+            loader,
+            child_deps,
+            visited,
+            dep_names,
+            dep_errors,
+            downloaded_mod_paths,
+            depth + 1,
+            cancel_name,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn get_modrinth_versions(
@@ -701,6 +830,7 @@ fn download_from_curseforge(
         "shader" => "shaderpacks",
         _ => "mods",
     };
+    let mut downloaded_mod_paths: Vec<String> = Vec::new();
     let main_result = do_download_to_dir_with_fallbacks(
         http,
         game_dir,
@@ -710,101 +840,246 @@ fn download_from_curseforge(
         sub_dir,
         Some(cancel_name),
     )?;
+    push_downloaded_mod_path(&mut downloaded_mod_paths, sub_dir, file_name);
     save_curseforge_download_source(game_dir, name, sub_dir, file_name, cf_id, file_id);
 
     // 检查 CurseForge 前置依赖
     let mut dep_names: Vec<String> = Vec::new();
     let mut dep_errors: Vec<String> = Vec::new();
+    let mut visited_deps: HashSet<String> = HashSet::new();
+    if file_id != 0 {
+        visited_deps.insert(format!("cf-file:{}", file_id));
+    }
     if let Some(deps) = file["dependencies"].as_array() {
-        let safe_name = safe_path_name(name, "版本名")?;
-        let mods_dir = resolve_game_dir(game_dir)
-            .join("instances")
-            .join(&safe_name)
-            .join("mods");
-        for dep in deps {
-            let relation = dep["relationType"].as_i64().unwrap_or(0);
-            if relation != 3 {
-                continue;
-            } // 3 = required dependency
-
-            let dep_mod_id = dep["modId"].as_i64().unwrap_or(0);
-            if dep_mod_id == 0 {
-                continue;
-            }
-
-            eprintln!("[cf_dep] 检查前置依赖: modId={}", dep_mod_id);
-
-            // 获取依赖的最新文件
-            let dep_url = format!(
-                "https://api.curseforge.com/v1/mods/{}/files?pageSize=1&gameVersion={}&modLoaderType={}",
-                dep_mod_id, mc_version, loader_type
-            );
-            if let Ok(dep_resp) = http.get(&dep_url).header("x-api-key", &cf_api_key()).send() {
-                if let Ok(dep_json) = dep_resp.json::<serde_json::Value>() {
-                    if let Some(dep_files) = dep_json["data"].as_array() {
-                        if let Some(df) = dep_files.first() {
-                            let dep_fname = df["fileName"].as_str().unwrap_or("");
-                            let dep_dl_url = df["downloadUrl"].as_str().unwrap_or("");
-                            let dep_file_id = df["id"].as_u64().unwrap_or(0);
-                            let safe_dep_fname = match safe_path_name(dep_fname, "文件名") {
-                                Ok(name) => name,
-                                Err(e) => {
-                                    eprintln!("[cf_dep] 跳过非法文件名 {}: {}", dep_fname, e);
-                                    continue;
-                                }
-                            };
-                            let dep_download_urls =
-                                curseforge_download_candidates(dep_file_id, dep_fname, dep_dl_url);
-                            if !dep_fname.is_empty()
-                                && !dep_download_urls.is_empty()
-                                && !mods_dir.join(&safe_dep_fname).exists()
-                            {
-                                match do_download_to_dir_with_fallbacks(
-                                    http,
-                                    game_dir,
-                                    name,
-                                    &dep_download_urls,
-                                    dep_fname,
-                                    "mods",
-                                    Some(cancel_name),
-                                ) {
-                                    Ok(_) => {
-                                        save_curseforge_download_source(
-                                            game_dir,
-                                            name,
-                                            "mods",
-                                            dep_fname,
-                                            &dep_mod_id.to_string(),
-                                            dep_file_id,
-                                        );
-                                        eprintln!("[cf_dep] 已下载前置: {}", dep_fname);
-                                        dep_names.push(dep_fname.to_string());
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[cf_dep] 下载前置失败: {} - {}", dep_fname, e);
-                                        dep_errors.push(format!("{}: {}", dep_fname, e));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        download_curseforge_required_dependencies(
+            http,
+            game_dir,
+            name,
+            mc_version,
+            loader_type,
+            deps,
+            &mut visited_deps,
+            &mut dep_names,
+            &mut dep_errors,
+            &mut downloaded_mod_paths,
+            0,
+            cancel_name,
+        )?;
     }
 
     if !dep_errors.is_empty() {
         return Err(format!("前置依赖下载失败: {}", dep_errors.join("; ")));
     }
 
-    if dep_names.is_empty() {
-        Ok(main_result)
+    let result = if dep_names.is_empty() {
+        main_result
     } else {
-        Ok(format!(
-            "{} (已自动下载前置: {})",
-            main_result,
-            dep_names.join(", ")
-        ))
+        format!("{} (已自动下载前置: {})", main_result, dep_names.join(", "))
+    };
+    crate::mod_analyzer::spawn_cache_downloaded_mods(
+        game_dir.to_string(),
+        name.to_string(),
+        loader.to_string(),
+        downloaded_mod_paths,
+    );
+    Ok(result)
+}
+
+fn download_curseforge_required_dependencies(
+    http: &reqwest::blocking::Client,
+    game_dir: &str,
+    name: &str,
+    mc_version: &str,
+    loader_type: &str,
+    deps: &[serde_json::Value],
+    visited: &mut HashSet<String>,
+    dep_names: &mut Vec<String>,
+    dep_errors: &mut Vec<String>,
+    downloaded_mod_paths: &mut Vec<String>,
+    depth: usize,
+    cancel_name: &str,
+) -> Result<(), String> {
+    if depth >= MAX_DEPENDENCY_DEPTH {
+        dep_errors.push("前置依赖层级过深，已停止继续解析".to_string());
+        return Ok(());
+    }
+
+    let safe_name = safe_path_name(name, "版本名")?;
+    let mods_dir = resolve_game_dir(game_dir)
+        .join("instances")
+        .join(&safe_name)
+        .join("mods");
+
+    for dep in deps {
+        if is_cancelled(Some(cancel_name)) {
+            dep_errors.push("用户取消下载".to_string());
+            break;
+        }
+
+        let relation = dep["relationType"].as_i64().unwrap_or(0);
+        if relation != 3 {
+            continue;
+        } // 3 = required dependency
+
+        let dep_mod_id = dep["modId"].as_u64().unwrap_or(0);
+        if dep_mod_id == 0 {
+            dep_errors.push("CurseForge 前置缺少 modId".to_string());
+            continue;
+        }
+
+        eprintln!("[cf_dep] 检查前置依赖: modId={}", dep_mod_id);
+
+        match resolve_curseforge_dependency_file(http, dep_mod_id, mc_version, loader_type) {
+            Ok(dep_file) => {
+                if let Err(e) = download_curseforge_dependency_file(
+                    http,
+                    game_dir,
+                    name,
+                    mc_version,
+                    loader_type,
+                    dep_mod_id,
+                    dep_file,
+                    &mods_dir,
+                    visited,
+                    dep_names,
+                    dep_errors,
+                    downloaded_mod_paths,
+                    depth,
+                    cancel_name,
+                ) {
+                    dep_errors.push(format!("{}: {}", dep_mod_id, e));
+                }
+            }
+            Err(e) => dep_errors.push(format!("{}: {}", dep_mod_id, e)),
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_curseforge_dependency_file(
+    http: &reqwest::blocking::Client,
+    dep_mod_id: u64,
+    mc_version: &str,
+    loader_type: &str,
+) -> Result<serde_json::Value, String> {
+    let dep_url = format!(
+        "https://api.curseforge.com/v1/mods/{}/files?pageSize=1&gameVersion={}&modLoaderType={}",
+        dep_mod_id, mc_version, loader_type
+    );
+    let resp = http
+        .get(&dep_url)
+        .header("x-api-key", &cf_api_key())
+        .send()
+        .map_err(|e| format!("前置文件请求失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("前置文件请求失败: HTTP {}", resp.status()));
+    }
+    let dep_json = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("解析前置文件失败: {}", e))?;
+    dep_json["data"]
+        .as_array()
+        .and_then(|files| files.first())
+        .cloned()
+        .ok_or_else(|| "没有找到匹配的前置文件".to_string())
+}
+
+fn download_curseforge_dependency_file(
+    http: &reqwest::blocking::Client,
+    game_dir: &str,
+    name: &str,
+    mc_version: &str,
+    loader_type: &str,
+    dep_mod_id: u64,
+    dep_file: serde_json::Value,
+    mods_dir: &std::path::Path,
+    visited: &mut HashSet<String>,
+    dep_names: &mut Vec<String>,
+    dep_errors: &mut Vec<String>,
+    downloaded_mod_paths: &mut Vec<String>,
+    depth: usize,
+    cancel_name: &str,
+) -> Result<(), String> {
+    let dep_file_id = dep_file["id"].as_u64().unwrap_or(0);
+    let dep_key = if dep_file_id != 0 {
+        format!("cf-file:{}", dep_file_id)
+    } else {
+        format!("cf-project:{}", dep_mod_id)
+    };
+    if !visited.insert(dep_key) {
+        return Ok(());
+    }
+
+    let dep_fname = dep_file["fileName"]
+        .as_str()
+        .ok_or_else(|| "前置文件没有文件名".to_string())?;
+    let dep_dl_url = dep_file["downloadUrl"].as_str().unwrap_or("");
+    let safe_dep_fname = safe_path_name(dep_fname, "文件名")?;
+    let dep_download_urls = curseforge_download_candidates(dep_file_id, dep_fname, dep_dl_url);
+    if dep_download_urls.is_empty() {
+        return Err(format!("前置没有可用下载地址: {}", dep_fname));
+    }
+
+    if mods_dir.join(&safe_dep_fname).exists() {
+        eprintln!("[cf_dep] 前置已存在: {}", dep_fname);
+    } else {
+        do_download_to_dir_with_fallbacks(
+            http,
+            game_dir,
+            name,
+            &dep_download_urls,
+            dep_fname,
+            "mods",
+            Some(cancel_name),
+        )
+        .map_err(|e| format!("下载前置失败 {}: {}", dep_fname, e))?;
+        save_curseforge_download_source(
+            game_dir,
+            name,
+            "mods",
+            dep_fname,
+            &dep_mod_id.to_string(),
+            dep_file_id,
+        );
+        eprintln!("[cf_dep] 已下载前置: {}", dep_fname);
+        dep_names.push(dep_fname.to_string());
+    }
+    push_downloaded_mod_path(downloaded_mod_paths, "mods", dep_fname);
+
+    if let Some(child_deps) = dep_file["dependencies"].as_array() {
+        download_curseforge_required_dependencies(
+            http,
+            game_dir,
+            name,
+            mc_version,
+            loader_type,
+            child_deps,
+            visited,
+            dep_names,
+            dep_errors,
+            downloaded_mod_paths,
+            depth + 1,
+            cancel_name,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn push_downloaded_mod_path(paths: &mut Vec<String>, sub_dir: &str, file_name: &str) {
+    if sub_dir != "mods" {
+        return;
+    }
+    let Ok(safe_file_name) = safe_path_name(file_name, "文件名") else {
+        return;
+    };
+    if !safe_file_name.to_ascii_lowercase().ends_with(".jar") {
+        return;
+    }
+    let rel_path = format!("mods/{}", safe_file_name);
+    if !paths.iter().any(|item| item == &rel_path) {
+        paths.push(rel_path);
     }
 }
 
@@ -830,7 +1105,7 @@ fn do_download_to_dir(
         _ => return Err(format!("非法下载目录: {}", sub_dir)),
     };
     let target_dir = dir.join("instances").join(&safe_name).join(safe_sub_dir);
-    std::fs::create_dir_all(&target_dir).ok();
+    std::fs::create_dir_all(&target_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
     let dest = target_dir.join(&safe_file_name);
 
     if dest.exists() {

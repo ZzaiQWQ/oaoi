@@ -1,13 +1,46 @@
 use serde::Serialize;
 
 // ===== 安装取消机制 =====
+use crate::downloader::pool::ConnectionPool;
+use crate::downloader::DownloadManager;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn install_cancel() -> &'static Mutex<HashMap<String, std::sync::Arc<AtomicBool>>> {
     static INSTANCE: OnceLock<Mutex<HashMap<String, std::sync::Arc<AtomicBool>>>> = OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn install_download_managers() -> &'static Mutex<HashMap<String, Vec<(u64, DownloadManager)>>> {
+    static INSTANCE: OnceLock<Mutex<HashMap<String, Vec<(u64, DownloadManager)>>>> =
+        OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn install_connection_pools() -> &'static Mutex<HashMap<String, Arc<ConnectionPool>>> {
+    static INSTANCE: OnceLock<Mutex<HashMap<String, Arc<ConnectionPool>>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+static NEXT_DOWNLOAD_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
+
+pub struct DownloadManagerRegistration {
+    name: String,
+    id: u64,
+}
+
+impl Drop for DownloadManagerRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut managers) = install_download_managers().lock() {
+            if let Some(items) = managers.get_mut(&self.name) {
+                items.retain(|(id, _)| *id != self.id);
+                if items.is_empty() {
+                    managers.remove(&self.name);
+                }
+            }
+        }
+    }
 }
 
 /// 注册一个安装任务的取消标志
@@ -20,6 +53,17 @@ pub fn register_cancel(name: &str) -> std::sync::Arc<AtomicBool> {
     flag
 }
 
+/// 注册一个不允许同名并发的安装任务。
+pub fn try_register_cancel(name: &str) -> Result<std::sync::Arc<AtomicBool>, String> {
+    let mut tasks = install_cancel().lock().unwrap();
+    if tasks.contains_key(name) {
+        return Err(format!("已有同名安装任务正在运行: {}", name));
+    }
+    let flag = std::sync::Arc::new(AtomicBool::new(false));
+    tasks.insert(name.to_string(), flag.clone());
+    Ok(flag)
+}
+
 /// 检查是否已取消
 pub fn is_cancelled(name: &str) -> bool {
     install_cancel()
@@ -29,21 +73,90 @@ pub fn is_cancelled(name: &str) -> bool {
         .map_or(false, |f| f.load(Ordering::Relaxed))
 }
 
+pub fn install_cancel_flag(name: &str) -> Option<Arc<AtomicBool>> {
+    install_cancel().lock().unwrap().get(name).cloned()
+}
+
+/// 同一个安装任务共享连接池，避免整合包、基础库和资源各自叠加并发。
+pub fn install_download_pool(name: &str, max_connections: usize) -> Arc<ConnectionPool> {
+    let mut pools = install_connection_pools().lock().unwrap();
+    pools
+        .entry(name.to_string())
+        .or_insert_with(|| Arc::new(ConnectionPool::new(max_connections)))
+        .clone()
+}
+
+/// 注册当前安装任务里的下载器，取消时直接中断下载器任务。
+pub fn register_download_manager(
+    name: &str,
+    manager: &DownloadManager,
+) -> DownloadManagerRegistration {
+    let id = NEXT_DOWNLOAD_MANAGER_ID.fetch_add(1, Ordering::Relaxed);
+    let already_cancelled = is_cancelled(name);
+    install_download_managers()
+        .lock()
+        .unwrap()
+        .entry(name.to_string())
+        .or_default()
+        .push((id, manager.clone()));
+    if already_cancelled {
+        manager.cancel_all();
+    }
+    DownloadManagerRegistration {
+        name: name.to_string(),
+        id,
+    }
+}
+
 /// 移除取消标志
 pub fn unregister_cancel(name: &str) {
     install_cancel().lock().unwrap().remove(name);
+    install_download_managers().lock().unwrap().remove(name);
+    install_connection_pools().lock().unwrap().remove(name);
 }
 
 /// 取消安装命令
 #[tauri::command]
 pub fn cancel_modpack_install(file_name: String) -> Result<String, String> {
-    if let Some(flag) = install_cancel().lock().unwrap().get(&file_name) {
-        flag.store(true, Ordering::Relaxed);
-        eprintln!("[cancel] 已标记取消: {}", file_name);
-        Ok("cancelled".to_string())
+    let mut already_cancelled = false;
+    let found = if let Some(flag) = install_cancel().lock().unwrap().get(&file_name) {
+        already_cancelled = flag.swap(true, Ordering::Relaxed);
+        true
     } else {
-        Err(format!("未找到安装任务: {}", file_name))
+        false
+    };
+
+    if !found {
+        return Err(format!("未找到安装任务: {}", file_name));
     }
+
+    let managers = install_download_managers()
+        .lock()
+        .unwrap()
+        .get(&file_name)
+        .cloned()
+        .unwrap_or_default();
+    for (_, manager) in managers {
+        manager.cancel_all();
+    }
+    if let Some(pool) = install_connection_pools()
+        .lock()
+        .unwrap()
+        .get(&file_name)
+        .cloned()
+    {
+        pool.wake_all();
+    }
+
+    if already_cancelled {
+        eprintln!(
+            "[cancel] 任务已经处于取消状态，已再次唤醒下载器: {}",
+            file_name
+        );
+    } else {
+        eprintln!("[cancel] 已标记取消并中断下载器: {}", file_name);
+    }
+    Ok("cancelled".to_string())
 }
 
 /// 在系统默认浏览器打开 URL
