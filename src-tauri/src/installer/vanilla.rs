@@ -3,7 +3,10 @@ use crate::downloader::event::{DownloadEvent, DownloadOutcome};
 use crate::downloader::{
     DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
 };
-use crate::instance::{install_download_pool, register_download_manager, safe_path_name};
+use crate::instance::{
+    assets_dir, install_download_pool, libraries_dir, register_download_manager, safe_path_name,
+    version_jar_path,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
 
-/// 安装 vanilla 基础（meta + client.jar + libraries + assets）
+/// 安装 vanilla 基础（meta + 版本 jar + libraries + assets）
 pub fn install_vanilla(
     app_handle: &tauri::AppHandle,
     name: &str,
@@ -22,7 +25,23 @@ pub fn install_vanilla(
     http: &reqwest::blocking::Client,
     use_mirror: bool,
 ) -> Result<serde_json::Value, String> {
-    let emit = make_emitter(app_handle, name);
+    install_vanilla_with_names(
+        app_handle, name, name, mc_version, meta_url, game_dir, inst_dir, http, use_mirror,
+    )
+}
+
+pub fn install_vanilla_with_names(
+    app_handle: &tauri::AppHandle,
+    progress_name: &str,
+    version_name: &str,
+    mc_version: &str,
+    meta_url: &str,
+    game_dir: &std::path::Path,
+    inst_dir: &std::path::Path,
+    http: &reqwest::blocking::Client,
+    use_mirror: bool,
+) -> Result<serde_json::Value, String> {
+    let emit = make_emitter(app_handle, progress_name);
 
     // 1. 下载版本 JSON
     emit("meta", 0, 1, &format!("下载 {} 元数据...", mc_version));
@@ -71,7 +90,7 @@ pub fn install_vanilla(
     })?;
     emit("meta", 1, 1, "元数据下载完成");
 
-    // 2. 元数据就绪后，client.jar / libraries / assets 同时下载
+    // 2. 元数据就绪后，版本 jar / libraries / assets 同时下载
     let client_info = ver_json
         .get("downloads")
         .and_then(|d| d.get("client"))
@@ -86,16 +105,18 @@ pub fn install_vanilla(
 
     let mut handles: Vec<(&'static str, std::thread::JoinHandle<Result<(), String>>)> = Vec::new();
     handles.push((
-        "client.jar",
+        "version-jar",
         std::thread::spawn({
             let app_handle = app_handle.clone();
-            let name = name.to_string();
+            let progress_name = progress_name.to_string();
+            let version_name = version_name.to_string();
             let inst_dir = inst_dir.to_path_buf();
             let http = http.clone();
             move || {
                 download_client_stage(
                     &app_handle,
-                    &name,
+                    &progress_name,
+                    &version_name,
                     &inst_dir,
                     &http,
                     use_mirror,
@@ -108,13 +129,13 @@ pub fn install_vanilla(
         "libraries",
         std::thread::spawn({
             let app_handle = app_handle.clone();
-            let name = name.to_string();
+            let progress_name = progress_name.to_string();
             let game_dir = game_dir.to_path_buf();
             let http = http.clone();
             move || {
                 download_libraries_stage(
                     &app_handle,
-                    &name,
+                    &progress_name,
                     &game_dir,
                     &http,
                     use_mirror,
@@ -128,13 +149,13 @@ pub fn install_vanilla(
             "assets",
             std::thread::spawn({
                 let app_handle = app_handle.clone();
-                let name = name.to_string();
+                let progress_name = progress_name.to_string();
                 let game_dir = game_dir.to_path_buf();
                 let http = http.clone();
                 move || {
                     download_assets_stage(
                         &app_handle,
-                        &name,
+                        &progress_name,
                         &game_dir,
                         &http,
                         use_mirror,
@@ -144,21 +165,16 @@ pub fn install_vanilla(
             }),
         ));
     }
-    join_vanilla_stages(name, handles)?;
+    join_vanilla_stages(progress_name, handles)?;
 
     // 设置基础实例信息
-    ver_json["name"] = serde_json::Value::String(name.to_string());
-    ver_json["mcVersion"] = serde_json::Value::String(mc_version.to_string());
+    ver_json["id"] = serde_json::Value::String(version_name.to_string());
+    ver_json["clientVersion"] = serde_json::Value::String(mc_version.to_string());
 
     if ver_json["mainClass"].is_null() {
         ver_json["mainClass"] =
             serde_json::Value::String("net.minecraft.client.main.Main".to_string());
     }
-    ver_json["loader"] = serde_json::json!({
-        "type": "vanilla",
-        "version": ""
-    });
-
     Ok(ver_json)
 }
 
@@ -427,20 +443,21 @@ fn run_vanilla_downloads(
 
 fn download_client_stage(
     app_handle: &tauri::AppHandle,
-    name: &str,
+    progress_name: &str,
+    version_name: &str,
     inst_dir: &std::path::Path,
     _http: &reqwest::blocking::Client,
     use_mirror: bool,
     client_info: &serde_json::Value,
 ) -> Result<(), String> {
-    let emit = make_emitter(app_handle, name);
-    emit("client", 0, 1, "下载 client.jar...");
+    let emit = make_emitter(app_handle, progress_name);
+    emit("client", 0, 1, "下载版本 jar...");
     let client_url = client_info
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("缺少 client url")?;
     let client_sha1 = client_info.get("sha1").and_then(|v| v.as_str());
-    let jar_path = inst_dir.join("client.jar");
+    let jar_path = version_jar_path(inst_dir, version_name);
     let task = VanillaDownloadTask {
         candidates: vanilla_source_candidates(client_url, use_mirror),
         dest: jar_path,
@@ -448,17 +465,17 @@ fn download_client_stage(
     };
     run_vanilla_downloads(
         app_handle,
-        name,
+        progress_name,
         "client",
-        "下载 client.jar...",
+        "下载版本 jar...",
         vec![task],
         16,
         16,
         1,
         true,
     )
-    .map_err(|e| format!("下载 client.jar 失败: {}", e))?;
-    emit("client", 1, 1, "client.jar 完成");
+    .map_err(|e| format!("下载版本 jar 失败: {}", e))?;
+    emit("client", 1, 1, "版本 jar 完成");
     Ok(())
 }
 
@@ -472,6 +489,7 @@ fn download_libraries_stage(
 ) -> Result<(), String> {
     let emit = make_emitter(app_handle, name);
     let mut tasks = Vec::new();
+    let mut seen_library_paths = HashSet::new();
     for lib in libs.iter() {
         let rules = lib
             .get("rules")
@@ -485,12 +503,14 @@ fn download_libraries_stage(
             let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
             if !path.is_empty() && !url.is_empty() {
                 let rel_path = safe_maven_path(path)?;
-                let dest = game_dir.join("libs").join(rel_path);
-                tasks.push(VanillaDownloadTask {
-                    candidates: vanilla_source_candidates(url, use_mirror),
-                    dest,
-                    sha1: sha1.map(|s| s.to_string()),
-                });
+                let dest = libraries_dir(game_dir).join(rel_path);
+                if seen_library_paths.insert(path.to_string()) {
+                    tasks.push(VanillaDownloadTask {
+                        candidates: vanilla_source_candidates(url, use_mirror),
+                        dest,
+                        sha1: sha1.map(|s| s.to_string()),
+                    });
+                }
             }
         }
     }
@@ -537,7 +557,7 @@ fn download_assets_stage(
     let index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str());
 
     let index_file = safe_path_name(&format!("{}.json", index_id), "资源索引")?;
-    let index_path = game_dir.join("res").join("indexes").join(index_file);
+    let index_path = assets_dir(game_dir).join("indexes").join(index_file);
     emit("assetIndex", 0, 0, "下载资源索引...");
     let mut index_urls = Vec::new();
     if use_mirror && !index_id.is_empty() && index_id != "unknown" {
@@ -590,7 +610,7 @@ fn download_assets_stage(
             continue;
         }
         let prefix = &hash[..2];
-        let dest = game_dir.join("res").join("objects").join(prefix).join(hash);
+        let dest = assets_dir(game_dir).join("objects").join(prefix).join(hash);
         let url = format!(
             "https://resources.download.minecraft.net/{}/{}",
             prefix, hash

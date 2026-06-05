@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 // ===== 安装取消机制 =====
 use crate::downloader::pool::ConnectionPool;
@@ -209,13 +210,50 @@ pub struct InstanceInfo {
     pub mod_count: u32,
 }
 
-pub fn resolve_game_dir(game_dir: &str) -> std::path::PathBuf {
-    if !game_dir.is_empty() {
-        std::path::PathBuf::from(game_dir)
+pub fn resolve_game_dir(game_dir: &str) -> PathBuf {
+    let base = if !game_dir.is_empty() {
+        PathBuf::from(game_dir)
     } else {
         let home = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        std::path::Path::new(&home).join(".oaoi").join("oaoi")
+        Path::new(&home).join(".minecraft")
+    };
+    normalize_minecraft_dir(base)
+}
+
+pub fn normalize_minecraft_dir(path: PathBuf) -> PathBuf {
+    if path.file_name().and_then(|name| name.to_str()) == Some(".minecraft") {
+        path
+    } else {
+        path.join(".minecraft")
     }
+}
+
+pub fn versions_dir(game_dir: &Path) -> PathBuf {
+    game_dir.join("versions")
+}
+
+pub fn libraries_dir(game_dir: &Path) -> PathBuf {
+    game_dir.join("libraries")
+}
+
+pub fn assets_dir(game_dir: &Path) -> PathBuf {
+    game_dir.join("assets")
+}
+
+pub fn version_dir(game_dir: &Path, name: &str) -> PathBuf {
+    versions_dir(game_dir).join(name)
+}
+
+pub fn version_json_path(inst_dir: &Path, name: &str) -> PathBuf {
+    inst_dir.join(format!("{name}.json"))
+}
+
+pub fn version_jar_path(inst_dir: &Path, name: &str) -> PathBuf {
+    inst_dir.join(format!("{name}.jar"))
+}
+
+pub fn natives_dir(inst_dir: &Path, name: &str) -> PathBuf {
+    inst_dir.join(format!("{name}-natives"))
 }
 
 pub fn safe_path_name(value: &str, label: &str) -> Result<String, String> {
@@ -359,36 +397,190 @@ fn estimate_memory_by_mod_count(mod_count: u32) -> u32 {
     }
 }
 
+fn version_number_parts(version: &str) -> Vec<u32> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for ch in version.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if ch == '.' {
+            if !current.is_empty() {
+                if let Ok(value) = current.parse::<u32>() {
+                    parts.push(value);
+                }
+                current.clear();
+            }
+        } else {
+            break;
+        }
+    }
+    if !current.is_empty() {
+        if let Ok(value) = current.parse::<u32>() {
+            parts.push(value);
+        }
+    }
+    parts
+}
+
+fn compare_mc_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts = version_number_parts(a);
+    let b_parts = version_number_parts(b);
+    if a_parts.is_empty() || b_parts.is_empty() {
+        return a_parts.is_empty().cmp(&b_parts.is_empty());
+    }
+    let max_len = a_parts.len().max(b_parts.len());
+    for index in 0..max_len {
+        let left = a_parts.get(index).copied().unwrap_or(0);
+        let right = b_parts.get(index).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    a.cmp(b)
+}
+
+fn is_version_named_instance(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+        && !version_number_parts(name).is_empty()
+}
+
 pub fn cf_api_key() -> String {
     crate::secrets::get_cf_api_key()
+}
+
+fn infer_mc_version(json: &serde_json::Value) -> String {
+    if let Some(version) = json.get("clientVersion").and_then(|v| v.as_str()) {
+        return version.to_string();
+    }
+    if let Some(version) = json.get("mcVersion").and_then(|v| v.as_str()) {
+        return version.to_string();
+    }
+    if let Some(version) = json
+        .get("libraries")
+        .and_then(|v| v.as_array())
+        .and_then(|libraries| {
+            libraries.iter().find_map(|lib| {
+                lib.get("name").and_then(|v| v.as_str()).and_then(|name| {
+                    loader_version_from_library(name, "net.fabricmc:intermediary:")
+                })
+            })
+        })
+    {
+        return version;
+    }
+    if let Some(version) = json.get("inheritsFrom").and_then(|v| v.as_str()) {
+        return version.to_string();
+    }
+    json.get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn loader_version_from_library(name: &str, marker: &str) -> Option<String> {
+    if !name.contains(marker) {
+        return None;
+    }
+    name.split(':').nth(2).map(|version| version.to_string())
+}
+
+pub fn detect_loader(json: &serde_json::Value, _version_name: &str) -> (String, String) {
+    if let Some(libraries) = json.get("libraries").and_then(|v| v.as_array()) {
+        for lib in libraries {
+            let name = lib.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(version) = loader_version_from_library(name, "net.fabricmc:fabric-loader:")
+            {
+                return ("fabric".to_string(), version);
+            }
+            if let Some(version) = loader_version_from_library(name, "org.quiltmc:quilt-loader:") {
+                return ("quilt".to_string(), version);
+            }
+            if let Some(version) = loader_version_from_library(name, "net.minecraftforge:forge:") {
+                return ("forge".to_string(), version);
+            }
+            if let Some(version) =
+                loader_version_from_library(name, "net.minecraftforge:minecraftforge:")
+            {
+                return ("forge".to_string(), version);
+            }
+            if let Some(version) = loader_version_from_library(name, "net.neoforged:neoforge:") {
+                return ("neoforge".to_string(), version);
+            }
+            if let Some(version) = loader_version_from_library(name, "net.neoforged:forge:") {
+                return ("neoforge".to_string(), version);
+            }
+        }
+    }
+
+    if json
+        .get("minecraftArguments")
+        .and_then(|v| v.as_str())
+        .is_some_and(|args| args.contains("FMLTweaker"))
+    {
+        return ("forge".to_string(), String::new());
+    }
+
+    ("vanilla".to_string(), String::new())
+}
+
+pub fn remove_empty_legacy_arguments(json: &mut serde_json::Value) {
+    if json
+        .get("minecraftArguments")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
+        return;
+    }
+    let remove_arguments = json.get("arguments").is_some_and(|arguments| {
+        ["jvm", "game"].iter().all(|key| {
+            arguments
+                .get(key)
+                .and_then(|value| value.as_array())
+                .map(|values| values.is_empty())
+                .unwrap_or(true)
+        })
+    });
+    if remove_arguments {
+        if let Some(object) = json.as_object_mut() {
+            // 旧版 minecraftArguments 不能带空 arguments，否则会按新版 JVM 参数启动。
+            object.remove("arguments");
+        }
+    }
+}
+
+pub fn strip_launcher_private_version_fields(json: &mut serde_json::Value) {
+    if let Some(object) = json.as_object_mut() {
+        object.remove("name");
+        object.remove("mcVersion");
+        object.remove("loader");
+    }
+    remove_empty_legacy_arguments(json);
 }
 
 #[tauri::command]
 pub fn list_installed_versions(game_dir: String) -> Result<Vec<InstanceInfo>, String> {
     let dir = resolve_game_dir(&game_dir);
-    let instances_path = dir.join("instances");
-    if !instances_path.exists() {
+    let versions_path = versions_dir(&dir);
+    if !versions_path.exists() {
         return Ok(vec![]);
     }
     let mut list = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&instances_path) {
+    if let Ok(entries) = std::fs::read_dir(&versions_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
             }
-            let json_path = path.join("instance.json");
+            let name = entry.file_name().to_string_lossy().to_string();
+            let json_path = version_json_path(&path, &name);
             if json_path.exists() {
                 if let Ok(data) = std::fs::read_to_string(&json_path) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let mc_version = json["id"].as_str().unwrap_or("unknown").to_string();
-                        let loader_type = json["loader"]["type"]
-                            .as_str()
-                            .unwrap_or("vanilla")
-                            .to_string();
-                        let loader_version =
-                            json["loader"]["version"].as_str().unwrap_or("").to_string();
+                        let mc_version = infer_mc_version(&json);
+                        let (loader_type, loader_version) = detect_loader(&json, &name);
                         let recommended_memory =
                             json["recommendedMemory"].as_u64().map(|v| v as u32);
                         let mod_count = count_instance_mods(&path);
@@ -416,6 +608,21 @@ pub fn list_installed_versions(game_dir: String) -> Result<Vec<InstanceInfo>, St
             }
         }
     }
+    // 自定义命名的整合包先显示，版本号命名的实例再按 MC 版本号归位。
+    list.sort_by(|a, b| {
+        let a_version_named = is_version_named_instance(&a.name);
+        let b_version_named = is_version_named_instance(&b.name);
+        a_version_named
+            .cmp(&b_version_named)
+            .then_with(|| {
+                if a_version_named && b_version_named {
+                    compare_mc_versions(&a.mc_version, &b.mc_version)
+                } else {
+                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                }
+            })
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(list)
 }
 
@@ -424,7 +631,7 @@ pub async fn delete_version(game_dir: String, name: String) -> Result<String, St
     tokio::task::spawn_blocking(move || {
         let dir = resolve_game_dir(&game_dir);
         let safe_name = safe_path_name(&name, "版本名")?;
-        let inst_path = dir.join("instances").join(&safe_name);
+        let inst_path = version_dir(&dir, &safe_name);
         if !inst_path.exists() {
             return Err(format!("版本 {} 不存在", name));
         }
@@ -443,7 +650,7 @@ pub async fn delete_version(game_dir: String, name: String) -> Result<String, St
 pub fn open_folder(game_dir: String, name: String, sub_dir: String) -> Result<String, String> {
     let dir = resolve_game_dir(&game_dir);
     let safe_name = safe_path_name(&name, "版本名")?;
-    let mut target = dir.join("instances").join(&safe_name);
+    let mut target = version_dir(&dir, &safe_name);
     let safe_sub = match sub_dir.as_str() {
         "" => "",
         "mods" => "mods",

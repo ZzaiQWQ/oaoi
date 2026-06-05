@@ -2,7 +2,7 @@ use super::{
     download_file_if_needed_cancelable, make_emitter, merge_libraries, parallel_download,
     safe_maven_path,
 };
-use crate::instance::safe_path_name;
+use crate::instance::{libraries_dir, safe_path_name};
 use tauri::Emitter;
 
 /// 安装 Fabric loader
@@ -68,7 +68,7 @@ pub fn install_fabric(
             let Ok(relative_path) = safe_maven_path(&relative_path) else {
                 continue;
             };
-            let dest = game_dir.join("libs").join(relative_path);
+            let dest = libraries_dir(game_dir).join(relative_path);
 
             fabric_tasks.push((url, dest, sha1.map(|s| s.to_string())));
         }

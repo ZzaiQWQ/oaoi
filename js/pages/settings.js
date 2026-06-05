@@ -141,6 +141,12 @@ function initSettings() {
     gameDirSummary.title = value;
   }
 
+  function normalizeMinecraftDir(path) {
+    const value = String(path || '').replace(/[\\/]+$/, '');
+    if (!value) return '';
+    return /(^|[\\/])\.minecraft$/i.test(value) ? value : `${value}\\.minecraft`;
+  }
+
   if (cachedGameDir && gameDirDisplay) {
     gameDirDisplay.textContent = cachedGameDir;
     gameDirDisplay.title = cachedGameDir;
@@ -164,7 +170,7 @@ function initSettings() {
           directory: true,
         });
         if (selected) {
-          const gameDir = selected + '\\oaoi';
+          const gameDir = normalizeMinecraftDir(selected);
           gameDirDisplay.textContent = gameDir;
           gameDirDisplay.title = gameDir;
           localStorage.setItem('gameDir', gameDir);

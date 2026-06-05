@@ -1,6 +1,10 @@
 #[tauri::command]
 pub async fn get_fabric_versions(mc_version: String) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+        if !super::release_version_at_least(&mc_version, 14, 0) {
+            return Ok(vec![]);
+        }
+
         let url = format!(
             "https://meta.fabricmc.net/v2/versions/loader/{}",
             mc_version

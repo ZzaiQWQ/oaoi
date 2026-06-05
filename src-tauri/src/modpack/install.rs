@@ -8,6 +8,7 @@ use crate::downloader::{
 use crate::installer::{empty_loader_json, merge_loader_install_result, mirror_url};
 use crate::instance::{
     cf_api_key, install_download_pool, register_download_manager, safe_join, safe_path_name,
+    strip_launcher_private_version_fields, version_json_path,
 };
 use crate::modpack_sources::{save_source_entry, sha1_from_curseforge_hashes, SourceEntry};
 use std::collections::{HashMap, HashSet};
@@ -530,7 +531,7 @@ pub fn do_install_modpack_inner(
     // 1. 安装基础游戏
     let http = build_http_client(15, 180, 8)?;
 
-    // 整合包安装：基础游戏（client.jar/libs/assets）优先用镜像
+    // 整合包安装：基础游戏（版本 jar/libs/assets）优先用镜像
     // Mod 下载保持用户原始设置（CurseForge CDN 国内直连就行）
     let mirror_manifest_url = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
     let official_manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -578,7 +579,7 @@ pub fn do_install_modpack_inner(
         return Err("整合包名称无效".to_string());
     }
     std::fs::create_dir_all(inst_dir).map_err(|e| e.to_string())?;
-    let inst_json_path = inst_dir.join("instance.json");
+    let inst_json_path = version_json_path(inst_dir, &inst_name);
 
     if crate::instance::is_cancelled(display_name) {
         return Err("用户取消安装".to_string());
@@ -890,15 +891,17 @@ pub fn do_install_modpack_inner(
     let vanilla_handle = {
         let app = app.clone();
         let display_name = display_name.to_string();
+        let version_name = inst_name.clone();
         let mc_version = meta.mc_version.clone();
         let meta_url = meta_url.clone();
         let game_dir = game_dir.to_path_buf();
         let inst_dir = inst_dir.to_path_buf();
         let http = http.clone();
         std::thread::spawn(move || {
-            vanilla::install_vanilla(
+            vanilla::install_vanilla_with_names(
                 &app,
                 &display_name,
+                &version_name,
                 &mc_version,
                 &meta_url,
                 &game_dir,
@@ -960,6 +963,7 @@ pub fn do_install_modpack_inner(
     } else {
         let app = app.clone();
         let display_name = display_name.to_string();
+        let version_name = inst_name.clone();
         let mc_version = meta.mc_version.clone();
         let loader_type = meta.loader_type.clone();
         let loader_version = meta.loader_version.clone();
@@ -980,6 +984,15 @@ pub fn do_install_modpack_inner(
                     resolved_java = j.path.clone();
                     &resolved_java
                 } else {
+                    if required_major == 7 {
+                        java_error = Some(
+                            "这个整合包需要 Java 7，请先手动安装 Java 7，或在设置里选择 Java 7 的 java.exe"
+                                .to_string(),
+                        );
+                        let _ = crate::instance::cancel_modpack_install(display_name.clone());
+                        resolved_java = String::new();
+                        &resolved_java
+                    } else {
                     emit_progress(
                         &app,
                         &display_name,
@@ -1006,6 +1019,7 @@ pub fn do_install_modpack_inner(
                             resolved_java = String::new();
                             &resolved_java
                         }
+                    }
                     }
                 }
             };
@@ -1039,9 +1053,10 @@ pub fn do_install_modpack_inner(
                     game_mirror,
                     &mut loader_json,
                 )?,
-                "forge" => forge::install_forge(
+                "forge" => forge::install_forge_with_names(
                     &app,
                     &display_name,
+                    &version_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
@@ -1051,9 +1066,10 @@ pub fn do_install_modpack_inner(
                     game_mirror,
                     &mut loader_json,
                 )?,
-                "neoforge" => neoforge::install_neoforge(
+                "neoforge" => neoforge::install_neoforge_with_names(
                     &app,
                     &display_name,
+                    &version_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
@@ -1069,7 +1085,7 @@ pub fn do_install_modpack_inner(
         }))
     };
 
-    // 注意: instance.json 的写入移到最后（推荐内存计算后一次性写入）
+    // 注意: 版本 JSON 的写入移到最后（推荐内存计算后一次性写入）
 
     // ===== 等待三条下载线完成：任意一条失败就立刻取消其它下载器 =====
     let mut vanilla_handle = Some(vanilla_handle);
@@ -1311,6 +1327,7 @@ pub fn do_install_modpack_inner(
     );
 
     // 重新写入（因为之前已写过，这里覆盖加上推荐内存）
+    strip_launcher_private_version_fields(&mut ver_json);
     std::fs::write(
         &inst_json_path,
         serde_json::to_string_pretty(&ver_json).unwrap(),

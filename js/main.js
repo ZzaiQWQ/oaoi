@@ -159,6 +159,12 @@ async function checkFirstLaunch() {
   modal.classList.remove('hidden');
   let selectedDir = '';
 
+  function normalizeMinecraftDir(path) {
+    const value = String(path || '').replace(/[\\/]+$/, '');
+    if (!value) return '';
+    return /(^|[\\/])\.minecraft$/i.test(value) ? value : `${value}\\.minecraft`;
+  }
+
   dirBtn.addEventListener('click', async () => {
     try {
       const tauri = await waitForTauri();
@@ -167,7 +173,7 @@ async function checkFirstLaunch() {
         directory: true,
       });
       if (selected) {
-        selectedDir = selected + '\\oaoi';
+        selectedDir = normalizeMinecraftDir(selected);
         dirDisplay.textContent = selectedDir;
         dirDisplay.style.color = '#c94a6a';
         confirmBtn.disabled = false;

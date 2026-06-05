@@ -6,6 +6,10 @@ const LEGACY_FORGE_API: &str =
 #[tauri::command]
 pub async fn get_neoforge_versions(mc_version: String) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+        if !super::release_version_at_least(&mc_version, 20, 1) {
+            return Ok(vec![]);
+        }
+
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("OAOI-Launcher/1.0")

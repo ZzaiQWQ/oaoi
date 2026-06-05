@@ -3,7 +3,7 @@ use super::{
     maven_name_to_path, merge_libraries, parallel_download, resolve_data_arg,
     run_java_process_cancelable, safe_maven_path, wait_for_install_file, FORGE_LOCK,
 };
-use crate::instance::safe_join;
+use crate::instance::{libraries_dir, safe_join, version_jar_path};
 use tauri::Emitter;
 
 /// 安装 NeoForge loader（解压 installer.jar，自行下载库 + 执行 processors）
@@ -19,11 +19,39 @@ pub fn install_neoforge(
     use_mirror: bool,
     ver_json: &mut serde_json::Value,
 ) -> Result<(), String> {
+    install_neoforge_with_names(
+        app_handle,
+        name,
+        name,
+        mc_version,
+        loader_version,
+        game_dir,
+        inst_dir,
+        http,
+        java_path,
+        use_mirror,
+        ver_json,
+    )
+}
+
+pub fn install_neoforge_with_names(
+    app_handle: &tauri::AppHandle,
+    progress_name: &str,
+    version_name: &str,
+    mc_version: &str,
+    loader_version: &str,
+    game_dir: &std::path::Path,
+    inst_dir: &std::path::Path,
+    http: &reqwest::blocking::Client,
+    java_path: &str,
+    use_mirror: bool,
+    ver_json: &mut serde_json::Value,
+) -> Result<(), String> {
     if java_path.is_empty() {
         return Err("必须先在设置中配置 Java 路径才能安装 NeoForge".to_string());
     }
 
-    let emit = make_emitter(app_handle, name);
+    let emit = make_emitter(app_handle, progress_name);
     emit(
         "neoforge",
         0,
@@ -34,7 +62,7 @@ pub fn install_neoforge(
     // 获取安装锁（和 Forge 共享）
     emit("neoforge", 0, 100, "等待其他安装器完成...");
     let _forge_guard = loop {
-        if crate::instance::is_cancelled(name) {
+        if crate::instance::is_cancelled(progress_name) {
             return Err("用户取消安装".to_string());
         }
         match FORGE_LOCK.try_lock() {
@@ -73,7 +101,7 @@ pub fn install_neoforge(
         &installer_path,
         None,
         use_mirror,
-        Some(name),
+        Some(progress_name),
         |downloaded, total| {
             let total = total.unwrap_or_else(|| downloaded.max(1)).max(1);
             emit(
@@ -97,7 +125,7 @@ pub fn install_neoforge(
         let file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         for i in 0..archive.len() {
-            if crate::instance::is_cancelled(name) {
+            if crate::instance::is_cancelled(progress_name) {
                 return Err("用户取消安装".to_string());
             }
             if let Ok(mut entry) = archive.by_index(i) {
@@ -139,7 +167,7 @@ pub fn install_neoforge(
 
     // 5. 下载 NeoForge 的所有依赖库
     emit("neoforge", 30, 100, "下载 NeoForge 依赖库...");
-    let libs_dir = game_dir.join("libs");
+    let libs_dir = libraries_dir(game_dir);
     std::fs::create_dir_all(&libs_dir).ok();
 
     // 从 version.json 和 install_profile.json 收集所有库
@@ -158,7 +186,7 @@ pub fn install_neoforge(
     let mut download_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
 
     for lib in &all_libs {
-        if crate::instance::is_cancelled(name) {
+        if crate::instance::is_cancelled(progress_name) {
             return Err("用户取消安装".to_string());
         }
         scanned += 1;
@@ -246,7 +274,7 @@ pub fn install_neoforge(
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app_clone = app_handle.clone();
         let done_reporter = done.clone();
-        let inst_name_copy = name.to_string();
+        let inst_name_copy = progress_name.to_string();
         let reporter = std::thread::spawn(move || loop {
             let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
             let _ = app_clone.emit(
@@ -264,7 +292,14 @@ pub fn install_neoforge(
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
-        let result = parallel_download(http, download_tasks, &done, 32, use_mirror, Some(name));
+        let result = parallel_download(
+            http,
+            download_tasks,
+            &done,
+            32,
+            use_mirror,
+            Some(progress_name),
+        );
         let _ = reporter.join();
         result.map_err(|e| format!("NeoForge 依赖库下载失败: {}", e))?;
         emit("neoforge-libs", total, total, "NeoForge 依赖库下载完成");
@@ -286,14 +321,14 @@ pub fn install_neoforge(
                 .collect();
 
             let total_proc = client_processors.len();
-            let client_jar = inst_dir.join("client.jar");
+            let client_jar = version_jar_path(inst_dir, version_name);
             if total_proc > 0 {
-                emit("neoforge", 70, 100, "等待 client.jar 完成...");
-                wait_for_install_file(&client_jar, "client.jar", name)?;
+                emit("neoforge", 70, 100, "等待版本 jar 完成...");
+                wait_for_install_file(&client_jar, "版本 jar", progress_name)?;
             }
 
             for (i, proc) in client_processors.iter().enumerate() {
-                if crate::instance::is_cancelled(name) {
+                if crate::instance::is_cancelled(progress_name) {
                     return Err("用户取消安装".to_string());
                 }
                 emit(
@@ -380,7 +415,7 @@ pub fn install_neoforge(
                     &main_class,
                     &proc_args,
                     inst_dir,
-                    name,
+                    progress_name,
                 ) {
                     Ok(status) => {
                         if !status.success() {

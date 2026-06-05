@@ -2,7 +2,10 @@ pub mod cf_download;
 pub mod download_mirror;
 pub mod install;
 
-use crate::instance::{resolve_game_dir, safe_path_name, try_register_cancel, unregister_cancel};
+use crate::instance::{
+    resolve_game_dir, safe_path_name, try_register_cancel, unregister_cancel,
+    versions_dir as minecraft_versions_dir,
+};
 use tauri::Emitter;
 
 /// 构建 HTTP client
@@ -48,6 +51,9 @@ pub fn get_required_java_major_pub(mc_version: &str) -> u32 {
     }
     if minor >= 17 {
         return 17;
+    }
+    if minor < 7 || (minor == 7 && patch < 10) {
+        return 7;
     }
     8
 }
@@ -521,8 +527,8 @@ fn create_unique_instance_dir(
     game_dir: &std::path::Path,
     base_name: &str,
 ) -> Result<(String, std::path::PathBuf), String> {
-    let instances_dir = game_dir.join("instances");
-    std::fs::create_dir_all(&instances_dir).map_err(|e| e.to_string())?;
+    let versions_dir = minecraft_versions_dir(game_dir);
+    std::fs::create_dir_all(&versions_dir).map_err(|e| e.to_string())?;
 
     for index in 0..1000 {
         let name = if index == 0 {
@@ -530,7 +536,7 @@ fn create_unique_instance_dir(
         } else {
             format!("{}-{}", base_name, index)
         };
-        let inst_dir = instances_dir.join(&name);
+        let inst_dir = versions_dir.join(&name);
         match std::fs::create_dir(&inst_dir) {
             Ok(()) => return Ok((name, inst_dir)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

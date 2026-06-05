@@ -13,6 +13,38 @@ function initDownloadPage() {
   let nameCheckToken = 0;
   let validateInstanceName = async () => true;
 
+  // 只按正式版号判断 Loader 下限，旧版和快照默认不展示新加载器。
+  function parseReleaseVersion(version) {
+    const match = String(version || '').match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
+    if (!match) return null;
+    return [Number(match[1]), Number(match[2]), Number(match[3] || 0)];
+  }
+
+  function isReleaseAtLeast(version, major, minor, patch = 0) {
+    const parsed = parseReleaseVersion(version);
+    if (!parsed) return false;
+    const target = [major, minor, patch];
+    for (let i = 0; i < 3; i++) {
+      if (parsed[i] !== target[i]) return parsed[i] > target[i];
+    }
+    return true;
+  }
+
+  function isLoaderSupported(loader, mcVersion) {
+    if (loader === 'vanilla' || loader === 'forge') return true;
+    if (loader === 'fabric' || loader === 'quilt') return isReleaseAtLeast(mcVersion, 1, 14);
+    if (loader === 'neoforge') return isReleaseAtLeast(mcVersion, 1, 20, 1);
+    return false;
+  }
+
+  function refreshLoaderChoices(mcVersion) {
+    document.querySelectorAll('input[name="loader"]').forEach(radio => {
+      const supported = isLoaderSupported(radio.value, mcVersion);
+      radio.disabled = !supported;
+      radio.closest('.loader-radio-btn')?.toggleAttribute('hidden', !supported);
+    });
+  }
+
   async function getInstalledNameSet() {
     const tauri = await waitForTauri();
     const gameDir = localStorage.getItem('gameDir') || '';
@@ -165,6 +197,7 @@ function initDownloadPage() {
         const nameInput = document.getElementById('instNameInput');
         nameInput.value = `${ver}`;
         document.getElementById('instMetaUrl').value = url;
+        refreshLoaderChoices(ver);
         modal
           ?.querySelector('.modal-header')
           ?.setAttribute('data-subtitle', '取个名，选个 Loader，就可以开整。');

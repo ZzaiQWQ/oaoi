@@ -90,13 +90,12 @@ pub fn normalize_rel_path(value: &str) -> String {
 
 fn safe_index_name(value: &str) -> String {
     value
+        .trim()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
         })
         .collect()
 }

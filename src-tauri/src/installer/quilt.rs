@@ -1,4 +1,5 @@
 use super::{make_emitter, merge_libraries, parallel_download, safe_maven_path};
+use crate::instance::libraries_dir;
 use tauri::Emitter;
 
 /// 安装 Quilt loader
@@ -65,7 +66,7 @@ pub fn install_quilt(
             let Ok(relative_path) = safe_maven_path(&relative_path) else {
                 continue;
             };
-            let dest = game_dir.join("libs").join(relative_path);
+            let dest = libraries_dir(game_dir).join(relative_path);
             quilt_tasks.push((url, dest, sha1.map(|s| s.to_string())));
         }
         let total = quilt_tasks.len();

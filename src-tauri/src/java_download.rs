@@ -20,6 +20,10 @@ pub fn download_java(
         return Ok(java_exe.to_string_lossy().to_string());
     }
 
+    if major == 7 {
+        return Err(manual_java7_message());
+    }
+
     let cancel_name = format!("java-{}", major);
     let cancel_flag = crate::instance::register_cancel(&cancel_name);
     // 后台线程下载，不阻塞 UI
@@ -54,6 +58,10 @@ pub fn download_java(
 #[tauri::command]
 pub fn cancel_java_download(major: u32) -> Result<String, String> {
     crate::instance::cancel_modpack_install(format!("java-{}", major))
+}
+
+fn manual_java7_message() -> String {
+    "这个版本需要 Java 7，请先手动安装 Java 7，或在版本设置里选择 Java 7 的 java.exe".to_string()
 }
 
 fn do_download_java(
@@ -348,6 +356,10 @@ pub fn download_java_sync_cancelable(
     if is_cancelled(cancel_name) {
         return Err("用户取消下载".to_string());
     }
+    if major == 7 {
+        return Err(manual_java7_message());
+    }
+
     let java_dir = std::path::PathBuf::from(game_dir)
         .join("runtime")
         .join(format!("jre-{}", major));

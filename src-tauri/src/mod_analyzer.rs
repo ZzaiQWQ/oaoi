@@ -1,4 +1,4 @@
-use crate::instance::{resolve_game_dir, safe_path_name};
+use crate::instance::{resolve_game_dir, safe_path_name, version_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek};
@@ -163,7 +163,7 @@ fn analyze_instance_mods_blocking(
 ) -> Result<AnalyzeResult, String> {
     let safe_name = safe_path_name(name, "版本名")?;
     let game_root = resolve_game_dir(game_dir);
-    let mods_dir = game_root.join("instances").join(&safe_name).join("mods");
+    let mods_dir = version_dir(&game_root, &safe_name).join("mods");
     if !mods_dir.exists() {
         return Ok(empty_result());
     }
@@ -259,7 +259,7 @@ fn cache_single_downloaded_mod(
     }
 
     let game_root = resolve_game_dir(game_dir);
-    let file_path = game_root.join("instances").join(&safe_name).join(&rel_path);
+    let file_path = version_dir(&game_root, &safe_name).join(&rel_path);
     if !file_path.is_file() {
         return Ok(());
     }
@@ -1177,13 +1177,12 @@ fn meta_cache_path(game_root: &Path, instance_name: &str) -> PathBuf {
 
 fn safe_index_name(value: &str) -> String {
     value
+        .trim()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
         })
         .collect()
 }

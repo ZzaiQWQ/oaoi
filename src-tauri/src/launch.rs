@@ -1,11 +1,17 @@
 use crate::installer::{
-    download_file_mirror_then_official, download_file_mirror_then_official_with_progress,
-    library_rules_value_allowed, maven_name_to_path, parallel_download_mirror_then_official,
+    default_library_maven_base, download_file_mirror_then_official,
+    download_file_mirror_then_official_with_progress, library_rules_value_allowed,
+    maven_name_to_path, maven_name_to_path_with_classifier, parallel_download_mirror_then_official,
     safe_maven_path,
 };
-use crate::instance::{resolve_game_dir, safe_path_name};
+use crate::instance::{
+    assets_dir, detect_loader, libraries_dir, natives_dir as version_natives_dir,
+    resolve_game_dir, safe_path_name, version_dir, version_jar_path,
+    version_json_path as instance_version_json_path,
+};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
@@ -183,31 +189,14 @@ fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
     })
 }
 
+// 旧版 minecraftArguments 会带 Windows 路径，反斜杠必须原样保留。
 fn split_command_args(input: &str) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
-    let mut escaped = false;
     let mut in_arg = false;
 
     for ch in input.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            in_arg = true;
-            continue;
-        }
-
-        if ch == '\\' {
-            if quote == Some('\'') {
-                current.push(ch);
-            } else {
-                escaped = true;
-            }
-            in_arg = true;
-            continue;
-        }
-
         if let Some(q) = quote {
             if ch == q {
                 quote = None;
@@ -236,9 +225,6 @@ fn split_command_args(input: &str) -> Result<Vec<String>, String> {
         in_arg = true;
     }
 
-    if escaped {
-        current.push('\\');
-    }
     if quote.is_some() {
         return Err("JVM 参数引号未闭合".to_string());
     }
@@ -249,23 +235,17 @@ fn split_command_args(input: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
-fn sha1_ok(path: &std::path::Path, expected_sha1: Option<&str>) -> bool {
-    if !path.exists() {
+fn launch_file_ok(path: &std::path::Path, expected_size: Option<u64>) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
         return false;
     }
-    let Some(expected_sha1) = expected_sha1 else {
-        return true;
-    };
-    match std::fs::read(path) {
-        Ok(data) => sha1_smol::Sha1::from(&data)
-            .digest()
-            .to_string()
-            .eq_ignore_ascii_case(expected_sha1),
-        Err(_) => false,
-    }
+    expected_size.is_none_or(|size| size == 0 || meta.len() == size)
 }
 
-fn is_valid_sha1(value: &str) -> bool {
+fn sha1_like(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
@@ -300,9 +280,10 @@ fn repair_launch_files(
     if let Some(client_info) = json.get("downloads").and_then(|d| d.get("client")) {
         if let Some(url) = client_info.get("url").and_then(|v| v.as_str()) {
             let sha1 = client_info.get("sha1").and_then(|v| v.as_str());
-            let jar_path = ver_dir.join("client.jar");
-            if !sha1_ok(&jar_path, sha1) {
-                emit("client", 0, 1, "启动前修复 client.jar...");
+            let size = client_info.get("size").and_then(|v| v.as_u64());
+            let jar_path = version_jar_path(ver_dir, version_name);
+            if !launch_file_ok(&jar_path, size) {
+                emit("client", 0, 1, "启动前修复版本 jar...");
                 download_file_mirror_then_official_with_progress(
                     &http,
                     url,
@@ -313,17 +294,18 @@ fn repair_launch_files(
                         let total = total.unwrap_or_else(|| done.max(1)).max(1);
                         let current = done.min(usize::MAX as u64) as usize;
                         let total = total.min(usize::MAX as u64) as usize;
-                        emit("client", current, total, "启动前修复 client.jar...");
+                        emit("client", current, total, "启动前修复版本 jar...");
                     },
                 )
-                .map_err(|e| format!("启动前修复 client.jar 失败: {}", e))?;
-                emit("client", 1, 1, "client.jar 修复完成");
+                .map_err(|e| format!("启动前修复版本 jar 失败: {}", e))?;
+                emit("client", 1, 1, "版本 jar 修复完成");
             }
         }
     }
 
-    let libs_dir = game_dir.join("libs");
+    let libs_dir = libraries_dir(game_dir);
     let mut lib_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut seen_library_paths = HashSet::new();
     if let Some(libs) = json.get("libraries").and_then(|v| v.as_array()) {
         for lib in libs {
             if !library_rules_value_allowed(lib.get("rules")) {
@@ -339,7 +321,8 @@ fn repair_launch_files(
                     };
                     let dest = libs_dir.join(rel_path);
                     let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
-                    if !sha1_ok(&dest, sha1) {
+                    let size = artifact.get("size").and_then(|v| v.as_u64());
+                    if !launch_file_ok(&dest, size) && seen_library_paths.insert(path.to_string()) {
                         lib_tasks.push((url.to_string(), dest, sha1.map(|s| s.to_string())));
                     }
                     continue;
@@ -362,7 +345,8 @@ fn repair_launch_files(
                 let url = format!("{}/{}", maven_url.trim_end_matches('/'), rel_path);
                 let dest = libs_dir.join(rel_path_buf);
                 let sha1 = lib.get("sha1").and_then(|v| v.as_str());
-                if !sha1_ok(&dest, sha1) {
+                let size = lib.get("size").and_then(|v| v.as_u64());
+                if !launch_file_ok(&dest, size) && seen_library_paths.insert(rel_path.clone()) {
                     lib_tasks.push((url, dest, sha1.map(|s| s.to_string())));
                 }
             }
@@ -413,8 +397,7 @@ fn repair_launch_files(
             .unwrap_or("unknown");
         let index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str());
         if !index_url.is_empty() {
-            let index_path = game_dir
-                .join("res")
+            let index_path = assets_dir(game_dir)
                 .join("indexes")
                 .join(format!("{}.json", index_id));
             // 资源索引存在就直接使用，避免版本 JSON 的索引 SHA 变动导致每次启动都修复。
@@ -461,12 +444,14 @@ fn repair_launch_files(
                 let mut asset_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
                 for (_name, info) in objects {
                     let hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                    if !is_valid_sha1(hash) {
+                    if !sha1_like(hash) {
                         continue;
                     }
                     let prefix = &hash[..2];
-                    let dest = game_dir.join("res").join("objects").join(prefix).join(hash);
-                    if sha1_ok(&dest, Some(hash)) {
+                    let dest = assets_dir(game_dir).join("objects").join(prefix).join(hash);
+                    let size = info.get("size").and_then(|v| v.as_u64());
+                    // 启动时只做缺失和大小检查，完整哈希留给修复流程。
+                    if launch_file_ok(&dest, size) {
                         continue;
                     }
                     let url = format!(
@@ -538,13 +523,13 @@ fn do_launch_minecraft(
 
     // 实例目录
     let version_name = safe_path_name(&options.version_name, "版本名")?;
-    let ver_dir = game_dir.join("instances").join(&version_name);
+    let ver_dir = version_dir(&game_dir, &version_name);
     if !ver_dir.exists() {
         return Err(format!("版本 {} 未安装", version_name));
     }
 
     // 读取实例 JSON
-    let version_json_path = ver_dir.join("instance.json");
+    let version_json_path = instance_version_json_path(&ver_dir, &version_name);
     let json_str = std::fs::read_to_string(&version_json_path)
         .map_err(|e| format!("读取版本配置失败: {}", e))?;
     let json: serde_json::Value =
@@ -559,9 +544,10 @@ fn do_launch_minecraft(
 
     // 获取 asset index
     let asset_index = json["assetIndex"]["id"].as_str().unwrap_or("legacy");
+    let assets_root = assets_dir(&game_dir);
 
     // 构建 classpath（按 group:artifact 去重）
-    let libs_dir = game_dir.join("libs");
+    let libs_dir = libraries_dir(&game_dir);
     let mut classpath = Vec::new();
     let mut seen_keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
@@ -626,7 +612,7 @@ fn do_launch_minecraft(
     }
 
     // 添加版本 jar
-    let version_jar = ver_dir.join("client.jar");
+    let version_jar = version_jar_path(&ver_dir, &version_name);
     if version_jar.exists() {
         classpath.push(version_jar.to_string_lossy().to_string());
     }
@@ -642,7 +628,7 @@ fn do_launch_minecraft(
     }
 
     // natives 目录
-    let natives_dir = ver_dir.join("natives");
+    let natives_dir = version_natives_dir(&ver_dir, &version_name);
     if !natives_dir.exists() {
         let _ = std::fs::create_dir_all(&natives_dir);
     }
@@ -659,22 +645,34 @@ fn do_launch_minecraft(
                     Some(k) => k.to_string(),
                     None => continue,
                 };
-                // 获取 natives jar 路径
-                let native_jar_path = if let Some(cl) =
-                    lib["downloads"]["classifiers"][&classifier_key]["path"].as_str()
-                {
-                    let Ok(path) = safe_maven_path(cl) else {
-                        continue;
-                    };
-                    libs_dir.join(path)
-                } else {
+                // 老版本没有 downloads.classifiers，需要从 name + natives.windows 推导路径。
+                let native_path_text = lib["downloads"]["classifiers"][&classifier_key]["path"]
+                    .as_str()
+                    .map(|path| path.to_string())
+                    .or_else(|| {
+                        let name = lib.get("name").and_then(|value| value.as_str())?;
+                        Some(maven_name_to_path_with_classifier(name, &classifier_key))
+                    });
+                let Some(native_path_text) = native_path_text else {
                     continue;
                 };
+                let Ok(native_rel_path) = safe_maven_path(&native_path_text) else {
+                    continue;
+                };
+                let native_jar_path = libs_dir.join(&native_rel_path);
                 if !native_jar_path.exists() {
-                    // 尝试下载
-                    if let Some(url) =
-                        lib["downloads"]["classifiers"][&classifier_key]["url"].as_str()
-                    {
+                    let native_url = lib["downloads"]["classifiers"][&classifier_key]["url"]
+                        .as_str()
+                        .map(|url| url.to_string())
+                        .or_else(|| {
+                            let name = lib.get("name").and_then(|value| value.as_str())?;
+                            let base = lib
+                                .get("url")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_else(|| default_library_maven_base(name, true));
+                            Some(format!("{}/{}", base.trim_end_matches('/'), native_path_text))
+                        });
+                    if let Some(url) = native_url {
                         if let Some(parent) = native_jar_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
@@ -689,7 +687,7 @@ fn do_launch_minecraft(
                             .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
                         download_file_mirror_then_official(
                             &http,
-                            url,
+                            &url,
                             &native_jar_path,
                             sha1,
                             None,
@@ -839,6 +837,7 @@ fn do_launch_minecraft(
     if let Some(jvm_args) = json["arguments"]["jvm"].as_array() {
         let libs_dir_str = libs_dir.to_string_lossy().to_string();
         let natives_dir_str = natives_dir.to_string_lossy().to_string();
+        let primary_jar_name = format!("{}.jar", version_name);
 
         let replace_vars = |s: &str| -> String {
             let mut r = s
@@ -849,11 +848,7 @@ fn do_launch_minecraft(
                 .replace("${classpath}", &classpath_str)
                 .replace("${classpath_separator}", ";")
                 .replace("${version_name}", &version_name)
-                .replace("${primary_jar_name}", "client.jar");
-            // NeoForge: ignoreList 引用 ${version_name}.jar，但我们的是 client.jar
-            if r.starts_with("-DignoreList=") {
-                r = r.replace(&format!("{}.jar", version_name), "client.jar");
-            }
+                .replace("${primary_jar_name}", &primary_jar_name);
             // Windows: 检测任意盘符路径，将正斜杠统一为反斜杠
             let has_drive_letter =
                 r.len() >= 2 && r.as_bytes()[1] == b':' && r.as_bytes()[0].is_ascii_alphabetic();
@@ -915,7 +910,7 @@ fn do_launch_minecraft(
     }
 
     // Forge / NeoForge 必需的 -DlibraryDirectory
-    let loader_type = json["loader"]["type"].as_str().unwrap_or("");
+    let (loader_type, _) = detect_loader(&json, &version_name);
     if (loader_type == "forge" || loader_type == "neoforge")
         && !args.iter().any(|a| a.starts_with("-DlibraryDirectory"))
     {
@@ -934,17 +929,21 @@ fn do_launch_minecraft(
             main_class.to_string(),
         ]);
         let mc_args_str = json["minecraftArguments"].as_str().unwrap();
+        let legacy_assets = assets_root.join("virtual").join("legacy");
         let replaced = mc_args_str
             .replace("${auth_player_name}", &options.player_name)
             .replace("${version_name}", &version_name)
             .replace("${game_directory}", &ver_dir.to_string_lossy())
-            .replace("${assets_root}", &game_dir.join("res").to_string_lossy())
+            .replace("${assets_root}", &assets_root.to_string_lossy())
+            .replace("${game_assets}", &legacy_assets.to_string_lossy())
             .replace("${assets_index_name}", asset_index)
             .replace("${auth_uuid}", &launch_uuid)
             .replace(
                 "${auth_access_token}",
                 options.access_token.as_deref().unwrap_or("0"),
             )
+            .replace("${auth_session}", options.access_token.as_deref().unwrap_or("0"))
+            .replace("${access_token}", options.access_token.as_deref().unwrap_or("0"))
             .replace(
                 "${user_type}",
                 if options.access_token.is_some() {
@@ -971,7 +970,7 @@ fn do_launch_minecraft(
             "--gameDir".to_string(),
             ver_dir.to_string_lossy().to_string(),
             "--assetsDir".to_string(),
-            game_dir.join("res").to_string_lossy().to_string(),
+            assets_root.to_string_lossy().to_string(),
             "--assetIndex".to_string(),
             asset_index.to_string(),
             "--uuid".to_string(),
@@ -1104,46 +1103,29 @@ fn do_launch_minecraft(
     let version_for_log = version_name.to_string();
     let log_path_clone = log_path.clone();
     let ver_dir_clone = ver_dir.clone();
+    let launch_started_at = std::time::SystemTime::now();
 
     // 后台线程：等待游戏进程退出，崩溃时发送事件
     std::thread::spawn(move || {
         match child.wait() {
             Ok(status) => {
                 let exit_code = status.code().unwrap_or(-1);
-                if exit_code != 0 {
-                    // 非正常退出 → 安全读取日志尾部（最多200行），避免大日志 OOM
-                    let log_content = read_tail_lines(&log_path_clone, 200);
-                    let mut diagnosis = analyze_crash_log(&log_content, exit_code);
+                let launch_log = read_tail_lines(&log_path_clone, 200);
+                let game_log = read_tail_lines(&ver_dir_clone.join("logs").join("latest.log"), 100);
+                let fml_log = read_tail_lines(
+                    &ver_dir_clone.join("logs").join("fml-client-latest.log"),
+                    100,
+                );
+                let combined_log = format!("{}\n{}\n{}", launch_log, game_log, fml_log);
+                let crash_report =
+                    read_latest_crash_report_since(&ver_dir_clone, launch_started_at);
 
-                    // 如果启动日志没匹配到有用规则，再读游戏自己的日志做二次分析
-                    let mut combined_log = log_content.clone();
-                    if diagnosis.contains("日志最后几行") || diagnosis.contains("日志文件为空")
-                    {
-                        let game_log =
-                            read_tail_lines(&ver_dir_clone.join("logs").join("latest.log"), 100);
-                        let fml_log = read_tail_lines(
-                            &ver_dir_clone.join("logs").join("fml-client-latest.log"),
-                            100,
-                        );
-                        let game_combined = format!("{}\n{}", game_log, fml_log);
-                        let retry = analyze_crash_log(&game_combined, exit_code);
-                        if !retry.contains("日志最后几行") && !retry.contains("日志文件为空")
-                        {
-                            diagnosis = retry;
-                        }
-                        combined_log = format!("{}\n{}", combined_log, game_combined);
-                    }
-
-                    // 截取最后 150 行给 AI 分析
+                // 窗口已出现后的退出只认明确崩溃证据，避免玩家点 X 被旧日志误判。
+                if !crash_report.is_empty() || has_runtime_crash_marker(&combined_log) {
+                    let diagnosis = analyze_crash_log(&combined_log, exit_code);
                     let log_lines: Vec<&str> = combined_log.lines().collect();
-                    let tail_start = if log_lines.len() > 150 {
-                        log_lines.len() - 150
-                    } else {
-                        0
-                    };
+                    let tail_start = log_lines.len().saturating_sub(150);
                     let log_tail = log_lines[tail_start..].join("\n");
-                    // 也尝试读取 crash-reports
-                    let crash_report = read_latest_crash_report(&ver_dir_clone);
                     let _ = app_handle.emit(
                         "game-crashed",
                         serde_json::json!({
@@ -1155,51 +1137,13 @@ fn do_launch_minecraft(
                         }),
                     );
                 } else {
-                    // 退出码 0 但可能有 Forge/Fabric Mod 加载错误（弹窗关闭后退出码仍为 0）
-                    let game_log =
-                        read_tail_lines(&ver_dir_clone.join("logs").join("latest.log"), 100);
-                    let fml_log = read_tail_lines(
-                        &ver_dir_clone.join("logs").join("fml-client-latest.log"),
-                        100,
+                    let _ = app_handle.emit(
+                        "game-exited",
+                        serde_json::json!({
+                            "version": version_for_log,
+                            "exit_code": exit_code
+                        }),
                     );
-                    let combined = format!("{}\n{}", game_log, fml_log);
-                    let combined_lower = combined.to_lowercase();
-
-                    // 检测 Forge/Fabric 常见 Mod 错误
-                    if combined_lower.contains("missing mods")
-                        || combined_lower.contains("there were errors previously")
-                        || combined_lower.contains("errors loading minecraft")
-                        || combined_lower.contains("missing or unsupported mandatory dependencies")
-                        || combined_lower.contains("(missing)")
-                        || combined_lower.contains("incompatible mods found")
-                    {
-                        let diagnosis = analyze_crash_log(&combined, 0);
-                        let log_lines: Vec<&str> = combined.lines().collect();
-                        let tail_start = if log_lines.len() > 150 {
-                            log_lines.len() - 150
-                        } else {
-                            0
-                        };
-                        let log_tail = log_lines[tail_start..].join("\n");
-                        let _ = app_handle.emit(
-                            "game-crashed",
-                            serde_json::json!({
-                                "version": version_for_log,
-                                "exit_code": 0,
-                                "diagnosis": diagnosis,
-                                "log_tail": log_tail,
-                                "crash_report": ""
-                            }),
-                        );
-                    } else {
-                        let _ = app_handle.emit(
-                            "game-exited",
-                            serde_json::json!({
-                                "version": version_for_log,
-                                "exit_code": 0
-                            }),
-                        );
-                    }
                 }
             }
             Err(e) => {
@@ -1215,8 +1159,11 @@ fn do_launch_minecraft(
     ))
 }
 
-/// 读取最新的 crash-report 文件内容（如果存在且是最近 2 分钟内的）
-fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
+/// 读取本次启动后生成的 crash-report，避免拿旧报告误判。
+fn read_latest_crash_report_since(
+    game_dir: &std::path::Path,
+    since: std::time::SystemTime,
+) -> String {
     let crash_dir = game_dir.join("crash-reports");
     if !crash_dir.exists() {
         return String::new();
@@ -1237,8 +1184,9 @@ fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
         }
     }
     if let Some((time, path)) = newest {
-        // 只读最近 2 分钟内的
-        if time.elapsed().map_or(true, |d| d.as_secs() < 120) {
+        let is_current_launch =
+            time >= since || since.duration_since(time).is_ok_and(|d| d.as_secs() <= 2);
+        if is_current_launch {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = if lines.len() > 100 {
@@ -1251,6 +1199,28 @@ fn read_latest_crash_report(game_dir: &std::path::Path) -> String {
         }
     }
     String::new()
+}
+
+fn has_runtime_crash_marker(log: &str) -> bool {
+    let log_lower = log.to_lowercase();
+    [
+        "crash report saved to",
+        "this crash report has been saved to:",
+        "could not save crash report to",
+        "/error]: unable to launch",
+        "an exception was thrown, the game will display an error screen and halt.",
+        "reported exception",
+        "exception in server tick loop",
+        "exception ticking world",
+        "exception ticking entity",
+        "exception ticking block entity",
+        "a fatal error has been detected by the java runtime environment",
+        "exception_access_violation",
+        "sigsegv",
+        "---- minecraft crash report ----",
+    ]
+    .iter()
+    .any(|marker| log_lower.contains(marker))
 }
 
 /// 安全地只读取文件末尾最多 max_lines 行（最大读取 1MB），避免大日志 OOM

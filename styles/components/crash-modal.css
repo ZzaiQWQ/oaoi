@@ -57,10 +57,14 @@
 .crash-modal-body {
   padding: 16px 20px;
   overflow-y: auto;
+  min-height: 0;
+  max-height: calc(80vh - 118px);
+  overscroll-behavior: contain;
   flex: 1;
   font-size: 13px;
   line-height: 1.7;
   color: var(--text-dark, #333);
+  word-break: break-word;
 }
 
 .crash-modal-body h4 {

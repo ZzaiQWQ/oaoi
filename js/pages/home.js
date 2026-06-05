@@ -106,6 +106,8 @@ function getRequiredJavaMajor(mcVersion) {
   if (minor >= 21 || (minor === 20 && patch >= 5)) return 21;
   // MC 1.17+ → Java 17
   if (minor >= 17) return 17;
+  // 1.7.10 继续用 Java 8，只有更老版本走 Java 7。
+  if (minor < 7 || (minor === 7 && patch < 10)) return 7;
   // MC 1.16 及以下 → Java 8
   return 8;
 }
@@ -714,6 +716,12 @@ function initLaunchButton() {
           // 2. 没找到 → 自动下载
           console.log(`[java] 未找到 Java ${requiredMajor}，自动下载...`);
           btn.innerHTML = `<span>下载 Java ${requiredMajor}...</span>`;
+          if (requiredMajor === 7) {
+            showToast('这个版本需要 Java 7，请先手动安装 Java 7，或在版本设置里选择 Java 7 的 java.exe', 'warn', 10000);
+            resetLaunchBtn(btn);
+            isLaunching = false;
+            return;
+          }
           showJavaDownloadModal(requiredMajor);
           let progressUnlisten = null;
           let doneUnlisten = null;

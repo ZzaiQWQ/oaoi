@@ -49,6 +49,34 @@ pub fn maven_name_to_path(name: &str) -> String {
     }
 }
 
+pub fn maven_name_to_path_with_classifier(name: &str, classifier: &str) -> String {
+    if name.split(':').count() >= 4 {
+        return maven_name_to_path(name);
+    }
+    maven_name_to_path(&format!("{}:{}", name, classifier))
+}
+
+pub fn native_classifier_for_current_os(lib: &serde_json::Value) -> Option<String> {
+    let classifier = lib
+        .get("natives")
+        .and_then(|natives| natives.get("windows"))
+        .and_then(|value| value.as_str())?;
+    let arch = if cfg!(target_pointer_width = "64") {
+        "64"
+    } else {
+        "32"
+    };
+    Some(classifier.replace("${arch}", arch))
+}
+
+pub fn default_library_maven_base(lib_name: &str, is_native: bool) -> &'static str {
+    if is_native || !lib_name.starts_with("net.minecraftforge:") {
+        "https://libraries.minecraft.net"
+    } else {
+        "https://maven.minecraftforge.net"
+    }
+}
+
 pub fn safe_maven_path(path: &str) -> Result<std::path::PathBuf, String> {
     let normalized = path.replace('\\', "/");
     let mut out = std::path::PathBuf::new();
@@ -200,11 +228,7 @@ pub fn merge_libraries(existing_libs: &mut Vec<serde_json::Value>, new_libs: &[s
 
 pub fn empty_loader_json() -> serde_json::Value {
     serde_json::json!({
-        "libraries": [],
-        "arguments": {
-            "jvm": [],
-            "game": []
-        }
+        "libraries": []
     })
 }
 
@@ -222,6 +246,7 @@ pub fn merge_loader_install_result(base: &mut serde_json::Value, loader_json: &s
         .and_then(|v| v.as_str())
     {
         base["minecraftArguments"] = serde_json::Value::String(minecraft_args.to_string());
+        crate::instance::remove_empty_legacy_arguments(base);
     }
     if let Some(new_libs) = loader_json.get("libraries").and_then(|v| v.as_array()) {
         if !base.get("libraries").is_some_and(|v| v.is_array()) {
@@ -269,7 +294,10 @@ pub fn wait_for_install_file(
     }
 }
 
-use crate::instance::{resolve_game_dir, safe_join, safe_path_name};
+use crate::instance::{
+    resolve_game_dir, safe_join, safe_path_name, strip_launcher_private_version_fields,
+    version_dir, version_json_path,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::Emitter;
@@ -457,41 +485,41 @@ pub fn download_file_if_needed_cancelable(
         }
     }
 
-    // 选官方失败 → 自动回退镜像再试
-    if !use_mirror {
-        let fallback_url = mirror_url(url, true);
-        if fallback_url != real_url {
-            eprintln!("[download] 官方源失败，回退镜像: {}", fallback_url);
-            for attempt in 0..3 {
-                if attempt > 0 {
-                    let wait_secs = download_retry_delay_secs(&last_err, attempt);
-                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-                }
-                if is_download_cancelled(cancel_name) {
-                    return Err("用户取消下载".to_string());
-                }
-                match do_download(http, &fallback_url, dest, cancel_name) {
-                    Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                        Ok(()) => return Ok(true),
-                        Err(e) => {
-                            last_err = e;
-                            eprintln!(
-                                "[download] 镜像重试 {}/3: {} ({})",
-                                attempt + 1,
-                                last_err,
-                                fallback_url
-                            );
-                        }
-                    },
+    let fallback_url = mirror_url(url, !use_mirror);
+    if fallback_url != real_url {
+        let fallback_name = if use_mirror { "官方" } else { "镜像" };
+        eprintln!("[download] 当前源失败，回退{}: {}", fallback_name, fallback_url);
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let wait_secs = download_retry_delay_secs(&last_err, attempt);
+                std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+            }
+            if is_download_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
+            match do_download(http, &fallback_url, dest, cancel_name) {
+                Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                    Ok(()) => return Ok(true),
                     Err(e) => {
                         last_err = e;
                         eprintln!(
-                            "[download] 镜像重试 {}/3: {} ({})",
+                            "[download] {}重试 {}/3: {} ({})",
+                            fallback_name,
                             attempt + 1,
                             last_err,
                             fallback_url
                         );
                     }
+                },
+                Err(e) => {
+                    last_err = e;
+                    eprintln!(
+                        "[download] {}重试 {}/3: {} ({})",
+                        fallback_name,
+                        attempt + 1,
+                        last_err,
+                        fallback_url
+                    );
                 }
             }
         }
@@ -590,91 +618,90 @@ where
         }
     }
 
-    if !use_mirror {
-        let fallback_url = mirror_url(url, true);
-        if fallback_url != real_url {
-            eprintln!("[download] 官方源失败，回退镜像: {}", fallback_url);
-            let mut allow_parallel = true;
-            for attempt in 0..3 {
-                if attempt > 0 {
-                    let wait_secs = download_retry_delay_secs(&last_err, attempt);
-                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-                }
-                if is_download_cancelled(cancel_name) {
-                    return Err("用户取消下载".to_string());
-                }
-                let download_result = if allow_parallel {
-                    match do_parallel_download_with_progress(
-                        http,
-                        &fallback_url,
-                        dest,
-                        cancel_name,
-                        &mut on_progress,
-                    ) {
-                        Ok(()) => Ok(()),
-                        Err(ParallelDownloadError::Unsupported(reason)) => {
-                            allow_parallel = false;
-                            eprintln!(
-                                "[download] parallel unsupported, fallback: {} ({})",
-                                reason, fallback_url
-                            );
-                            do_download_with_progress(
-                                http,
-                                &fallback_url,
-                                dest,
-                                cancel_name,
-                                &mut on_progress,
-                            )
-                        }
-                        Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => {
-                            Err(e)
-                        }
-                        Err(ParallelDownloadError::Failed(e)) => {
-                            allow_parallel = false;
-                            eprintln!(
-                                "[download] parallel failed after part retry, fallback streaming: {} ({})",
-                                e, fallback_url
-                            );
-                            do_download_with_progress(
-                                http,
-                                &fallback_url,
-                                dest,
-                                cancel_name,
-                                &mut on_progress,
-                            )
-                        }
+    let fallback_url = mirror_url(url, !use_mirror);
+    if fallback_url != real_url {
+        let fallback_name = if use_mirror { "官方" } else { "镜像" };
+        eprintln!("[download] 当前源失败，回退{}: {}", fallback_name, fallback_url);
+        let mut allow_parallel = true;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let wait_secs = download_retry_delay_secs(&last_err, attempt);
+                std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+            }
+            if is_download_cancelled(cancel_name) {
+                return Err("用户取消下载".to_string());
+            }
+            let download_result = if allow_parallel {
+                match do_parallel_download_with_progress(
+                    http,
+                    &fallback_url,
+                    dest,
+                    cancel_name,
+                    &mut on_progress,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(ParallelDownloadError::Unsupported(reason)) => {
+                        allow_parallel = false;
+                        eprintln!(
+                            "[download] parallel unsupported, fallback: {} ({})",
+                            reason, fallback_url
+                        );
+                        do_download_with_progress(
+                            http,
+                            &fallback_url,
+                            dest,
+                            cancel_name,
+                            &mut on_progress,
+                        )
                     }
-                } else {
-                    do_download_with_progress(
-                        http,
-                        &fallback_url,
-                        dest,
-                        cancel_name,
-                        &mut on_progress,
-                    )
-                };
-                match download_result {
-                    Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                        Ok(()) => return Ok(true),
-                        Err(e) => {
-                            last_err = e;
-                            eprintln!(
-                                "[download] 镜像重试 {}/3: {} ({})",
-                                attempt + 1,
-                                last_err,
-                                fallback_url
-                            );
-                        }
-                    },
+                    Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => Err(e),
+                    Err(ParallelDownloadError::Failed(e)) => {
+                        allow_parallel = false;
+                        eprintln!(
+                            "[download] parallel failed after part retry, fallback streaming: {} ({})",
+                            e, fallback_url
+                        );
+                        do_download_with_progress(
+                            http,
+                            &fallback_url,
+                            dest,
+                            cancel_name,
+                            &mut on_progress,
+                        )
+                    }
+                }
+            } else {
+                do_download_with_progress(
+                    http,
+                    &fallback_url,
+                    dest,
+                    cancel_name,
+                    &mut on_progress,
+                )
+            };
+            match download_result {
+                Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
+                    Ok(()) => return Ok(true),
                     Err(e) => {
                         last_err = e;
                         eprintln!(
-                            "[download] 镜像重试 {}/3: {} ({})",
+                            "[download] {}重试 {}/3: {} ({})",
+                            fallback_name,
                             attempt + 1,
                             last_err,
                             fallback_url
                         );
                     }
+                },
+                Err(e) => {
+                    last_err = e;
+                    eprintln!(
+                        "[download] {}重试 {}/3: {} ({})",
+                        fallback_name,
+                        attempt + 1,
+                        last_err,
+                        fallback_url
+                    );
                 }
             }
         }
@@ -1645,7 +1672,7 @@ pub fn create_instance(
 ) -> Result<String, String> {
     let safe_name = safe_path_name(&name, "版本名")?;
     let name_clone = safe_name.clone();
-    let cancel_flag = crate::instance::register_cancel(&safe_name);
+    crate::instance::register_cancel(&safe_name);
     std::thread::spawn(move || {
         eprintln!(
             "[install] 开始创建版本: {} (mc={}, loader={} {}, java={})",
@@ -1662,12 +1689,11 @@ pub fn create_instance(
             &java_path,
             use_mirror,
         ) {
-            let was_cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+            let user_cancelled = is_user_cancel_error(&e);
             crate::instance::unregister_cancel(&safe_name);
             eprintln!("[install] 错误: {}", e);
-            let inst_dir = resolve_game_dir(&game_dir)
-                .join("instances")
-                .join(&safe_name);
+            let game_root = resolve_game_dir(&game_dir);
+            let inst_dir = version_dir(&game_root, &safe_name);
             let install_marker = inst_dir.join(".oaoi_installing");
             if install_marker.exists() {
                 let _ = std::fs::remove_dir_all(&inst_dir);
@@ -1675,7 +1701,7 @@ pub fn create_instance(
             } else if inst_dir.exists() {
                 eprintln!("[install] 跳过清理非本次安装目录: {}", inst_dir.display());
             }
-            let stage = if was_cancelled { "cancelled" } else { "error" };
+            let stage = if user_cancelled { "cancelled" } else { "error" };
             let _ = app_handle.emit(
                 "install-progress",
                 serde_json::json!({
@@ -1687,6 +1713,14 @@ pub fn create_instance(
         }
     });
     Ok(format!("开始创建版本: {}", name_clone))
+}
+
+fn is_user_cancel_error(error: &str) -> bool {
+    error.contains("用户取消")
+        || error.contains("取消安装")
+        || error.contains("取消下载")
+        || error.contains("cancelled")
+        || error.contains("download cancelled")
 }
 
 fn spawn_loader_install(
@@ -1802,6 +1836,12 @@ fn resolve_loader_java_for_install(
     if let Some(j) = javas.iter().find(|j| j.major == required_major) {
         return Ok(j.path.clone());
     }
+    if required_major == 7 {
+        return Err(format!(
+            "安装 {} 需要 Java 7，请先手动安装 Java 7，或在设置里选择 Java 7 的 java.exe",
+            loader_type
+        ));
+    }
     emit(
         "java",
         0,
@@ -1849,7 +1889,7 @@ fn do_create_instance(
         return Err("用户取消安装".to_string());
     }
 
-    let inst_dir = game_dir.join("instances").join(name);
+    let inst_dir = version_dir(&game_dir, name);
     if inst_dir.exists() {
         return Err(format!("版本 '{}' 已存在，请换一个名称！", name));
     }
@@ -1860,7 +1900,7 @@ fn do_create_instance(
         format!("pid={}\nversion={}\n", std::process::id(), mc_version),
     )
     .map_err(|e| format!("创建安装标记失败: {}", e))?;
-    let inst_json_path = inst_dir.join("instance.json");
+    let inst_json_path = version_json_path(&inst_dir, name);
 
     let http = reqwest::blocking::Client::builder()
         .pool_max_idle_per_host(64)
@@ -1884,7 +1924,7 @@ fn do_create_instance(
         use_mirror,
     );
 
-    // 下载 vanilla 基础（client.jar + libraries + assets），内部也会并行跑
+    // 下载 vanilla 基础（版本 jar + libraries + assets），内部也会并行跑
     let vanilla_result = vanilla::install_vanilla(
         app_handle, name, mc_version, meta_url, &game_dir, &inst_dir, &http, use_mirror,
     );
@@ -1918,7 +1958,8 @@ fn do_create_instance(
     }
     crate::instance::set_minecraft_language(&inst_dir, "zh_cn")?;
 
-    // 写回最终配置到 instance.json
+    // 写回最终版本 JSON
+    strip_launcher_private_version_fields(&mut ver_json);
     std::fs::write(
         &inst_json_path,
         serde_json::to_string_pretty(&ver_json).unwrap(),

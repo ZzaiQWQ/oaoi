@@ -1,4 +1,4 @@
-use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name};
+use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name, version_dir};
 use crate::modpack_sources::{save_source_entry, SourceEntry};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -255,10 +255,8 @@ fn download_modrinth_required_dependencies(
     }
 
     let safe_name = safe_path_name(name, "版本名")?;
-    let mods_dir = resolve_game_dir(game_dir)
-        .join("instances")
-        .join(&safe_name)
-        .join("mods");
+    let game_root = resolve_game_dir(game_dir);
+    let mods_dir = version_dir(&game_root, &safe_name).join("mods");
 
     for dep in deps {
         if is_cancelled(Some(cancel_name)) {
@@ -905,10 +903,8 @@ fn download_curseforge_required_dependencies(
     }
 
     let safe_name = safe_path_name(name, "版本名")?;
-    let mods_dir = resolve_game_dir(game_dir)
-        .join("instances")
-        .join(&safe_name)
-        .join("mods");
+    let game_root = resolve_game_dir(game_dir);
+    let mods_dir = version_dir(&game_root, &safe_name).join("mods");
 
     for dep in deps {
         if is_cancelled(Some(cancel_name)) {
@@ -1104,7 +1100,7 @@ fn do_download_to_dir(
         "shaderpacks" => "shaderpacks",
         _ => return Err(format!("非法下载目录: {}", sub_dir)),
     };
-    let target_dir = dir.join("instances").join(&safe_name).join(safe_sub_dir);
+    let target_dir = version_dir(&dir, &safe_name).join(safe_sub_dir);
     std::fs::create_dir_all(&target_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
     let dest = target_dir.join(&safe_file_name);
 

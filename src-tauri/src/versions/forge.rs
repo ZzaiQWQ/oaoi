@@ -1,108 +1,207 @@
 #[tauri::command]
 pub async fn get_forge_versions(mc_version: String) -> Result<Vec<String>, String> {
     tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-        let mc1 = mc_version.clone();
-        let mc2 = mc_version.clone();
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .user_agent("OAOI-Launcher/1.0")
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        // 使用 channel 竞速: 谁先返回非空结果就用谁
-        let (result_tx, result_rx) = std::sync::mpsc::channel::<Vec<String>>();
+        let mut versions = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
-        let tx1 = result_tx.clone();
-        let bmcl_handle = std::thread::spawn(move || {
-            let http = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build()
-                .ok();
-            let Some(client) = http else {
-                let _ = tx1.send(vec![]);
-                return;
-            };
-            let url = format!("https://bmclapi2.bangbang93.com/forge/minecraft/{}", mc1);
-            let Ok(resp) = client.get(&url).send() else {
-                let _ = tx1.send(vec![]);
-                return;
-            };
-            let Ok(json) = resp.json::<serde_json::Value>() else {
-                let _ = tx1.send(vec![]);
-                return;
-            };
-            let Some(arr) = json.as_array() else {
-                let _ = tx1.send(vec![]);
-                return;
-            };
-            let mut versions: Vec<String> = arr
-                .iter()
-                .filter_map(|v| {
-                    v.get("version")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect();
-            versions.reverse();
-            let _ = tx1.send(versions);
-        });
-
-        let tx2 = result_tx.clone();
-        let forge_handle = std::thread::spawn(move || {
-            let http = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .user_agent("OAOI-Launcher/1.0")
-                .build()
-                .ok();
-            let Some(client) = http else {
-                let _ = tx2.send(vec![]);
-                return;
-            };
-            let url = format!(
-                "https://files.minecraftforge.net/net/minecraftforge/forge/index_{}.html",
-                mc2
+        merge_versions(
+            &mut versions,
+            &mut seen,
+            fetch_bmcl_versions(&http, &mc_version),
+        );
+        for url in [
+            "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml",
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+        ] {
+            merge_versions(
+                &mut versions,
+                &mut seen,
+                fetch_maven_metadata_versions(&http, url, &mc_version),
             );
-            let Ok(resp) = client.get(&url).send() else {
-                let _ = tx2.send(vec![]);
-                return;
-            };
-            if !resp.status().is_success() {
-                let _ = tx2.send(vec![]);
-                return;
-            }
-            let Ok(html) = resp.text() else {
-                let _ = tx2.send(vec![]);
-                return;
-            };
-
-            let prefix = format!("forge-{}-", mc2);
-            let mut versions = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for part in html.split(&prefix) {
-                if let Some(end) = part.find("-installer.jar") {
-                    let ver = &part[..end];
-                    if !ver.is_empty()
-                        && !ver.contains('<')
-                        && !ver.contains('"')
-                        && seen.insert(ver.to_string())
-                    {
-                        versions.push(ver.to_string());
-                    }
-                }
-            }
-            let _ = tx2.send(versions);
-        });
-
-        drop(result_tx); // 关闭发送端，rx 在两个线程都完成后会返回 Err
-
-        // 取第一个非空结果；如果两个都空则返回空
-        let mut fallback = vec![];
-        for received in result_rx {
-            if !received.is_empty() {
-                // 拿到有效结果，等其他线程自然结束
-                let _ = bmcl_handle.join();
-                let _ = forge_handle.join();
-                return Ok(received);
-            }
-            fallback = received;
         }
-        Ok(fallback)
+        if versions.is_empty() {
+            merge_versions(
+                &mut versions,
+                &mut seen,
+                fetch_forge_html_versions(&http, &mc_version),
+            );
+        }
+
+        Ok(versions)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn fetch_bmcl_versions(http: &reqwest::blocking::Client, mc_version: &str) -> Vec<String> {
+    let url = format!(
+        "https://bmclapi2.bangbang93.com/forge/minecraft/{}",
+        mc_version
+    );
+    let Ok(resp) = http.get(url).send() else {
+        return vec![];
+    };
+    let Ok(json) = resp.json::<serde_json::Value>() else {
+        return vec![];
+    };
+    let Some(arr) = json.as_array() else {
+        return vec![];
+    };
+
+    let mut versions = arr
+        .iter()
+        .filter_map(|item| {
+            let version = item
+                .get("version")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let branch = item
+                .get("branch")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let version = if branch.is_empty() || version.ends_with(&format!("-{}", branch)) {
+                version.to_string()
+            } else {
+                format!("{}-{}", version, branch)
+            };
+            normalize_forge_version(mc_version, &version)
+        })
+        .collect::<Vec<_>>();
+    versions.reverse();
+    versions
+}
+
+fn fetch_maven_metadata_versions(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    mc_version: &str,
+) -> Vec<String> {
+    let Ok(resp) = http.get(url).send() else {
+        return vec![];
+    };
+    if !resp.status().is_success() {
+        return vec![];
+    }
+    let Ok(xml) = resp.text() else {
+        return vec![];
+    };
+
+    let mut versions = Vec::new();
+    let mut rest = xml.as_str();
+    while let Some(start) = rest.find("<version>") {
+        rest = &rest[start + "<version>".len()..];
+        let Some(end) = rest.find("</version>") else {
+            break;
+        };
+        if let Some(version) = normalize_maven_forge_version(mc_version, &rest[..end]) {
+            versions.push(version);
+        }
+        rest = &rest[end + "</version>".len()..];
+    }
+    versions.reverse();
+    versions
+}
+
+fn fetch_forge_html_versions(http: &reqwest::blocking::Client, mc_version: &str) -> Vec<String> {
+    let url = format!(
+        "https://files.minecraftforge.net/net/minecraftforge/forge/index_{}.html",
+        mc_version
+    );
+    let Ok(resp) = http.get(url).send() else {
+        return vec![];
+    };
+    if !resp.status().is_success() {
+        return vec![];
+    }
+    let Ok(html) = resp.text() else {
+        return vec![];
+    };
+
+    let prefix = format!("forge-{}-", mc_version);
+    html.split(&prefix)
+        .filter_map(|part| {
+            part.find("-installer.jar")
+                .and_then(|end| normalize_forge_version(mc_version, &part[..end]))
+        })
+        .collect()
+}
+
+fn normalize_forge_version(mc_version: &str, value: &str) -> Option<String> {
+    let mut version = value.trim();
+    if version.is_empty() || version.contains('<') || version.contains('"') || version.contains('/')
+    {
+        return None;
+    }
+    if let Some(rest) = version.strip_prefix("forge-") {
+        version = rest;
+    }
+    let full_prefix = format!("{}-", mc_version);
+    if let Some(rest) = version.strip_prefix(&full_prefix) {
+        return normalize_forge_loader_version(rest);
+    }
+    if looks_like_other_minecraft_prefix(version) {
+        return None;
+    }
+    normalize_forge_loader_version(version)
+}
+
+fn normalize_maven_forge_version(mc_version: &str, value: &str) -> Option<String> {
+    let mut version = value.trim();
+    if version.is_empty() || version.contains('<') || version.contains('"') || version.contains('/')
+    {
+        return None;
+    }
+    if let Some(rest) = version.strip_prefix("forge-") {
+        version = rest;
+    }
+    let full_prefix = format!("{}-", mc_version);
+    version
+        .strip_prefix(&full_prefix)
+        .and_then(normalize_forge_loader_version)
+}
+
+fn normalize_forge_loader_version(version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty() || version.contains('<') || version.contains('"') || version.contains('/')
+    {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
+fn looks_like_other_minecraft_prefix(version: &str) -> bool {
+    let Some((head, _)) = version.split_once('-') else {
+        return false;
+    };
+    if !head.starts_with("1.") {
+        return false;
+    }
+    let mut count = 0;
+    for part in head.split('.') {
+        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 2
+}
+
+fn merge_versions(
+    out: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+    versions: Vec<String>,
+) {
+    for version in versions {
+        if seen.insert(version.clone()) {
+            out.push(version);
+        }
+    }
 }

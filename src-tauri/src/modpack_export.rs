@@ -1,4 +1,7 @@
-use crate::instance::{cf_api_key, resolve_game_dir, safe_join, safe_path_name};
+use crate::instance::{
+    cf_api_key, detect_loader, resolve_game_dir, safe_join, safe_path_name, version_dir,
+    version_json_path,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha512};
 use std::collections::{HashMap, HashSet};
@@ -109,12 +112,12 @@ fn export_modpack_blocking(
     emit_export_progress(app_handle, name, "prepare", 0, 100, "Preparing export...");
     let safe_name = safe_path_name(name, "version name")?;
     let game_root = resolve_game_dir(game_dir);
-    let inst_dir = game_root.join("instances").join(&safe_name);
+    let inst_dir = version_dir(&game_root, &safe_name);
     if !inst_dir.is_dir() {
         return Err(format!("Instance not found: {}", safe_name));
     }
 
-    let instance_json = read_instance_json(&inst_dir)?;
+    let instance_json = read_instance_json(&inst_dir, &safe_name)?;
     let raw_pack_name = export_name
         .filter(|v| !v.trim().is_empty())
         .or_else(|| {
@@ -145,22 +148,16 @@ fn export_modpack_blocking(
         .filter(|value| !value.is_empty())
         .unwrap_or("1.0.0")
         .to_string();
-    let mc_version = instance_json["mcVersion"]
+    let mc_version = instance_json["clientVersion"]
         .as_str()
+        .or_else(|| instance_json["mcVersion"].as_str())
         .or_else(|| instance_json["id"].as_str())
         .unwrap_or("")
         .to_string();
     if mc_version.is_empty() {
         return Err("Instance is missing Minecraft version".to_string());
     }
-    let loader_type = instance_json["loader"]["type"]
-        .as_str()
-        .unwrap_or("vanilla")
-        .to_lowercase();
-    let loader_version = instance_json["loader"]["version"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let (loader_type, loader_version) = detect_loader(&instance_json, &safe_name);
 
     let selected_paths = normalize_selected_paths(include_paths)?;
     if selected_paths.is_empty() {
@@ -407,9 +404,10 @@ fn export_mrpack(
         serde_json::Value::String(mc_version.to_string()),
     );
     if loader_type != "vanilla" && !loader_version.is_empty() {
+        let export_loader_version = export_loader_version(loader_type, mc_version, loader_version);
         dependencies.insert(
             mr_loader_key(loader_type).to_string(),
-            serde_json::Value::String(loader_version.to_string()),
+            serde_json::Value::String(export_loader_version),
         );
     }
 
@@ -492,8 +490,9 @@ fn export_curseforge_pack(
 
     let mut mod_loaders = Vec::new();
     if loader_type != "vanilla" && !loader_version.is_empty() {
+        let export_loader_version = export_loader_version(loader_type, mc_version, loader_version);
         mod_loaders.push(serde_json::json!({
-            "id": format!("{}-{}", cf_loader_key(loader_type), loader_version),
+            "id": format!("{}-{}", cf_loader_key(loader_type), export_loader_version),
             "primary": true,
         }));
     }
@@ -699,7 +698,7 @@ fn get_modpack_export_items_blocking(
 ) -> Result<Vec<ExportItem>, String> {
     let safe_name = safe_path_name(name, "version name")?;
     let game_root = resolve_game_dir(game_dir);
-    let inst_dir = game_root.join("instances").join(&safe_name);
+    let inst_dir = version_dir(&game_root, &safe_name);
     if !inst_dir.is_dir() {
         return Err(format!("Instance not found: {}", safe_name));
     }
@@ -837,10 +836,12 @@ fn dir_stats(dir: &Path) -> Result<(u64, usize), String> {
 fn should_hide_export_root_item(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.starts_with('.')
+        || lower.ends_with("-natives")
+        || lower.ends_with(".jar")
+        || lower.ends_with(".json")
         || matches!(
             lower.as_str(),
-            "instance.json"
-                | "launch_output.log"
+            "launch_output.log"
                 | "logs"
                 | "crash-reports"
                 | "screenshots"
@@ -850,6 +851,7 @@ fn should_hide_export_root_item(name: &str) -> bool {
                 | "runtime"
                 | "versions"
                 | "downloads"
+                | "pcl"
                 | "usercache.json"
                 | "usernamecache.json"
                 | "launcher_profiles.json"
@@ -1332,11 +1334,11 @@ fn should_skip_override_file(name: &str) -> bool {
     lower.starts_with('.') || lower.ends_with(".tmp") || lower.ends_with(".download")
 }
 
-fn read_instance_json(inst_dir: &Path) -> Result<serde_json::Value, String> {
-    let path = inst_dir.join("instance.json");
+fn read_instance_json(inst_dir: &Path, name: &str) -> Result<serde_json::Value, String> {
+    let path = version_json_path(inst_dir, name);
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read instance.json: {}", e))?;
-    serde_json::from_str(&text).map_err(|e| format!("Invalid instance.json: {}", e))
+        .map_err(|e| format!("Failed to read version json: {}", e))?;
+    serde_json::from_str(&text).map_err(|e| format!("Invalid version json: {}", e))
 }
 
 fn unique_export_path(export_dir: &Path, file_name: &str) -> PathBuf {
@@ -1363,6 +1365,21 @@ fn unique_export_path(export_dir: &Path, file_name: &str) -> PathBuf {
 
 fn normalize_format(format: &str) -> String {
     format.trim().to_lowercase().replace(['.', ' '], "")
+}
+
+fn export_loader_version(loader_type: &str, mc_version: &str, loader_version: &str) -> String {
+    match loader_type {
+        // Forge 系坐标常带 MC 版本前缀，导出清单只写 Loader 版本。
+        "forge" | "neoforge" => strip_mc_version_prefix(mc_version, loader_version).to_string(),
+        _ => loader_version.to_string(),
+    }
+}
+
+fn strip_mc_version_prefix<'a>(mc_version: &str, loader_version: &'a str) -> &'a str {
+    loader_version
+        .strip_prefix(mc_version)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(loader_version)
 }
 
 fn mr_loader_key(loader: &str) -> &str {

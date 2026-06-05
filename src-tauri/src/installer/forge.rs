@@ -1,9 +1,11 @@
 use super::{
-    build_data_map, download_file_with_progress, get_jar_main_class, make_emitter,
-    maven_name_to_path, merge_libraries, parallel_download, resolve_data_arg,
-    run_java_process_cancelable, safe_maven_path, wait_for_install_file, FORGE_LOCK,
+    build_data_map, default_library_maven_base, download_file_with_progress,
+    get_jar_main_class, library_allowed, make_emitter, maven_name_to_path,
+    maven_name_to_path_with_classifier, merge_libraries, native_classifier_for_current_os,
+    parallel_download, resolve_data_arg, run_java_process_cancelable, safe_maven_path,
+    wait_for_install_file, FORGE_LOCK,
 };
-use crate::instance::safe_join;
+use crate::instance::{libraries_dir, safe_join, version_jar_path};
 use tauri::Emitter;
 
 /// 安装 Forge loader（解压 installer.jar，自行下载库 + 执行 processors）
@@ -19,17 +21,45 @@ pub fn install_forge(
     use_mirror: bool,
     ver_json: &mut serde_json::Value,
 ) -> Result<(), String> {
+    install_forge_with_names(
+        app_handle,
+        name,
+        name,
+        mc_version,
+        loader_version,
+        game_dir,
+        inst_dir,
+        http,
+        java_path,
+        use_mirror,
+        ver_json,
+    )
+}
+
+pub fn install_forge_with_names(
+    app_handle: &tauri::AppHandle,
+    progress_name: &str,
+    version_name: &str,
+    mc_version: &str,
+    loader_version: &str,
+    game_dir: &std::path::Path,
+    inst_dir: &std::path::Path,
+    http: &reqwest::blocking::Client,
+    java_path: &str,
+    use_mirror: bool,
+    ver_json: &mut serde_json::Value,
+) -> Result<(), String> {
     if java_path.is_empty() {
         return Err("必须先在设置中配置 Java 路径才能安装 Forge".to_string());
     }
 
-    let emit = make_emitter(app_handle, name);
+    let emit = make_emitter(app_handle, progress_name);
     emit("forge", 0, 1, &format!("处理 Forge {}...", loader_version));
 
     // 获取 Forge 安装锁
     emit("forge", 0, 100, "等待其他 Forge 安装完成...");
     let _forge_guard = loop {
-        if crate::instance::is_cancelled(name) {
+        if crate::instance::is_cancelled(progress_name) {
             return Err("用户取消安装".to_string());
         }
         match FORGE_LOCK.try_lock() {
@@ -43,17 +73,10 @@ pub fn install_forge(
 
     // 1. 下载 forge-installer.jar
     let forge_full_ver = format!("{}-{}", mc_version, loader_version);
-    let installer_url = if use_mirror {
-        format!(
-            "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
-            forge_full_ver
-        )
-    } else {
-        format!(
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
-            forge_full_ver
-        )
-    };
+    let installer_url = format!(
+        "https://maven.minecraftforge.net/net/minecraftforge/forge/{0}/forge-{0}-installer.jar",
+        forge_full_ver
+    );
     let installer_path = inst_dir.join("forge-installer.jar");
 
     emit("forge-installer", 0, 1, "下载 Forge 安装器...");
@@ -63,7 +86,7 @@ pub fn install_forge(
         &installer_path,
         None,
         use_mirror,
-        Some(name),
+        Some(progress_name),
         |downloaded, total| {
             let total = total.unwrap_or_else(|| downloaded.max(1)).max(1);
             emit(
@@ -87,7 +110,7 @@ pub fn install_forge(
         let file = std::fs::File::open(&installer_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         for i in 0..archive.len() {
-            if crate::instance::is_cancelled(name) {
+            if crate::instance::is_cancelled(progress_name) {
                 return Err("用户取消安装".to_string());
             }
             if let Ok(mut entry) = archive.by_index(i) {
@@ -108,18 +131,8 @@ pub fn install_forge(
         }
     }
 
-    // 3. 读取 version.json
+    // 3. 读取 install_profile.json（老 Forge 的版本信息在 versionInfo 里）
     emit("forge", 25, 100, "解析 Forge 配置...");
-    let version_json_path = temp_dir.join("version.json");
-    if !version_json_path.exists() {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        return Err("Forge installer 中未找到 version.json".to_string());
-    }
-    let forge_data = std::fs::read_to_string(&version_json_path).map_err(|e| e.to_string())?;
-    let parsed_forge: serde_json::Value =
-        serde_json::from_str(&forge_data).map_err(|e| e.to_string())?;
-
-    // 4. 读取 install_profile.json（processors 和依赖信息）
     let install_profile_path = temp_dir.join("install_profile.json");
     let install_profile: Option<serde_json::Value> = if install_profile_path.exists() {
         let data = std::fs::read_to_string(&install_profile_path).map_err(|e| e.to_string())?;
@@ -127,10 +140,24 @@ pub fn install_forge(
     } else {
         None
     };
+    let version_json_path = temp_dir.join("version.json");
+    let parsed_forge: serde_json::Value = if version_json_path.exists() {
+        let forge_data = std::fs::read_to_string(&version_json_path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&forge_data).map_err(|e| e.to_string())?
+    } else if let Some(version_info) = install_profile
+        .as_ref()
+        .and_then(|profile| profile.get("versionInfo"))
+        .filter(|value| value.is_object())
+    {
+        version_info.clone()
+    } else {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err("Forge installer 中未找到 version.json 或 versionInfo".to_string());
+    };
 
-    // 5. 下载 Forge 的所有依赖库
+    // 4. 下载 Forge 的所有依赖库
     emit("forge", 30, 100, "下载 Forge 依赖库...");
-    let libs_dir = game_dir.join("libs");
+    let libs_dir = libraries_dir(game_dir);
     std::fs::create_dir_all(&libs_dir).ok();
 
     // 从 version.json 和 install_profile.json 收集所有库
@@ -149,11 +176,17 @@ pub fn install_forge(
     let mut download_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
 
     for lib in &all_libs {
-        if crate::instance::is_cancelled(name) {
+        if crate::instance::is_cancelled(progress_name) {
             return Err("用户取消安装".to_string());
         }
         scanned += 1;
         let lib_name = lib["name"].as_str().unwrap_or("");
+        let rules = lib
+            .get("rules")
+            .map(|v| v.as_array().cloned().unwrap_or_default());
+        if !library_allowed(&rules) {
+            continue;
+        }
 
         // 解析 Maven 坐标 → 文件路径
         let (rel_path, artifact_url, sha1) =
@@ -175,11 +208,18 @@ pub fn install_forge(
                 (path, url, sha1)
             } else if !lib_name.is_empty() {
                 // 没有 downloads，从 name 推导路径
-                let path = maven_name_to_path(lib_name);
+                let native_classifier = native_classifier_for_current_os(lib);
+                let path = if let Some(classifier) = native_classifier.as_deref() {
+                    maven_name_to_path_with_classifier(lib_name, classifier)
+                } else {
+                    maven_name_to_path(lib_name)
+                };
                 let url_base = lib
                     .get("url")
                     .and_then(|u| u.as_str())
-                    .unwrap_or("https://maven.minecraftforge.net");
+                    .unwrap_or_else(|| {
+                        default_library_maven_base(lib_name, native_classifier.is_some())
+                    });
                 let url = format!("{}/{}", url_base.trim_end_matches('/'), path);
                 let sha1 = lib
                     .get("sha1")
@@ -236,7 +276,7 @@ pub fn install_forge(
         let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app_clone = app_handle.clone();
         let done_reporter = done.clone();
-        let inst_name_copy = name.to_string();
+        let inst_name_copy = progress_name.to_string();
         let reporter = std::thread::spawn(move || loop {
             let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
             let _ = app_clone.emit(
@@ -254,7 +294,14 @@ pub fn install_forge(
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
-        let result = parallel_download(http, download_tasks, &done, 32, use_mirror, Some(name));
+        let result = parallel_download(
+            http,
+            download_tasks,
+            &done,
+            32,
+            use_mirror,
+            Some(progress_name),
+        );
         let _ = reporter.join();
         result.map_err(|e| format!("Forge 依赖库下载失败: {}", e))?;
         emit("forge-libs", total, total, "Forge 依赖库下载完成");
@@ -275,14 +322,14 @@ pub fn install_forge(
                 .collect();
 
             let total_proc = client_processors.len();
-            let client_jar = inst_dir.join("client.jar");
+            let client_jar = version_jar_path(inst_dir, version_name);
             if total_proc > 0 {
-                emit("forge", 70, 100, "等待 client.jar 完成...");
-                wait_for_install_file(&client_jar, "client.jar", name)?;
+                emit("forge", 70, 100, "等待版本 jar 完成...");
+                wait_for_install_file(&client_jar, "版本 jar", progress_name)?;
             }
 
             for (i, proc) in client_processors.iter().enumerate() {
-                if crate::instance::is_cancelled(name) {
+                if crate::instance::is_cancelled(progress_name) {
                     return Err("用户取消安装".to_string());
                 }
                 emit(
@@ -365,7 +412,7 @@ pub fn install_forge(
                     &main_class,
                     &proc_args,
                     inst_dir,
-                    name,
+                    progress_name,
                 ) {
                     Ok(status) => {
                         if !status.success() {
