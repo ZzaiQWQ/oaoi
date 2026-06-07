@@ -259,9 +259,9 @@ function showToast(message, type = 'warn', duration = 4000) {
       gap: 10px;
       padding: 12px 18px;
       border-radius: 14px;
-      background: rgba(255, 255, 255, 0.92);
+      background: var(--modal-surface-white-92, rgba(255, 255, 255, 0.92));
       backdrop-filter: blur(16px);
-      box-shadow: 0 8px 32px rgba(232, 69, 116, 0.15), 0 0 0 1px rgba(255, 200, 215, 0.25);
+      box-shadow: var(--theme-toast-shadow, 0 8px 32px rgba(232, 69, 116, 0.15), 0 0 0 1px rgba(255, 200, 215, 0.25));
       font-size: 13px;
       color: var(--text-dark, #4a2030);
       max-width: 420px;
@@ -272,14 +272,14 @@ function showToast(message, type = 'warn', duration = 4000) {
     }
     .oaoi-toast:hover {
       transform: scale(1.02);
-      box-shadow: 0 10px 40px rgba(232, 69, 116, 0.2), 0 0 0 1px rgba(255, 200, 215, 0.35);
+      box-shadow: var(--theme-toast-hover-shadow, 0 10px 40px rgba(232, 69, 116, 0.2), 0 0 0 1px rgba(255, 200, 215, 0.35));
     }
     .oaoi-toast-warn {
       border-left: 4px solid #f59e0b;
     }
     .oaoi-toast-error {
       border-left: 4px solid #ef4444;
-      background: rgba(255, 245, 245, 0.95);
+      background: var(--modal-surface-pink-100-95, rgba(255, 245, 245, 0.95));
     }
     .oaoi-toast-info {
       border-left: 4px solid var(--pink-500, #ff6b8a);
@@ -309,7 +309,7 @@ function showToast(message, type = 'warn', duration = 4000) {
     }
     .oaoi-toast-close:hover {
       color: var(--pink-600, #e84574);
-      background: rgba(232, 69, 116, 0.08);
+      background: var(--theme-accent-soft, rgba(232, 69, 116, 0.08));
     }
     @keyframes toastSlideIn {
       from { opacity: 0; transform: translateY(-20px) scale(0.95); }
@@ -458,11 +458,11 @@ function showAlert(message, options = {}) {
       to { opacity: 0; }
     }
     .oaoi-confirm-card {
-      background: linear-gradient(135deg, #fff5f7 0%, #ffffff 100%);
+      background: var(--theme-simple-modal-surface, linear-gradient(135deg, var(--modal-surface-pink-100-100, #fff5f7) 0%, var(--modal-surface-white-100, #ffffff) 100%));
       border-radius: 18px;
       width: 340px;
       max-width: 88vw;
-      box-shadow: 0 16px 48px rgba(232, 69, 116, 0.18), 0 0 0 1px rgba(255, 200, 215, 0.3);
+      box-shadow: var(--theme-confirm-shadow, 0 16px 48px rgba(232, 69, 116, 0.18), 0 0 0 1px rgba(255, 200, 215, 0.3));
       overflow: hidden;
       animation: confirmCardIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
@@ -541,11 +541,11 @@ function showAlert(message, options = {}) {
     .oaoi-confirm-btn.confirm {
       background: var(--rose-gradient, linear-gradient(135deg, #ff8fab, #ff6b8a, #e84574));
       color: white;
-      box-shadow: 0 3px 12px rgba(232, 69, 116, 0.3);
+      box-shadow: 0 3px 12px var(--theme-accent-border, rgba(232, 69, 116, 0.3));
     }
     .oaoi-confirm-btn.confirm:hover {
       transform: translateY(-1px);
-      box-shadow: 0 5px 18px rgba(232, 69, 116, 0.4);
+      box-shadow: 0 5px 18px var(--theme-accent-border, rgba(232, 69, 116, 0.4));
     }
     .oaoi-confirm-btn.confirm:active {
       transform: translateY(0);

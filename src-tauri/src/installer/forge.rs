@@ -1,9 +1,9 @@
 use super::{
     build_data_map, default_library_maven_base, download_file_with_progress,
-    get_jar_main_class, library_allowed, make_emitter, maven_name_to_path,
-    maven_name_to_path_with_classifier, merge_libraries, native_classifier_for_current_os,
-    parallel_download, resolve_data_arg, run_java_process_cancelable, safe_maven_path,
-    wait_for_install_file, FORGE_LOCK,
+    get_jar_main_class, installer_generated_client_library, library_allowed, make_emitter,
+    maven_name_to_path, maven_name_to_path_with_classifier, merge_libraries,
+    native_classifier_for_current_os, parallel_download, resolve_data_arg,
+    run_java_process_cancelable, safe_maven_path, wait_for_install_file, FORGE_LOCK,
 };
 use crate::instance::{libraries_dir, safe_join, version_jar_path};
 use tauri::Emitter;
@@ -174,6 +174,7 @@ pub fn install_forge_with_names(
     let total_libs = all_libs.len();
     let mut scanned = 0;
     let mut download_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+    let mut generated_libs: Vec<(String, std::path::PathBuf)> = Vec::new();
 
     for lib in &all_libs {
         if crate::instance::is_cancelled(progress_name) {
@@ -261,6 +262,9 @@ pub fn install_forge_with_names(
 
         if !artifact_url.is_empty() {
             download_tasks.push((artifact_url, dest, sha1));
+        } else if installer_generated_client_library(lib_name) {
+            // Forge 1.21+ 的 client 库是 processor 输出，提前下载会因为没有 URL 被误判失败。
+            generated_libs.push((lib_name.to_string(), dest));
         } else {
             return Err(format!("Forge 库缺少下载地址: {}", lib_name));
         }
@@ -430,6 +434,16 @@ pub fn install_forge_with_names(
                     }
                 }
             }
+        }
+    }
+
+    for (lib_name, dest) in &generated_libs {
+        if !dest.exists() {
+            return Err(format!(
+                "Forge processor 未生成库: {} ({})",
+                lib_name,
+                dest.display()
+            ));
         }
     }
 

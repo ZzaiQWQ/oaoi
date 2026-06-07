@@ -27,7 +27,7 @@
 .srv-card-featured {
   grid-column: span 2;
   position: relative; overflow: hidden;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface-white-70, rgba(255, 255, 255, 0.7));
   backdrop-filter: blur(var(--blur-radius, 12px));
 }
 
@@ -41,7 +41,7 @@
 
 .srv-card-bg-overlay {
   position: absolute; inset: 0;
-  background: linear-gradient(to top, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.4) 50%, transparent 100%);
+  background: linear-gradient(to top, var(--surface-white-95, rgba(255, 255, 255, 0.95)) 0%, var(--surface-white-40, rgba(255, 255, 255, 0.4)) 50%, transparent 100%);
 }
 
 .srv-card-body {
@@ -68,7 +68,7 @@
 .srv-badge-rpg { background: rgba(155, 54, 103, 0.12); color: #9b3667; }
 
 .srv-ping {
-  background: rgba(255, 255, 255, 0.8); padding: 3px 10px;
+  background: var(--surface-white-80, rgba(255, 255, 255, 0.8)); padding: 3px 10px;
   border-radius: 20px; font-size: 11px;
   font-weight: 700; color: var(--pink-600);
 }
@@ -84,7 +84,7 @@
 
 /* 标准卡片 */
 .srv-card-standard {
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface-white-70, rgba(255, 255, 255, 0.7));
   backdrop-filter: blur(var(--blur-radius, 12px));
   padding: 12px 14px;
   display: flex; flex-direction: column; overflow: hidden;
@@ -113,10 +113,10 @@
 .srv-card-more p { font-size: 11px; opacity: 0.8; flex: 1; }
 .srv-more-btn {
   margin-top: 12px; width: fit-content;
-  padding: 6px 16px; background: rgba(255, 255, 255, 0.2);
+  padding: 6px 16px; background: var(--surface-white-20, rgba(255, 255, 255, 0.2));
   border: none; border-radius: 12px; color: white;
   font-size: 10px; font-weight: 700; font-family: inherit;
   cursor: pointer; letter-spacing: 1px;
   transition: background 0.2s ease;
 }
-.srv-more-btn:hover { background: rgba(255, 255, 255, 0.35); }
+.srv-more-btn:hover { background: var(--surface-white-35, rgba(255, 255, 255, 0.35)); }

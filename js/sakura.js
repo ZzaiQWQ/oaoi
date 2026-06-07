@@ -22,6 +22,19 @@ class SakuraPetals {
     this.destroyed = true;
     this._timers.forEach(t => clearTimeout(t));
     this._timers = [];
+    this.container.querySelectorAll('.sakura-petal').forEach(petal => petal.remove());
+  }
+
+  /** 暂停或恢复花瓣创建，同时同步已有花瓣动画状态 */
+  setPaused(paused) {
+    this.paused = !!paused;
+    const state = this.paused ? 'paused' : 'running';
+    this.container.querySelectorAll('.sakura-petal').forEach(petal => {
+      petal.style.animationPlayState = state;
+    });
+    if (!this.paused && !this.destroyed && this.container.children.length === 0) {
+      this.createPetal();
+    }
   }
 
   createPetal() {
@@ -52,6 +65,7 @@ class SakuraPetals {
     petal.style.cssText = `
       left: ${startX}%;
       font-size: ${size}px;
+      color: var(--diy-petal-color, var(--pink-300));
       animation-duration: ${duration}s;
       animation-delay: ${delay}s;
       opacity: ${0.4 + Math.random() * 0.4};

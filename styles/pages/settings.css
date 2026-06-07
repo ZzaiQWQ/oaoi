@@ -6,7 +6,7 @@
 .page-settings {
   padding: 12px 16px;
   overflow-y: auto;
-  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  background: var(--surface-pink-100-60, color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent));
   height: 100%;
 }
 
@@ -45,7 +45,7 @@
 }
 
 .set-card {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--surface-white-80, rgba(255, 255, 255, 0.8));
   border-radius: var(--radius-xl);
   border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   padding: 12px 14px;
@@ -66,7 +66,7 @@
 .java-mode-toggle { display: flex; gap: 6px; margin: 4px 0; }
 .java-mode-btn {
   padding: 5px 13px; border: 2px solid color-mix(in srgb, var(--pink-600) calc(0.3 * 100%), transparent);
-  border-radius: 18px; background: rgba(255,255,255,0.5);
+  border-radius: 18px; background: var(--surface-white-50, rgba(255,255,255,0.5));
   color: var(--text-mid); font-size: 11px; font-weight: 700;
   cursor: pointer; transition: all 0.2s ease; font-family: inherit;
 }
@@ -93,12 +93,12 @@
   color: var(--text-light);
 }
 .java-auto-desc {
-  background: color-mix(in srgb, var(--pink-500) 8%, transparent); border-radius: 10px;
+  background: var(--surface-accent-08, color-mix(in srgb, var(--pink-500) 8%, transparent)); border-radius: 10px;
   padding: 6px 10px; margin-top: 4px;
 }
 .java-auto-desc p { margin: 1px 0; font-size: 11px; color: var(--text-mid); }
 .java-auto-desc code {
-  background: color-mix(in srgb, var(--pink-500) 15%, transparent); padding: 1px 6px;
+  background: var(--surface-accent-15, color-mix(in srgb, var(--pink-500) 15%, transparent)); padding: 1px 6px;
   border-radius: 4px; font-size: 11px; color: var(--pink-700);
 }
 

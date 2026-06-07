@@ -1,7 +1,7 @@
 /* ============ 关于页 - 更新日志 ============ */
 
 .about-changelog {
-  background: rgba(255,255,255,0.4);
+  background: var(--surface-white-40, rgba(255,255,255,0.4));
   border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.2 * 100%), transparent);
   border-radius: var(--radius-xl);
   padding: 12px;

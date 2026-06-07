@@ -21,12 +21,12 @@
 }
 
 .crash-modal {
-  background: linear-gradient(135deg, #fff5f7 0%, #fff 100%);
+  background: var(--theme-simple-modal-surface, linear-gradient(135deg, #fff5f7 0%, #fff 100%));
   border-radius: 18px;
   width: 420px;
   max-width: 90vw;
   max-height: 80vh;
-  box-shadow: 0 20px 60px rgba(232, 69, 116, 0.2), 0 0 0 1px rgba(255, 200, 215, 0.3);
+  box-shadow: var(--theme-crash-shadow, 0 20px 60px rgba(232, 69, 116, 0.2), 0 0 0 1px rgba(255, 200, 215, 0.3));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -38,7 +38,7 @@
   align-items: center;
   gap: 12px;
   padding: 18px 20px 12px;
-  border-bottom: 1px solid rgba(255, 200, 215, 0.3);
+  border-bottom: 1px solid var(--theme-panel-border-soft, rgba(255, 200, 215, 0.3));
 }
 
 .crash-modal-title {
@@ -88,7 +88,7 @@
 }
 
 .crash-modal-body code {
-  background: rgba(232, 69, 116, 0.1);
+  background: var(--theme-accent-soft, rgba(232, 69, 116, 0.1));
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 12px;
@@ -102,26 +102,26 @@
 .crash-modal-footer {
   padding: 12px 20px 16px;
   text-align: right;
-  border-top: 1px solid rgba(255, 200, 215, 0.2);
+  border-top: 1px solid var(--theme-panel-border-soft, rgba(255, 200, 215, 0.2));
 }
 
 .crash-modal-btn {
   padding: 8px 24px;
   border: none;
   border-radius: 12px;
-  background: linear-gradient(135deg, #f472b6, #e84574);
+  background: var(--theme-action-gradient, linear-gradient(135deg, #f472b6, #e84574));
   color: #fff;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
   transition: all 0.2s;
-  box-shadow: 0 4px 12px rgba(232, 69, 116, 0.3);
+  box-shadow: 0 4px 12px var(--theme-accent-border, rgba(232, 69, 116, 0.3));
 }
 
 .crash-modal-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(232, 69, 116, 0.4);
+  box-shadow: 0 6px 16px var(--theme-accent-border, rgba(232, 69, 116, 0.4));
 }
 
 .crash-loading-dot {

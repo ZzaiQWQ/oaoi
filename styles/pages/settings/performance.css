@@ -154,7 +154,7 @@
   gap: 8px;
   margin-top: 4px;
   padding: 7px 9px;
-  background: rgba(255, 255, 255, 0.58);
+  background: var(--surface-white-58, rgba(255, 255, 255, 0.58));
   border: 1px solid rgba(255, 128, 170, 0.26);
   border-radius: 10px;
   min-width: 0;
@@ -275,7 +275,7 @@
   height: 34px;
   border: 1.5px solid color-mix(in srgb, var(--pink-300) 52%, transparent);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--surface-white-62, rgba(255, 255, 255, 0.62));
   color: var(--text-mid);
   font-size: 12px;
   font-weight: 800;
@@ -299,7 +299,7 @@
   resize: none;
   border: 1.5px solid rgba(245, 67, 128, 0.72);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
   color: var(--text-dark);
   font-size: 12px;
   line-height: 1.55;
@@ -330,7 +330,7 @@
 
 .jvm-secondary-btn {
   border: 1.5px solid color-mix(in srgb, var(--pink-300) 50%, transparent);
-  background: rgba(255, 255, 255, 0.65);
+  background: var(--surface-white-65, rgba(255, 255, 255, 0.65));
   color: var(--pink-600);
 }
 
@@ -351,7 +351,7 @@
 .set-path-input {
   flex: 1;
   min-width: 0;
-  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-100-50, color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent));
   border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
   border-radius: 10px;
   padding: 5px 8px;
@@ -365,7 +365,7 @@
 
 .set-browse-btn {
   padding: 4px 12px;
-  background: color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent);
+  background: var(--surface-pink-100-80, color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent));
   border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
   border-radius: 10px;
   font-size: 10px;
@@ -378,7 +378,7 @@
 }
 
 .set-browse-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
+  background: var(--surface-pink-200-40, color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent));
 }
 
 .set-auto-btn {
@@ -412,7 +412,7 @@
   justify-content: space-between;
   align-items: center;
   padding: 5px 10px;
-  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-100-50, color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent));
   border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   border-radius: 8px;
   font-size: 10px;
@@ -424,7 +424,7 @@
 }
 
 .java-results-header:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  background: var(--surface-pink-200-30, color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent));
 }
 
 .java-results-arrow {
@@ -445,7 +445,7 @@
   left: 0;
   right: 0;
   z-index: 100;
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--surface-white-95, rgba(255, 255, 255, 0.95));
   backdrop-filter: blur(var(--blur-radius, 12px));
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
@@ -475,11 +475,11 @@
 }
 
 .java-result-item:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.2 * 100%), transparent);
+  background: var(--surface-pink-200-20, color-mix(in srgb, var(--pink-200) calc(0.2 * 100%), transparent));
 }
 
 .java-result-item.selected {
-  background: color-mix(in srgb, var(--pink-600) calc(0.1 * 100%), transparent);
+  background: var(--surface-accent-10, color-mix(in srgb, var(--pink-600) calc(0.1 * 100%), transparent));
   color: var(--pink-600);
   font-weight: 700;
 }
@@ -489,7 +489,7 @@
   border-radius: 6px;
   font-size: 9px;
   font-weight: 700;
-  background: color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent);
+  background: var(--surface-pink-400-15, color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent));
   color: var(--pink-600);
   white-space: nowrap;
 }

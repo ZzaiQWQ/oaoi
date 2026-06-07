@@ -17,7 +17,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 10px;
   padding: 6px 14px;
@@ -30,7 +30,7 @@
 }
 
 .instance-back-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
+  background: var(--surface-pink-200-70, color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent));
   border-color: color-mix(in srgb, var(--pink-600) calc(0.4 * 100%), transparent);
   transform: translateX(-2px);
 }
@@ -54,7 +54,7 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--surface-white-55, rgba(255, 255, 255, 0.55));
   backdrop-filter: blur(var(--blur-radius, 16px));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 14px;
@@ -93,7 +93,7 @@
 
 .instance-folder-btn {
   padding: 6px 14px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
   backdrop-filter: blur(var(--blur-radius, 10px));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
   border-radius: 8px;
@@ -105,7 +105,7 @@
 }
 
 .instance-folder-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
+  background: var(--surface-pink-200-70, color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent));
   border-color: color-mix(in srgb, var(--pink-600) calc(0.4 * 100%), transparent);
   transform: translateY(-1px);
 }
@@ -117,9 +117,9 @@
 }
 
 .instance-analyze-btn {
-  color: var(--pink-700);
-  border-color: rgba(255, 95, 145, 0.32);
-  background: rgba(255, 255, 255, 0.72);
+  color: var(--theme-accent-strong, var(--pink-700));
+  border-color: var(--theme-accent-border, rgba(255, 95, 145, 0.32));
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
 }
 
 .instance-analyze-btn:disabled {
@@ -190,15 +190,15 @@
   gap: 8px;
   min-height: 30px;
   padding: 4px 9px;
-  border: 1px solid rgba(255, 128, 170, 0.26);
+  border: 1px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.26));
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
   cursor: pointer;
 }
 
 .export-format-card.active {
-  border-color: rgba(245, 67, 128, 0.72);
-  box-shadow: 0 8px 22px rgba(245, 67, 128, 0.12);
+  border-color: var(--theme-accent-border, rgba(245, 67, 128, 0.72));
+  box-shadow: 0 8px 22px var(--theme-accent-ring, rgba(245, 67, 128, 0.12));
 }
 
 .export-format-card input {
@@ -221,7 +221,7 @@
   flex-shrink: 0;
   font-size: 9px;
   font-weight: 700;
-  color: #f04480;
+  color: var(--theme-accent-strong, #f04480);
 }
 
 .export-name-row,
@@ -232,9 +232,9 @@
   gap: 6px;
   min-height: 30px;
   padding: 4px 7px;
-  border: 1px solid rgba(255, 128, 170, 0.22);
+  border: 1px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.22));
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.64);
+  background: var(--surface-white-64, rgba(255, 255, 255, 0.64));
 }
 
 .export-name-row span,
@@ -250,9 +250,9 @@
   width: 100%;
   min-width: 0;
   height: 22px;
-  border: 1px solid rgba(255, 128, 170, 0.28);
+  border: 1px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.28));
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.84);
+  background: var(--surface-white-84, rgba(255, 255, 255, 0.84));
   color: #202330;
   font-size: 11px;
   font-weight: 700;
@@ -266,8 +266,8 @@
 
 .export-name-row input:focus,
 .export-version-row input:focus {
-  border-color: rgba(245, 67, 128, 0.72);
-  box-shadow: 0 0 0 3px rgba(245, 67, 128, 0.1);
+  border-color: var(--theme-accent-border, rgba(245, 67, 128, 0.72));
+  box-shadow: 0 0 0 3px var(--theme-accent-ring, rgba(245, 67, 128, 0.1));
 }
 
 .export-output-row {
@@ -278,9 +278,9 @@
   min-height: 28px;
   margin-bottom: 6px;
   padding: 4px 7px;
-  border: 1px solid rgba(255, 128, 170, 0.18);
+  border: 1px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.18));
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
 }
 
 .export-output-row span {
@@ -294,9 +294,9 @@
   height: 22px;
   padding: 0 8px;
   border-radius: 7px;
-  border: 1px solid rgba(255, 95, 145, 0.28);
-  background: rgba(255, 255, 255, 0.78);
-  color: #f04480;
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.28));
+  background: var(--surface-white-78, rgba(255, 255, 255, 0.78));
+  color: var(--theme-accent-strong, #f04480);
   font-size: 10px;
   font-weight: 800;
   cursor: pointer;
@@ -328,9 +328,9 @@
   height: 24px;
   padding: 0 8px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 95, 145, 0.26);
-  background: rgba(255, 255, 255, 0.78);
-  color: #f04480;
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.26));
+  background: var(--surface-white-78, rgba(255, 255, 255, 0.78));
+  color: var(--theme-accent-strong, #f04480);
   font-size: 10px;
   font-weight: 800;
   cursor: pointer;
@@ -354,9 +354,9 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid rgba(244, 114, 182, 0.28);
+  border: 1px solid var(--theme-accent-border, rgba(244, 114, 182, 0.28));
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
 }
 
 .export-progress.hidden {
@@ -384,14 +384,14 @@
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgba(244, 114, 182, 0.16);
+  background: var(--theme-track-bg, rgba(244, 114, 182, 0.16));
 }
 
 .export-progress-bar {
   width: 0%;
   height: 100%;
   border-radius: inherit;
-  background: #f05283;
+  background: var(--theme-accent, #f05283);
   transition: width 0.2s ease;
 }
 
@@ -401,15 +401,15 @@
   align-items: center;
   gap: 8px;
   padding: 7px 10px;
-  border: 1px solid rgba(255, 128, 170, 0.22);
+  border: 1px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.22));
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.68);
+  background: var(--surface-white-68, rgba(255, 255, 255, 0.68));
 }
 
 .export-item-row input {
   width: 14px;
   height: 14px;
-  accent-color: #f54d87;
+  accent-color: var(--theme-accent, #f54d87);
 }
 
 .export-item-main {
@@ -476,7 +476,7 @@
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.58);
+  background: var(--surface-white-58, rgba(255, 255, 255, 0.58));
   color: var(--pink-700);
   font-size: 12px;
   font-weight: 600;
@@ -505,9 +505,9 @@
 .instance-jvm-preset {
   height: 30px;
   padding: 0 8px;
-  border: 1.5px solid rgba(255, 128, 170, 0.32);
+  border: 1.5px solid var(--theme-panel-border-soft, rgba(255, 128, 170, 0.32));
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--surface-white-62, rgba(255, 255, 255, 0.62));
   color: var(--pink-700);
   font-size: 11px;
   font-weight: 800;
@@ -525,9 +525,9 @@
   width: 100%;
   height: 104px;
   resize: none;
-  border: 1.5px solid rgba(245, 67, 128, 0.72);
+  border: 1.5px solid var(--theme-accent-border, rgba(245, 67, 128, 0.72));
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
   color: var(--text-dark);
   font-size: 12px;
   line-height: 1.55;
@@ -546,7 +546,7 @@
   height: 30px;
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--surface-white-55, rgba(255, 255, 255, 0.55));
   color: var(--pink-700);
   font-size: 12px;
   font-weight: 700;
@@ -556,7 +556,7 @@
 
 .instance-path-row button:hover,
 .instance-settings-actions button:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.75 * 100%), transparent);
+  background: var(--surface-pink-200-75, color-mix(in srgb, var(--pink-200) calc(0.75 * 100%), transparent));
 }
 
 .instance-settings-actions {
@@ -606,7 +606,7 @@
   border: none;
   border-radius: 50%;
   background: transparent;
-  color: #f47ca3;
+  color: var(--theme-accent, #f47ca3);
   font-size: 24px;
   font-weight: 700;
   line-height: 1;
@@ -666,7 +666,7 @@
 
 /* Mod 管理区域 */
 .mod-manager-section {
-  background: rgba(255, 255, 255, 0.45);
+  background: var(--surface-white-45, rgba(255, 255, 255, 0.45));
   backdrop-filter: blur(var(--blur-radius, 16px));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
   border-radius: 14px;
@@ -690,7 +690,7 @@
   padding: 5px 14px;
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--surface-white-30, rgba(255, 255, 255, 0.3));
   font-size: 12px;
   font-weight: 600;
   color: var(--pink-600);
@@ -749,14 +749,14 @@
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.45);
+  background: var(--surface-white-45, rgba(255, 255, 255, 0.45));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
   border-radius: 10px;
   transition: all 0.15s;
 }
 
 .online-mod-card:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-200-50, color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent));
 }
 
 .online-mod-icon {
@@ -764,7 +764,7 @@
   height: 36px;
   border-radius: 8px;
   object-fit: cover;
-  background: color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-200-50, color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent));
   flex-shrink: 0;
 }
 
@@ -792,7 +792,7 @@
 
 .online-mod-meta {
   font-size: 9px;
-  color: #c0909a;
+  color: var(--theme-accent-strong, #c0909a);
 }
 
 .online-mod-actions {
@@ -878,22 +878,22 @@
 
 .online-mod-version-modal {
   --online-mod-scale: clamp(0.62, var(--app-ui-scale, 1), 1);
-  background: rgba(255, 223, 234, 0.42);
+  background: var(--oaoi-modal-overlay-bg, rgba(255, 223, 234, 0.42));
   backdrop-filter: blur(var(--blur-radius, 8px));
   padding: clamp(10px, calc(16px * var(--online-mod-scale)), 16px);
 }
 
 .online-mod-version-modal .modal-content {
-  background:
+  background: var(--oaoi-modal-surface,
     radial-gradient(circle at 10% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
     radial-gradient(circle at 92% 96%, rgba(255, 110, 154, 0.14), transparent 32%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97));
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97)));
   backdrop-filter: blur(var(--blur-radius, 12px));
-  border: 1px solid rgba(255, 128, 170, 0.34);
+  border: var(--oaoi-modal-border, 1px solid rgba(255, 128, 170, 0.34));
   border-radius: 18px;
-  box-shadow:
+  box-shadow: var(--oaoi-modal-shadow,
     0 24px 60px rgba(132, 52, 83, 0.18),
-    0 0 0 1px rgba(255, 255, 255, 0.82) inset;
+    0 0 0 1px rgba(255, 255, 255, 0.82) inset);
   width: min(calc(500px * var(--online-mod-scale)), calc(100% - 32px));
   height: min(360px, calc(100% - 28px));
   max-width: none !important;
@@ -961,9 +961,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.92);
-  color: #f04480;
-  border: 1px solid rgba(255, 95, 145, 0.34);
+  background: var(--modal-surface-white-92, var(--theme-panel-bg-strong, rgba(255, 255, 255, 0.92)));
+  color: var(--theme-accent-strong, #f04480);
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.34));
 }
 
 .online-mod-version-modal .online-mod-version-filter {
@@ -1001,7 +1001,7 @@
   padding:
     clamp(5px, calc(8px * var(--online-mod-scale)), 8px)
     clamp(7px, calc(9px * var(--online-mod-scale)), 9px);
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--modal-surface-white-78, rgba(255, 255, 255, 0.78));
   border: 1px solid rgba(32, 35, 48, 0.08);
   border-radius: clamp(7px, calc(10px * var(--online-mod-scale)), 10px);
   transition: all 0.16s ease;
@@ -1009,8 +1009,8 @@
 
 .online-mod-version-row:hover,
 .online-mod-version-row.recommended {
-  background: rgba(255, 255, 255, 0.96);
-  border-color: rgba(255, 112, 158, 0.30);
+  background: var(--modal-surface-white-96, rgba(255, 255, 255, 0.96));
+  border-color: var(--theme-accent-border, rgba(255, 112, 158, 0.30));
 }
 
 .online-mod-version-info {
@@ -1050,7 +1050,7 @@
   margin-top: clamp(1px, calc(2px * var(--online-mod-scale)), 2px);
   font-size: clamp(7px, calc(9px * var(--online-mod-scale)), 9px);
   line-height: 1.2;
-  color: #b98395;
+  color: var(--theme-accent-strong, #b98395);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1118,7 +1118,7 @@
   padding: 6px 12px;
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--surface-white-60, rgba(255, 255, 255, 0.6));
   font-size: 12px;
   color: var(--pink-700);
   outline: none;
@@ -1126,7 +1126,7 @@
 }
 
 .mod-search-input::placeholder {
-  color: #c0909a;
+  color: var(--theme-accent-strong, #c0909a);
 }
 
 .mod-search-input:focus {
@@ -1135,7 +1135,7 @@
 
 .mod-refresh-btn {
   padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
   border-radius: 8px;
   font-size: 14px;
@@ -1145,7 +1145,7 @@
 }
 
 .mod-refresh-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
+  background: var(--surface-pink-200-70, color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent));
   transform: rotate(180deg);
 }
 
@@ -1169,7 +1169,7 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--surface-white-40, rgba(255, 255, 255, 0.4));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
   border-radius: 8px;
   transition: all 0.15s ease;
@@ -1178,7 +1178,7 @@
 }
 
 .mod-item:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-200-50, color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent));
 }
 
 .mod-item.disabled {
@@ -1189,7 +1189,7 @@
   position: relative;
   width: 32px;
   height: 18px;
-  background: color-mix(in srgb, var(--pink-300) calc(0.4 * 100%), transparent);
+  background: var(--surface-pink-300-40, color-mix(in srgb, var(--pink-300) calc(0.4 * 100%), transparent));
   border-radius: 9px;
   border: none;
   cursor: pointer;
@@ -1231,7 +1231,7 @@
 .online-cat-btn {
   padding: 3px 10px;
   border: 1px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
-  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-100-50, color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent));
   border-radius: 10px;
   font-size: 10px;
   font-weight: 600;
@@ -1241,7 +1241,7 @@
 }
 
 .online-cat-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.6 * 100%), transparent);
+  background: var(--surface-pink-200-60, color-mix(in srgb, var(--pink-200) calc(0.6 * 100%), transparent));
 }
 
 .online-cat-btn.active {
@@ -1288,7 +1288,7 @@
 }
 
 .mod-link:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent);
+  background: var(--surface-pink-200-70, color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent));
   border-color: color-mix(in srgb, var(--pink-600) calc(0.4 * 100%), transparent);
   color: var(--pink-700);
 }
@@ -1329,7 +1329,7 @@
 }
 
 .mod-delete-btn:hover {
-  background: color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-200-50, color-mix(in srgb, var(--pink-200) calc(0.5 * 100%), transparent));
   border-color: rgba(255, 80, 80, 0.5);
 }
 
@@ -1382,12 +1382,12 @@
 }
 
 .instance-action-delete {
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
   border: 1px solid rgba(255, 107, 107, 0.3);
   color: #d9534f;
 }
 
 .instance-action-delete:hover {
-  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  background: var(--surface-pink-100-60, color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent));
   border-color: rgba(255, 107, 107, 0.5);
 }

@@ -21,7 +21,7 @@
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-100-50, color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent));
   border: 2px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   border-radius: 10px;
   cursor: pointer;
@@ -34,7 +34,7 @@
 
 .account-card.active {
   border-color: var(--pink-500);
-  background: color-mix(in srgb, var(--pink-200) calc(0.25 * 100%), transparent);
+  background: var(--surface-pink-200-25, color-mix(in srgb, var(--pink-200) calc(0.25 * 100%), transparent));
   box-shadow: 0 0 8px color-mix(in srgb, var(--pink-500) calc(0.2 * 100%), transparent);
 }
 
@@ -104,7 +104,7 @@
 .set-player-input {
   flex: 1;
   min-width: 0;
-  background: color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent);
+  background: var(--surface-pink-100-50, color-mix(in srgb, var(--pink-100) calc(0.5 * 100%), transparent));
   border: 1px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
   border-radius: 10px;
   padding: 6px 10px;
@@ -117,5 +117,5 @@
 
 .set-player-input:focus {
   border-color: var(--pink-400);
-  background: color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent);
+  background: var(--surface-pink-100-80, color-mix(in srgb, var(--pink-100) calc(0.8 * 100%), transparent));
 }

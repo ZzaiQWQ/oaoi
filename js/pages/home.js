@@ -34,7 +34,7 @@ const MC_NEWS_CACHE_KEY = 'mcOfficialNewsCache';
   function renderNewsCards(items) {
     container.innerHTML = items.map(n => `
       <div class="news-card" ${n.link ? `data-link="${escapeHtml(n.link)}"` : ''} style="cursor:pointer;">
-        <div class="news-card-img"><img src="${escapeHtml(n.img)}" alt="${escapeHtml(n.title)}" onerror="this.src='assets/news1.png'"></div>
+        <div class="news-card-img"><img src="${escapeHtml(n.img)}" alt="${escapeHtml(n.title)}" onerror="this.src='assets/bg-2.webp'"></div>
         <div class="news-card-content">
           <h3>${escapeHtml(n.title)}</h3>
           <p>${escapeHtml(n.desc)}</p>
@@ -74,7 +74,7 @@ const MC_NEWS_CACHE_KEY = 'mcOfficialNewsCache';
       return {
         title: post.title || '无标题',
         desc: (post.shortText || '').slice(0, 80),
-        img: post.image?.url ? MC_IMG_BASE + post.image.url : 'assets/news1.png',
+        img: post.image?.url ? MC_IMG_BASE + post.image.url : 'assets/bg-2.webp',
         link: `https://www.minecraft.net/en-us/article/${slug}`,
       };
     });
@@ -390,7 +390,7 @@ function showCrashModal(version, content, loading = false, isLocal = false) {
   }
   // 本地检测提示配置 AI
   if (isLocal) {
-    html += '<div style="margin-top:12px;padding:8px 12px;background:rgba(232,69,116,0.06);border-radius:8px;font-size:11px;color:#be185d;">💡 当前为本地检测，前往 <strong>设置 → AI 崩溃分析</strong> 配置 API 可获得更精准的分析结果。</div>';
+    html += '<div style="margin-top:12px;padding:8px 12px;background:var(--theme-accent-soft, rgba(232,69,116,0.06));border-radius:8px;font-size:11px;color:var(--pink-700, #be185d);">💡 当前为本地检测，前往 <strong>设置 → AI 崩溃分析</strong> 配置 API 可获得更精准的分析结果。</div>';
   }
   body.innerHTML = html;
   modal.style.display = '';

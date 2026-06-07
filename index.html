@@ -37,7 +37,7 @@
       <div class="launcher">
         <!-- 真正贴合边框的背景图层 -->
         <div class="global-bg" id="globalBg" style="position: absolute; inset: 0; z-index: -1; pointer-events: none;">
-          <img src="assets/bg.png" alt="bg" id="globalBgImg" style="width: 100%; height: 100%; object-fit: cover;">
+          <img src="assets/bg-1.webp" alt="bg" id="globalBgImg" style="width: 100%; height: 100%; object-fit: cover;">
         </div>
         <!-- 自定义标题栏 -->
         <div class="custom-titlebar" data-tauri-drag-region>
@@ -137,9 +137,9 @@
 
           <!-- ========== 主页 ========== -->
           <div class="page page-home active" id="pageHome">
+            <img src="assets/bg-1.webp" alt="主页背景" class="home-bg">
             <!-- 顶部大图区域 -->
             <div class="hero">
-              <img src="assets/bg.png" alt="樱花背景" class="hero-bg">
               <div class="hero-overlay"></div>
               <div class="server-title">
                 <span class="title-deco left">✿</span>
@@ -183,7 +183,7 @@
             <div class="server-tab-panel active" data-server-panel="list">
               <div class="servers-grid" data-no-drag>
               <div class="srv-card srv-card-featured">
-                <img class="srv-card-bg" src="assets/bg.png" alt="">
+                <img class="srv-card-bg" src="assets/bg-1.webp" alt="">
                 <div class="srv-card-bg-overlay"></div>
                 <div class="srv-card-body">
                   <div class="srv-card-top">
@@ -477,21 +477,21 @@
                   <div class="set-field">
                     <label>API Key</label>
                     <input type="password" class="set-text-input" id="aiApiKey" placeholder="填写 API Key 启用 AI 分析..."
-                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
+                      style="width:100%;padding:8px 12px;background:var(--surface-white-60, rgba(255,255,255,0.6));border:1.5px solid var(--theme-panel-border-soft, rgba(255,200,215,0.3));border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                     <p class="ai-hint">未填写则不启用 AI 分析，崩溃时仅使用本地规则匹配</p>
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
                     <label>API 地址 (兼容 OpenAI 格式)</label>
                     <input type="text" class="set-text-input" id="aiApiUrl" placeholder="例如: https://api.deepseek.com"
-                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
+                      style="width:100%;padding:8px 12px;background:var(--surface-white-60, rgba(255,255,255,0.6));border:1.5px solid var(--theme-panel-border-soft, rgba(255,200,215,0.3));border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                     <p class="ai-hint">支持 DeepSeek / OpenAI / 任何兼容 OpenAI 格式的 API</p>
                   </div>
                   <div class="set-divider"></div>
                   <div class="set-field">
                     <label>模型名称</label>
                     <input type="text" class="set-text-input" id="aiModel" placeholder="例如: deepseek-chat"
-                      style="width:100%;padding:8px 12px;background:rgba(255,255,255,0.6);border:1.5px solid rgba(255,200,215,0.3);border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
+                      style="width:100%;padding:8px 12px;background:var(--surface-white-60, rgba(255,255,255,0.6));border:1.5px solid var(--theme-panel-border-soft, rgba(255,200,215,0.3));border-radius:10px;font-size:12px;font-family:inherit;color:var(--text-dark);outline:none;">
                   </div>
                   <div class="set-divider"></div>
                   <div class="ai-actions">
@@ -528,7 +528,7 @@
             <div class="about-scroll">
               <div class="about-hero-row">
                 <div class="about-hero-img">
-                  <img src="assets/bg.png" alt="Sakura Town">
+                  <img src="assets/bg-1.webp" alt="Sakura Town">
                   <div class="about-hero-overlay"></div>
                   <div class="about-hero-text">
                     <h1>关于 oaoi</h1>
@@ -606,20 +606,25 @@
               <div class="diy-section">
                 <div class="diy-section-title">背景图片</div>
                 <div class="diy-bg-grid">
-                  <div class="diy-bg-item active" data-bg="assets/bg.png">
-                    <img src="assets/bg.png" alt="默认背景">
+                  <div class="diy-bg-item active" data-bg="assets/bg-1.webp">
+                    <img src="assets/bg-1.webp" alt="默认背景">
                     <div class="diy-bg-label">默认</div>
                   </div>
-                  <div class="diy-bg-item" data-bg="assets/news1.png">
-                    <img src="assets/news1.png" alt="樱花祭典">
-                    <div class="diy-bg-label">樱花祭典</div>
+                  <div class="diy-bg-item" data-bg="assets/bg-2.webp">
+                    <img src="assets/bg-2.webp" alt="背景 2">
+                    <div class="diy-bg-label">背景 2</div>
                   </div>
-                  <div class="diy-bg-item" data-bg="assets/news2.png">
-                    <img src="assets/news2.png" alt="甜心之城">
-                    <div class="diy-bg-label">甜心之城</div>
+                  <div class="diy-bg-item" data-bg="assets/bg-3.webp">
+                    <img src="assets/bg-3.webp" alt="背景 3">
+                    <div class="diy-bg-label">背景 3</div>
+                  </div>
+                  <div class="diy-bg-item" data-bg="assets/bg-4.webp">
+                    <img src="assets/bg-4.webp" alt="背景 4">
+                    <div class="diy-bg-label">背景 4</div>
                   </div>
                   <div class="diy-bg-item diy-bg-custom" id="diyCustomBg">
-                    <span>自定义</span>
+                    <img id="diyCustomBgPreview" src="assets/bg-1.webp" alt="自定义背景">
+                    <div class="diy-bg-label">自定义</div>
                   </div>
                 </div>
               </div>
@@ -697,8 +702,18 @@
 
                 <div class="diy-slider-row">
                   <label>窗口透明度</label>
-                  <input type="range" id="diyOpacity" min="60" max="100" value="68">
+                  <input type="range" id="diyOpacity" min="0" max="100" value="68">
                   <span class="diy-slider-val" id="diyOpacityVal">68%</span>
+                </div>
+                <div class="diy-slider-row">
+                  <label>框框背景</label>
+                  <input type="range" id="diyContentSurfaceOpacity" min="0" max="100" value="100">
+                  <span class="diy-slider-val" id="diyContentSurfaceOpacityVal">100%</span>
+                </div>
+                <div class="diy-slider-row">
+                  <label>弹窗背景</label>
+                  <input type="range" id="diyModalSurfaceOpacity" min="0" max="100" value="100">
+                  <span class="diy-slider-val" id="diyModalSurfaceOpacityVal">100%</span>
                 </div>
                 <div class="diy-slider-row">
                   <label>窗口圆角</label>
@@ -883,12 +898,12 @@
             <h2>🌸 欢迎使用 oaoi 启动器</h2>
           </div>
           <div class="modal-body" style="text-align: center;">
-            <p style="margin-bottom: 16px; color: #c94a6a; font-size: 15px;">
+            <p style="margin-bottom: 16px; color: var(--theme-accent-strong, #c94a6a); font-size: 15px;">
               请选择一个文件夹作为游戏安装目录<br>
               <small style="color: #999;">所有版本文件将存放在此目录下</small>
             </p>
             <div id="firstLaunchDirDisplay"
-              style="background: rgba(255,182,193,0.15); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; word-break: break-all; color: #999; min-height: 20px;">
+              style="background: var(--modal-surface-accent-15, var(--theme-accent-soft, rgba(255,182,193,0.15))); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; word-break: break-all; color: #999; min-height: 20px;">
               未选择
             </div>
             <button id="firstLaunchDirBtn" class="btn btn-secondary" style="margin-bottom: 8px;">📂 选择文件夹</button>

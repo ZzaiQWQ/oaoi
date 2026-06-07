@@ -1,10 +1,12 @@
 /* ============ 主页 - 最新资讯 ============ */
 
 .news-section {
+  position: relative;
+  z-index: 1;
   padding: 16px 22px 18px;
   flex: 1;
   min-height: 0;
-  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  background: var(--surface-pink-100-60, color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent));
   overflow-y: auto;
 }
 
@@ -27,7 +29,7 @@
 }
 
 .news-card {
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--surface-white-90, rgba(255, 255, 255, 0.9));
   border-radius: var(--radius-md);
   overflow: hidden;
   box-shadow: var(--shadow-soft);

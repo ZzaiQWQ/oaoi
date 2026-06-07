@@ -175,7 +175,7 @@ async function checkFirstLaunch() {
       if (selected) {
         selectedDir = normalizeMinecraftDir(selected);
         dirDisplay.textContent = selectedDir;
-        dirDisplay.style.color = '#c94a6a';
+        dirDisplay.style.color = 'var(--theme-accent-strong, #c94a6a)';
         confirmBtn.disabled = false;
       }
     } catch (e) {

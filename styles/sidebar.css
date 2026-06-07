@@ -11,7 +11,7 @@
   border-right: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.4 * 100%), transparent);
   flex-shrink: 0;
   position: relative;
-  z-index: 1;
+  z-index: 2;
 }
 
 .nav-item {

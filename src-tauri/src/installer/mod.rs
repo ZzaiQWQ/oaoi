@@ -77,6 +77,24 @@ pub fn default_library_maven_base(lib_name: &str, is_native: bool) -> &'static s
     }
 }
 
+pub fn installer_generated_client_library(lib_name: &str) -> bool {
+    let parts: Vec<&str> = lib_name.split(':').collect();
+    if parts.len() < 4 {
+        return false;
+    }
+    let classifier = parts[3].split('@').next().unwrap_or(parts[3]);
+    if classifier != "client" {
+        return false;
+    }
+    // 新版 Forge/NeoForge 的 client 库由 installer processor 生成，没有远端下载地址。
+    matches!(
+        (parts[0], parts[1]),
+        ("net.minecraftforge", "forge")
+            | ("net.neoforged", "forge")
+            | ("net.neoforged", "neoforge")
+    )
+}
+
 pub fn safe_maven_path(path: &str) -> Result<std::path::PathBuf, String> {
     let normalized = path.replace('\\', "/");
     let mut out = std::path::PathBuf::new();

@@ -31,7 +31,7 @@
   flex: 0 0 calc((100% - 10px) * 0.4);
   max-width: calc((100% - 10px) * 0.4);
   min-width: 0;
-  background: rgba(255,255,255,0.7);
+  background: var(--surface-white-70, rgba(255,255,255,0.7));
   border: 1.5px solid color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
   border-radius: var(--radius-xl);
   padding: 14px;

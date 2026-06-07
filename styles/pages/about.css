@@ -5,7 +5,7 @@
 
 /* 关于页全局布局 */
 .page-about {
-  background: color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent);
+  background: var(--surface-pink-100-60, color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent));
   height: 100%;
 }
 

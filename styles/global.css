@@ -49,6 +49,8 @@ html {
   --radius-xl: 28px;
   --blur-radius: 1px;
   --window-opacity: 0.68;
+  /* 内容区卡片、条目、输入框的背景透明度；左侧栏不接这个变量。 */
+  --content-surface-opacity: 1;
 }
 
 body {
@@ -146,7 +148,7 @@ body {
   inset: 0;
   background: white;
   opacity: var(--window-opacity, 0.68);
-  z-index: 0;
+  z-index: 1;
   pointer-events: none;
   border-radius: inherit;
 }
@@ -158,7 +160,7 @@ body {
   flex-direction: column;
   overflow: hidden;
   position: relative;
-  z-index: 1;
+  z-index: 2;
 }
 
 /* ============ 页面切换系统 ============ */
@@ -193,7 +195,19 @@ body {
 }
 
 .page-home {
+  position: relative;
   overflow: hidden;
+}
+
+.home-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  z-index: 0;
+  pointer-events: none;
 }
 
 

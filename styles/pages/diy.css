@@ -73,24 +73,13 @@
   text-align: center;
 }
 
-.diy-bg-custom {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--pink-100);
-  color: var(--text-mid);
-  font-size: 13px;
-  flex-direction: column;
-  gap: 4px;
-}
-
 /* ---- 开关控件 ---- */
 .diy-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  background: var(--pink-100);
+  background: var(--surface-pink-100-100, var(--pink-100));
   border-radius: var(--radius-sm);
   margin-bottom: 10px;
 }
@@ -146,7 +135,7 @@
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  background: var(--pink-100);
+  background: var(--surface-pink-100-100, var(--pink-100));
   border-radius: 8px;
   margin-bottom: 8px;
 }
@@ -178,7 +167,7 @@
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  background: var(--pink-100);
+  background: var(--surface-pink-100-100, var(--pink-100));
   border-radius: var(--radius-sm);
   margin-bottom: 10px;
 }
@@ -219,7 +208,7 @@
 }
 
 .diy-reset-btn:hover {
-  background: var(--pink-100);
+  background: var(--surface-pink-100-100, var(--pink-100));
   border-color: var(--pink-500);
   color: var(--pink-600);
 }
@@ -236,7 +225,7 @@
   padding: 6px 4px;
   border: 2px solid var(--pink-200);
   border-radius: 8px;
-  background: var(--pink-100);
+  background: var(--surface-pink-100-100, var(--pink-100));
   color: var(--text-dark);
   font-size: 11px;
   font-weight: 600;
@@ -251,7 +240,7 @@
 
 .diy-style-btn.active {
   border-color: var(--pink-500);
-  background: color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent);
+  background: var(--surface-accent-15, color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent));
   color: var(--pink-600);
   box-shadow: 0 0 8px color-mix(in srgb, var(--pink-500) calc(0.25 * 100%), transparent);
 }
@@ -270,7 +259,7 @@
   padding: 6px 6px;
   border: 2px solid #e0e0e0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface-white-100, #fff);
   color: var(--text-dark);
   font-size: 10px;
   font-weight: 600;

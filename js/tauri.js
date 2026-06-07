@@ -146,9 +146,9 @@ function getTextContextMenu() {
       min-width: 92px;
       padding: 5px;
       border-radius: 12px;
-      border: 1px solid rgba(255, 133, 169, 0.28);
-      background: rgba(255, 255, 255, 0.96);
-      box-shadow: 0 12px 28px rgba(255, 83, 134, 0.2);
+      border: 1px solid var(--theme-panel-border, rgba(255, 133, 169, 0.28));
+      background: var(--modal-surface-white-96, rgba(255, 255, 255, 0.96));
+      box-shadow: 0 12px 28px var(--theme-accent-border, rgba(255, 83, 134, 0.2));
       backdrop-filter: blur(12px);
       -webkit-user-select: none;
       user-select: none;
@@ -160,7 +160,7 @@ function getTextContextMenu() {
       border: 0;
       border-radius: 8px;
       background: transparent;
-      color: #8a3d59;
+      color: var(--theme-drop-status, #8a3d59);
       font: inherit;
       font-size: 12px;
       font-weight: 800;
@@ -169,8 +169,8 @@ function getTextContextMenu() {
       cursor: pointer;
     }
     #oaoiTextContextMenu button:hover {
-      background: rgba(255, 107, 138, 0.14);
-      color: #e84574;
+      background: var(--theme-accent-soft, rgba(255, 107, 138, 0.14));
+      color: var(--theme-accent-strong, #e84574);
     }
   `;
   document.head.appendChild(style);

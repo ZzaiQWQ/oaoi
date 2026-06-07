@@ -11,24 +11,7 @@
   overflow: hidden;
   padding: 10px 24px 10px;
   height: 100%;
-}
-
-.page-download::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: url('assets/bg.png') center / cover no-repeat;
-  opacity: 0.15;
-  z-index: 0;
-  pointer-events: none;
-}
-
-.page-download>* {
-  position: relative;
-  z-index: 1;
+  background: var(--surface-pink-100-60, color-mix(in srgb, var(--pink-100) calc(0.6 * 100%), transparent));
 }
 
 .dl-header {
@@ -90,7 +73,7 @@
   display: flex;
   gap: 4px;
   margin-bottom: 12px;
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--surface-white-60, rgba(255, 255, 255, 0.6));
   border-radius: 12px;
   padding: 3px;
 }
@@ -110,13 +93,13 @@
 }
 
 .dl-top-tab.active {
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface-white-80, rgba(255, 255, 255, 0.8));
   color: var(--pink-600, var(--pink-600));
   box-shadow: 0 2px 8px color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent);
 }
 
 .dl-top-tab:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--surface-white-80, rgba(255, 255, 255, 0.8));
 }
 
 .dl-tab-content {
@@ -138,7 +121,7 @@
   gap: 10px;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--surface-white-80, rgba(255, 255, 255, 0.8));
   border: 1px solid rgba(255, 255, 255, 0.4);
   margin-bottom: 8px;
   transition: all 0.2s;
@@ -146,7 +129,7 @@
 }
 
 .modpack-card:hover {
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--surface-white-90, rgba(255, 255, 255, 0.9));
   transform: translateY(-1px);
   box-shadow: 0 4px 14px color-mix(in srgb, var(--pink-500) calc(0.1 * 100%), transparent);
 }
@@ -157,7 +140,7 @@
   border-radius: 10px;
   object-fit: cover;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--pink-300) calc(0.2 * 100%), transparent);
+  background: var(--surface-pink-300-40, color-mix(in srgb, var(--pink-300) calc(0.4 * 100%), transparent));
 }
 
 .modpack-info {

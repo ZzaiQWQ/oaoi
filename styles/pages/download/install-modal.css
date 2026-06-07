@@ -5,7 +5,7 @@
   left: 0;
   width: 100%;
   height: 100%;
-  background: color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent);
+  background: var(--modal-surface-pink-300-25, color-mix(in srgb, var(--pink-300) calc(0.25 * 100%), transparent));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -21,7 +21,7 @@
 }
 
 .modal {
-  background: linear-gradient(135deg, var(--pink-100) 0%, var(--pink-100) 40%, var(--pink-200) 100%);
+  background: linear-gradient(135deg, var(--modal-surface-pink-100-100, var(--pink-100)) 0%, var(--modal-surface-pink-100-100, var(--pink-100)) 40%, var(--modal-surface-pink-200-100, var(--pink-200)) 100%);
   border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.4 * 100%), transparent);
   border-radius: 20px;
   width: 420px;
@@ -45,20 +45,20 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent), color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent));
+  background: linear-gradient(90deg, var(--modal-surface-pink-300-30, color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent)), var(--modal-surface-pink-400-15, color-mix(in srgb, var(--pink-400) calc(0.15 * 100%), transparent)));
 }
 
 .modal-header h3 {
   margin: 0;
   font-size: 1.15rem;
-  color: #d63384;
+  color: var(--theme-accent-strong, #d63384);
   font-weight: 700;
 }
 
 .modal-close {
   background: none;
   border: none;
-  color: #e8799a;
+  color: var(--theme-accent, #e8799a);
   font-size: 1.5rem;
   cursor: pointer;
   opacity: 0.7;
@@ -67,7 +67,7 @@
 
 .modal-close:hover {
   opacity: 1;
-  color: #d63384;
+  color: var(--theme-accent-strong, #d63384);
 }
 
 .modal-body {
@@ -93,7 +93,7 @@
 .custom-select {
   width: 100%;
   padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--modal-surface-white-70, rgba(255, 255, 255, 0.7));
   border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.35 * 100%), transparent);
   border-radius: 10px;
   color: var(--pink-700);
@@ -106,7 +106,7 @@
 .custom-select:focus {
   border-color: var(--pink-500);
   outline: none;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--modal-surface-white-90, rgba(255, 255, 255, 0.9));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent);
 }
 
@@ -114,7 +114,7 @@
 
 .loader-radio-btn {
   flex: 1; text-align: center; padding: 6px 2px;
-  background: rgba(255,255,255,0.6); border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
+  background: var(--modal-surface-white-60, rgba(255,255,255,0.6)); border: 1.5px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
   border-radius: 8px; cursor: pointer; transition: 0.2s;
   font-size: 0.75rem; color: var(--pink-600);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
@@ -124,7 +124,7 @@
 .loader-icon { width: 20px; height: 20px; object-fit: contain; display: block; margin: 0 auto; }
 
 .loader-radio-btn:hover {
-  background: color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
+  background: var(--modal-surface-pink-300-30, color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent));
 }
 
 .loader-radio-btn.active {
@@ -141,7 +141,7 @@
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  background: color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent);
+  background: var(--modal-surface-pink-200-30, color-mix(in srgb, var(--pink-200) calc(0.3 * 100%), transparent));
 }
 
 .btn {
@@ -155,13 +155,13 @@
 }
 
 .btn-secondary {
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--modal-surface-white-50, rgba(255, 255, 255, 0.5));
   color: var(--pink-600);
   border: 1px solid color-mix(in srgb, var(--pink-400) calc(0.3 * 100%), transparent);
 }
 
 .btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--modal-surface-white-80, rgba(255, 255, 255, 0.8));
 }
 
 .btn-primary {
@@ -176,7 +176,7 @@
 
 .loading-spinner {
   font-size: 0.8rem;
-  color: #d63384;
+  color: var(--theme-accent-strong, #d63384);
   margin-left: 10px;
 }
 
@@ -206,7 +206,7 @@
   width: 9px;
   height: 9px;
   margin-left: 9px;
-  background: linear-gradient(135deg, #ff8db2, rgba(255, 141, 178, 0.1));
+  background: var(--theme-star-gradient, linear-gradient(135deg, #ff8db2, rgba(255, 141, 178, 0.1)));
   clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
   vertical-align: 9px;
 }
@@ -238,8 +238,8 @@
 }
 
 #newInstanceModal .modal-close:hover {
-  background: rgba(255, 105, 151, 0.12);
-  color: #ec4d84;
+  background: var(--theme-accent-soft, rgba(255, 105, 151, 0.12));
+  color: var(--theme-accent-strong, #ec4d84);
 }
 
 #newInstanceModal .modal-body {
@@ -269,7 +269,7 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #ff5f91;
+  background: var(--theme-accent, #ff5f91);
 }
 
 #newInstanceModal .form-group input[type="text"],
@@ -278,7 +278,7 @@
   min-height: 38px;
   padding: 0 14px;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--modal-surface-white-92, rgba(255, 255, 255, 0.92));
   border: 1px solid rgba(32, 35, 48, 0.12);
   color: #242733;
   font-size: 14px;
@@ -290,17 +290,17 @@
 
 #newInstanceModal .form-group input[type="text"]:focus,
 #newInstanceModal .custom-select:focus {
-  border-color: #ff7fa8;
-  background: #fff;
+  border-color: var(--theme-accent, #ff7fa8);
+  background: var(--modal-surface-white-100, #fff);
   box-shadow:
-    0 0 0 3px rgba(255, 110, 154, 0.14),
-    0 10px 26px rgba(255, 95, 145, 0.08);
+    0 0 0 3px var(--theme-accent-ring, rgba(255, 110, 154, 0.14)),
+    0 10px 26px var(--theme-accent-soft, rgba(255, 95, 145, 0.08));
 }
 
 #newInstanceModal .field-hint {
   min-height: 14px;
   margin-top: 4px;
-  color: #9b6580;
+  color: var(--theme-drop-status, #9b6580);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -328,7 +328,7 @@
   min-height: 48px;
   padding: 5px 4px;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--modal-surface-white-86, rgba(255, 255, 255, 0.86));
   border: 1px solid rgba(32, 35, 48, 0.11);
   color: #222631;
   font-size: 11px;
@@ -347,19 +347,18 @@
 }
 
 #newInstanceModal .loader-radio-btn:hover {
-  background: #fff;
-  border-color: rgba(255, 112, 158, 0.36);
+  background: var(--modal-surface-white-100, #fff);
+  border-color: var(--theme-accent-border, rgba(255, 112, 158, 0.36));
   transform: translateY(-1px);
 }
 
 #newInstanceModal .loader-radio-btn.active {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 242, 247, 0.96));
-  border-color: #ff6f9e;
-  color: #f04480;
+  background: var(--theme-loader-active-surface, linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 242, 247, 0.96)));
+  border-color: var(--theme-accent, #ff6f9e);
+  color: var(--theme-accent-strong, #f04480);
   box-shadow:
-    0 12px 26px rgba(255, 95, 145, 0.16),
-    0 0 0 1px rgba(255, 111, 158, 0.18) inset;
+    var(--theme-loader-active-shadow, 0 12px 26px rgba(255, 95, 145, 0.16)),
+    var(--theme-loader-active-inset, 0 0 0 1px rgba(255, 111, 158, 0.18) inset);
 }
 
 #newInstanceModal .loader-radio-btn.active::after {
@@ -370,8 +369,8 @@
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #ff6f9e, #ef3f79);
-  box-shadow: 0 8px 18px rgba(239, 63, 121, 0.28);
+  background: var(--theme-action-gradient, linear-gradient(135deg, #ff6f9e, #ef3f79));
+  box-shadow: 0 8px 18px var(--theme-accent-border, rgba(239, 63, 121, 0.28));
 }
 
 #newInstanceModal .loader-radio-btn.active::before {
@@ -413,22 +412,22 @@
 }
 
 #newInstanceModal .btn-secondary {
-  background: rgba(255, 255, 255, 0.92);
-  color: #f04480;
-  border: 1px solid rgba(255, 95, 145, 0.34);
+  background: var(--modal-surface-white-92, rgba(255, 255, 255, 0.92));
+  color: var(--theme-accent-strong, #f04480);
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.34));
 }
 
 #newInstanceModal .btn-primary {
-  background: linear-gradient(180deg, #ff7aa5, #ed477d);
+  background: var(--theme-action-gradient-vertical, linear-gradient(180deg, #ff7aa5, #ed477d));
   color: #fff;
   border: 1px solid rgba(255, 255, 255, 0.46);
-  box-shadow:
+  box-shadow: var(--theme-action-shadow,
     0 12px 22px rgba(237, 71, 125, 0.28),
-    0 0 0 4px rgba(255, 111, 158, 0.10);
+    0 0 0 4px rgba(255, 111, 158, 0.10));
 }
 
 #newInstanceModal .btn-primary:hover {
-  box-shadow:
+  box-shadow: var(--theme-action-shadow-hover,
     0 14px 26px rgba(237, 71, 125, 0.34),
-    0 0 0 4px rgba(255, 111, 158, 0.14);
+    0 0 0 4px rgba(255, 111, 158, 0.14));
 }

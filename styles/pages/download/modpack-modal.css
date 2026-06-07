@@ -44,7 +44,7 @@
   min-width: 92px;
   height: 40px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.92);
-  color: #f04480;
-  border: 1px solid rgba(255, 95, 145, 0.34);
+  background: var(--modal-surface-white-92, rgba(255, 255, 255, 0.92));
+  color: var(--theme-accent-strong, #f04480);
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.34));
 }

@@ -2,11 +2,11 @@
 :root {
   --oaoi-modal-scale: var(--app-modal-scale, var(--app-ui-scale, 1));
   --window-radius: 16px;
-  --oaoi-modal-overlay-bg: rgba(255, 223, 234, 0.42);
+  --oaoi-modal-overlay-bg: var(--modal-surface-pink-200-42, rgba(255, 223, 234, 0.42));
   --oaoi-modal-surface:
-    radial-gradient(circle at 10% 0%, rgba(255, 221, 233, 0.72), transparent 36%),
-    radial-gradient(circle at 92% 96%, rgba(255, 110, 154, 0.14), transparent 32%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(255, 250, 252, 0.97));
+    radial-gradient(circle at 10% 0%, var(--modal-surface-pink-200-72, rgba(255, 221, 233, 0.72)), transparent 36%),
+    radial-gradient(circle at 92% 96%, var(--modal-surface-accent-14, rgba(255, 110, 154, 0.14)), transparent 32%),
+    linear-gradient(180deg, var(--modal-surface-white-98, rgba(255, 255, 255, 0.98)), var(--modal-surface-pink-100-97, rgba(255, 250, 252, 0.97)));
   --oaoi-modal-border: 1px solid rgba(255, 128, 170, 0.34);
   --oaoi-modal-shadow:
     0 24px 60px rgba(132, 52, 83, 0.18),
