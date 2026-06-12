@@ -78,7 +78,7 @@
   border: none;
   backdrop-filter: blur(var(--blur-radius, 14px));
   box-shadow:
-    0 14px 42px rgba(132, 52, 83, 0.18),
+    0 14px 42px color-mix(in srgb, var(--pink-700) calc(0.18 * 100%), transparent),
     0 0 0 1px rgba(255, 255, 255, 0.42) inset;
 }
 
@@ -110,6 +110,15 @@
   background-position: right 14px center;
 }
 
+.vd-btn:focus {
+  outline: none;
+}
+
+.vd-btn:focus-visible {
+  border-color: var(--pink-500);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink-500) calc(0.24 * 100%), transparent);
+}
+
 .vd-btn span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -136,15 +145,15 @@
   max-height: 175px;
   overflow-y: auto;
   background:
-    radial-gradient(circle at 12% 0%, rgba(255, 221, 233, 0.7), transparent 38%),
+    radial-gradient(circle at 12% 0%, var(--surface-pink-200-70, rgba(255, 221, 233, 0.7)), transparent 38%),
     var(--surface-white-94, rgba(255, 255, 255, 0.94));
   backdrop-filter: blur(var(--blur-radius, 12px));
-  border: 1px solid rgba(255, 128, 170, 0.38);
+  border: 1px solid color-mix(in srgb, var(--pink-500) calc(0.38 * 100%), transparent);
   border-radius: 14px;
   padding: 5px;
   z-index: 999;
   box-shadow:
-    0 14px 34px rgba(132, 52, 83, 0.18),
+    0 14px 34px color-mix(in srgb, var(--pink-700) calc(0.18 * 100%), transparent),
     0 0 0 1px rgba(255, 255, 255, 0.72) inset;
 }
 
@@ -157,7 +166,7 @@
 }
 
 .vd-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 111, 158, 0.45);
+  background: color-mix(in srgb, var(--pink-500) calc(0.45 * 100%), transparent);
   border-radius: 3px;
 }
 
@@ -179,13 +188,13 @@
 }
 
 .vd-item:hover {
-  background: var(--surface-accent-12, rgba(255, 111, 158, 0.12));
-  color: #f04480;
+  background: var(--surface-accent-12, color-mix(in srgb, var(--pink-500) calc(0.12 * 100%), transparent));
+  color: var(--pink-600);
 }
 
 .vd-item.active {
-  background: var(--surface-accent-15, rgba(255, 111, 158, 0.18));
-  color: #f04480;
+  background: var(--surface-accent-15, color-mix(in srgb, var(--pink-500) calc(0.15 * 100%), transparent));
+  color: var(--pink-600);
   font-weight: 800;
 }
 

@@ -55,8 +55,28 @@ async function initWindowControls() {
 
     // 全窗口拖拽：除了原生交互元素和标记了 data-no-drag 的容器
     document.body.addEventListener('mousedown', async (e) => {
+      if (e.button !== 0) return;
+      const nativeNoDrag = 'button, a, input, select, textarea, [contenteditable="true"]';
+      const diySurface = e.target.closest('#pageDiy .diy-scroll');
+      const diyControl = e.target.closest([
+        nativeNoDrag,
+        '.diy-bg-item',
+        '.diy-row',
+        '.diy-slider-row',
+        '.diy-color-row',
+        '.diy-style-grid',
+        '.diy-theme-grid',
+        '.diy-reset-btn'
+      ].join(', '));
+
+      // DIY 滚动区本身有 data-no-drag，单独放开空白和标题区域用于拖动窗口。
+      if (diySurface && !diyControl) {
+        await appWindow.startDragging();
+        return;
+      }
+
       // 原生可交互元素 + data-no-drag 容器内的元素，均不触发拖拽
-      if (e.target.closest('button, a, input, select, textarea, [data-no-drag]')) return;
+      if (e.target.closest(`${nativeNoDrag}, [data-no-drag]`)) return;
       await appWindow.startDragging();
     });
 

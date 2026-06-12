@@ -461,9 +461,21 @@ function initSettings() {
   // 初始化模式
   const savedMode = localStorage.getItem('loginMode') || 'offline';
   setLoginMode(savedMode);
+  if (savedMode === 'offline' && typeof ensureOfflineModeAllowed === 'function') {
+    ensureOfflineModeAllowed({ silent: true }).then(allowed => {
+      if (!allowed) setLoginMode('online');
+      else if (typeof refreshOfflineModeAvailability === 'function') refreshOfflineModeAvailability();
+    });
+  }
 
   // 模式切换点击
-  if (modeOffline) modeOffline.addEventListener('click', () => setLoginMode('offline'));
+  if (modeOffline) modeOffline.addEventListener('click', async () => {
+    if (typeof ensureOfflineModeAllowed === 'function' && !(await ensureOfflineModeAllowed())) {
+      setLoginMode('online');
+      return;
+    }
+    setLoginMode('offline');
+  });
   if (modeOnline) modeOnline.addEventListener('click', () => setLoginMode('online'));
 
   // 内存滑块
@@ -806,19 +818,36 @@ async function callAiApi(apiKey, apiUrl, model, userMessage, signal) {
   if (signal?.aborted) throw new Error('Aborted');
 
   const tauri = await waitForTauri();
+  const requestId = `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const request = tauri.core.invoke('call_ai_api', {
     apiKey,
     apiUrl,
     model: model || 'gpt-3.5-turbo',
-    userMessage
+    userMessage,
+    requestId
   });
 
   if (!signal) return request;
 
-  return Promise.race([
-    request,
-    new Promise((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
-    })
-  ]);
+  const cancelBackend = () => {
+    tauri.core.invoke('cancel_ai_api', { requestId }).catch(() => {});
+  };
+  if (signal.aborted) {
+    cancelBackend();
+    throw new Error('Aborted');
+  }
+  let abortHandler;
+  const abortPromise = new Promise((_, reject) => {
+    abortHandler = () => {
+      cancelBackend();
+      reject(new Error('Aborted'));
+    };
+    signal.addEventListener('abort', abortHandler, { once: true });
+  });
+
+  try {
+    return await Promise.race([request, abortPromise]);
+  } finally {
+    if (abortHandler) signal.removeEventListener('abort', abortHandler);
+  }
 }

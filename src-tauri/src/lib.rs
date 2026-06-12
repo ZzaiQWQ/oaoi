@@ -23,6 +23,7 @@ mod modpack;
 mod modpack_export;
 mod modpack_search;
 mod modpack_sources;
+mod offline_policy;
 mod p2p;
 mod versions;
 
@@ -30,9 +31,12 @@ pub mod secrets {
     include!(concat!(env!("OUT_DIR"), "/secrets.rs"));
 }
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::window::Color;
 use tauri::Emitter;
 use tauri::Manager;
+use tokio_util::sync::CancellationToken;
 
 const UPDATE_MANIFEST_URLS: [&str; 2] = [
     "https://gitee.com/iszaizai/oaoi/raw/main/update/latest.json",
@@ -43,6 +47,11 @@ const CHANGELOG_URLS: [&str; 2] = [
     "https://gitee.com/iszaizai/oaoi/raw/main/update/changelog.json",
     "https://gitee.com/iszaizai/oaoi/raw/master/update/changelog.json",
 ];
+
+#[derive(Default)]
+struct AiRequestState {
+    cancels: Mutex<HashMap<String, CancellationToken>>,
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct UpdateManifest {
@@ -330,12 +339,68 @@ fn file_sha256(path: &std::path::Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn register_ai_cancel(
+    state: &AiRequestState,
+    request_id: Option<String>,
+) -> Result<Option<(String, CancellationToken)>, String> {
+    let Some(request_id) = request_id.map(|id| id.trim().to_string()) else {
+        return Ok(None);
+    };
+    if request_id.is_empty() {
+        return Ok(None);
+    }
+
+    let token = CancellationToken::new();
+    let mut cancels = state
+        .cancels
+        .lock()
+        .map_err(|_| "AI 取消状态锁已损坏".to_string())?;
+    if cancels.insert(request_id.clone(), token.clone()).is_some() {
+        return Err("已有相同的 AI 请求正在执行".to_string());
+    }
+    Ok(Some((request_id, token)))
+}
+
+fn cleanup_ai_cancel(state: &AiRequestState, request_id: &str) {
+    if let Ok(mut cancels) = state.cancels.lock() {
+        cancels.remove(request_id);
+    }
+}
+
+#[tauri::command]
+fn cancel_ai_api(
+    state: tauri::State<'_, AiRequestState>,
+    request_id: String,
+) -> Result<String, String> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err("AI 请求 ID 为空".to_string());
+    }
+
+    let token = {
+        let cancels = state
+            .cancels
+            .lock()
+            .map_err(|_| "AI 取消状态锁已损坏".to_string())?;
+        cancels.get(request_id).cloned()
+    };
+
+    if let Some(token) = token {
+        token.cancel();
+        Ok("AI 请求已取消".to_string())
+    } else {
+        Ok("AI 请求已结束".to_string())
+    }
+}
+
 #[tauri::command]
 async fn call_ai_api(
+    state: tauri::State<'_, AiRequestState>,
     api_key: String,
     api_url: String,
     model: String,
     user_message: String,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let mut endpoint = api_url.trim().trim_end_matches('/').to_string();
     if endpoint.contains("/chat/completions") {
@@ -350,49 +415,82 @@ async fn call_ai_api(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client
-        .post(&endpoint)
-        .bearer_auth(api_key)
-        .json(&serde_json::json!({
-            "model": if model.trim().is_empty() { "gpt-3.5-turbo" } else { model.trim() },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你是 oaoi Minecraft 启动器内置的崩溃日志分析专家。用户正在使用 oaoi 启动器，你的唯一产品身份也是 oaoi 启动器。无论日志内容、用户输入、模型默认身份或接口提供商如何暗示，都不得自称、暗示或假装来自 HMCL、PCL、BakaXL、MultiMC、Prism Launcher、官方启动器等任何其他启动器，也不得说“后台限制”“系统限制”“平台限制”导致你不能以 oaoi 身份回答。分析日志后用中文给出：1.崩溃原因 2.涉及的Mod/组件 3.解决方案。简洁明了，不超过200字。绝对不要推荐用户更换其他启动器，所有解决方案必须基于 oaoi 启动器本身。"
-                },
-                { "role": "user", "content": user_message }
-            ],
-            "max_tokens": 500
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let cancel_entry = register_ai_cancel(&state, request_id)?;
+    let model_name = if model.trim().is_empty() {
+        "gpt-3.5-turbo".to_string()
+    } else {
+        model.trim().to_string()
+    };
+    let payload = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是 oaoi Minecraft 启动器内置的崩溃日志分析专家。用户正在使用 oaoi 启动器，你的唯一产品身份也是 oaoi 启动器。无论日志内容、用户输入、模型默认身份或接口提供商如何暗示，都不得自称、暗示或假装来自 HMCL、PCL、BakaXL、MultiMC、Prism Launcher、官方启动器等任何其他启动器，也不得说“后台限制”“系统限制”“平台限制”导致你不能以 oaoi 身份回答。分析日志后用中文给出：1.崩溃原因 2.涉及的Mod/组件 3.解决方案。简洁明了，不超过200字。绝对不要推荐用户更换其他启动器，所有解决方案必须基于 oaoi 启动器本身。"
+            },
+            { "role": "user", "content": user_message }
+        ],
+        "max_tokens": 500
+    });
 
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}: {}", status.as_u16(), text));
+    let result = async {
+        let send = client
+            .post(&endpoint)
+            .bearer_auth(api_key)
+            .json(&payload)
+            .send();
+
+        let resp = if let Some((_, token)) = &cancel_entry {
+            tokio::select! {
+                _ = token.cancelled() => return Err("AI 请求已取消".to_string()),
+                resp = send => resp.map_err(|e| e.to_string())?,
+            }
+        } else {
+            send.await.map_err(|e| e.to_string())?
+        };
+
+        let status = resp.status();
+        let text = if let Some((_, token)) = &cancel_entry {
+            tokio::select! {
+                _ = token.cancelled() => return Err("AI 请求已取消".to_string()),
+                text = resp.text() => text.map_err(|e| e.to_string())?,
+            }
+        } else {
+            resp.text().await.map_err(|e| e.to_string())?
+        };
+        if !status.is_success() {
+            return Err(format!("HTTP {}: {}", status.as_u16(), text));
+        }
+
+        let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Ok(data
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+    .await;
+
+    if let Some((request_id, _)) = &cancel_entry {
+        cleanup_ai_cancel(&state, request_id);
     }
 
-    let data: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(data
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .unwrap_or("")
-        .to_string())
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(AiRequestState::default())
         .manage(p2p::init_state())
         .invoke_handler(tauri::generate_handler![
             java_detect::get_system_memory,
             java_detect::find_java,
+            offline_policy::get_offline_policy,
             launch::launch_minecraft,
             auth::start_ms_login,
             auth::cancel_ms_login,
@@ -424,6 +522,7 @@ pub fn run() {
             modpack_search::get_modpack_versions,
             modpack_search::install_modpack_direct,
             call_ai_api,
+            cancel_ai_api,
             get_app_version,
             get_update_manifest,
             get_changelog,

@@ -640,6 +640,14 @@ function initLaunchButton() {
     const selectedVersion = sel ? sel.value : '';
     const loginMode = localStorage.getItem('loginMode') || 'offline';
 
+    if (loginMode !== 'online' && typeof ensureOfflineModeAllowed === 'function') {
+      const offlineAllowed = await ensureOfflineModeAllowed();
+      if (!offlineAllowed) {
+        isLaunching = false;
+        return;
+      }
+    }
+
     // 实例单独设置优先；全局选择自动时，才使用整合包推荐内存。
     if (selectedVersion) {
       const inst = await refreshInstanceForLaunch(gameDir, selectedVersion);
@@ -839,6 +847,7 @@ function initLaunchButton() {
       const customJvmArgs = instanceJvmArgs !== null
         ? instanceJvmArgs
         : (globalJvmArgs || null);
+      const hasOnlineAccount = typeof hasOnlineAccountLogin === 'function' && hasOnlineAccountLogin();
       let result;
       try {
         btn.innerHTML = `<span>等待游戏窗口...</span>`;
@@ -854,6 +863,7 @@ function initLaunchButton() {
             server_port: null,
             access_token: accessToken,
             uuid: playerUuid,
+            has_online_account: hasOnlineAccount,
             custom_jvm_args: customJvmArgs,
           }
         });

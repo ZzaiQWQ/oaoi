@@ -1235,7 +1235,7 @@ function renderOnlineResults(results, query) {
     if (isChinese) {
       listEl.querySelector('.mcmod-search-link')?.addEventListener('click', (e) => {
         e.preventDefault();
-        window.open(`https://search.mcmod.cn/s?key=${encodeURIComponent(query)}&filter=1`, '_blank');
+        openExternalUrl(`https://search.mcmod.cn/s?key=${encodeURIComponent(query)}&filter=1`);
       });
     }
     return;
@@ -1409,11 +1409,6 @@ function initInstanceDetailPage() {
   document.getElementById('modRefreshBtn')?.addEventListener('click', () => loadModList());
 
   // 实例独立设置
-  document.getElementById('instanceJavaMode')?.addEventListener('change', updateInstanceJavaPathState);
-  document.getElementById('instanceUseGlobalJavaBtn')?.addEventListener('click', () => {
-    const input = document.getElementById('instanceJavaPathInput');
-    if (input) input.value = localStorage.getItem('selectedJavaPath') || '';
-  });
   document.getElementById('instanceConfigBtn')?.addEventListener('click', showInstanceSettingsModal);
 
   // 在线搜索
@@ -1452,7 +1447,7 @@ function initInstanceDetailPage() {
       if (!confirmed) return;
       const tauri = await waitForTauri();
       await tauri.core.invoke('delete_version', { gameDir, name: currentDetailInstance });
-      ['mem', 'javaMode', 'javaPath', 'jvmArgs'].forEach(prefix => {
+      ['mem', 'javaMode', 'javaPath', 'jvmArgs', 'jvmPreset'].forEach(prefix => {
         localStorage.removeItem(instanceSettingKey(prefix));
       });
       // 只有同版本同loader的最后一个实例删除时才清缓存

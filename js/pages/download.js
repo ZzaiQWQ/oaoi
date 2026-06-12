@@ -13,15 +13,16 @@ function initDownloadPage() {
   let nameCheckToken = 0;
   let validateInstanceName = async () => true;
 
-  // 只按正式版号判断 Loader 下限，旧版和快照默认不展示新加载器。
-  function parseReleaseVersion(version) {
-    const match = String(version || '').match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
+  // 快照和预发布先放开选择，真正有没有 Loader 版本交给后端接口判断。
+  function parseComparableVersion(version) {
+    const raw = String(version || '').trim();
+    const match = raw.match(/^(\d+)\.(\d+)(?:\.(\d+))?(?:-(?:pre|rc)[.-]?\d+)?$/i);
     if (!match) return null;
     return [Number(match[1]), Number(match[2]), Number(match[3] || 0)];
   }
 
-  function isReleaseAtLeast(version, major, minor, patch = 0) {
-    const parsed = parseReleaseVersion(version);
+  function isVersionAtLeast(version, major, minor, patch = 0) {
+    const parsed = parseComparableVersion(version);
     if (!parsed) return false;
     const target = [major, minor, patch];
     for (let i = 0; i < 3; i++) {
@@ -30,10 +31,15 @@ function initDownloadPage() {
     return true;
   }
 
+  function isModernSnapshot(version) {
+    return /^\d{2}w\d{2}[a-z]$/i.test(String(version || '').trim());
+  }
+
   function isLoaderSupported(loader, mcVersion) {
     if (loader === 'vanilla' || loader === 'forge') return true;
-    if (loader === 'fabric' || loader === 'quilt') return isReleaseAtLeast(mcVersion, 1, 14);
-    if (loader === 'neoforge') return isReleaseAtLeast(mcVersion, 1, 20, 1);
+    if (isModernSnapshot(mcVersion)) return true;
+    if (loader === 'fabric' || loader === 'quilt') return isVersionAtLeast(mcVersion, 1, 14);
+    if (loader === 'neoforge') return isVersionAtLeast(mcVersion, 1, 20, 1);
     return false;
   }
 

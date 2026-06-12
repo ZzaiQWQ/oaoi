@@ -26,6 +26,7 @@ pub struct LaunchOptions {
     pub server_port: Option<u16>,
     pub access_token: Option<String>,
     pub uuid: Option<String>,
+    pub has_online_account: Option<bool>,
     pub custom_jvm_args: Option<String>,
 }
 
@@ -516,6 +517,12 @@ fn do_launch_minecraft(
     options: LaunchOptions,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
+    crate::offline_policy::ensure_launch_allowed(
+        options.access_token.as_deref(),
+        options.uuid.as_deref(),
+        options.has_online_account.unwrap_or(false),
+    )?;
+
     let game_dir = resolve_game_dir(&options.game_dir);
     if !game_dir.exists() {
         return Err("游戏目录不存在".to_string());
