@@ -2,16 +2,21 @@ use crate::instance::{
     cf_api_key, detect_loader, resolve_game_dir, safe_join, safe_path_name, version_dir,
     version_json_path,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 use crate::modpack::{sanitize_name, strip_modpack_archive_suffix};
-use crate::modpack_sources::load_source_index;
+use crate::modpack_sources::safe_index_name;
+use crate::mod_update::{load_cached_mrpack_downloads, MrpackDownloadCacheEntry};
+
+const MOD_UPDATE_CACHE_DIR: &str = "launcher-data";
+const MOD_UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +65,32 @@ struct CfResolved {
     project_id: u32,
     file_id: u32,
     downloads: Vec<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportModUpdateCache {
+    #[serde(default)]
+    files: HashMap<String, ExportCachedModFile>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportCachedModFile {
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    rel: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    modified_ms: u64,
+    #[serde(default)]
+    sha1: Option<String>,
+    #[serde(default)]
+    curseforge_project_id: Option<u32>,
+    #[serde(default)]
+    curseforge_file_id: Option<u32>,
 }
 
 #[tauri::command]
@@ -195,18 +226,41 @@ fn export_modpack_blocking(
                 100,
                 "Scanning selected files...",
             );
-            let candidates = collect_package_files(app_handle, name, &inst_dir, &selected_paths)?;
+            let cached_mrpack_downloads =
+                load_cached_mrpack_downloads(&game_root, &safe_name, &mc_version, &loader_type);
+            let package_paths = collect_package_paths(&inst_dir, &selected_paths)?;
+            let (candidates, mut mr_matches) = collect_mrpack_candidates_with_cache(
+                app_handle,
+                name,
+                package_paths,
+                &cached_mrpack_downloads,
+            )?;
             let cached_cf_matches =
                 load_cached_curseforge_matches(&game_root, &safe_name, &candidates);
             emit_export_progress(
                 app_handle,
                 name,
-                "lookup",
+                "cache",
                 20,
                 100,
-                "Checking Modrinth files...",
+                "Reading cached platform links...",
             );
-            let mr_matches = lookup_modrinth_hashes(&http, &candidates);
+            let mr_candidates: Vec<FileCandidate> = candidates
+                .iter()
+                .filter(|item| !mr_matches.contains_key(&item.sha1))
+                .cloned()
+                .collect();
+            if !mr_candidates.is_empty() {
+                emit_export_progress(
+                    app_handle,
+                    name,
+                    "lookup",
+                    30,
+                    100,
+                    "Checking Modrinth fallback files...",
+                );
+                mr_matches.extend(lookup_modrinth_hashes(&http, &mr_candidates));
+            }
             let cf_candidates: Vec<FileCandidate> = candidates
                 .iter()
                 .filter(|item| {
@@ -215,7 +269,7 @@ fn export_modpack_blocking(
                 })
                 .cloned()
                 .collect();
-            let mut cf_matches = cached_cf_matches.clone();
+            let mut cf_matches = cached_cf_matches;
             if !cf_candidates.is_empty() {
                 emit_export_progress(
                     app_handle,
@@ -260,24 +314,23 @@ fn export_modpack_blocking(
                 "Reading cached file sources...",
             );
             let package_files = collect_package_paths(&inst_dir, &selected_paths)?;
-            let cached_cf_matches =
-                load_cached_curseforge_matches_for_paths(&game_root, &safe_name, &package_files);
-            let cf_candidates: Vec<PackageFile> = package_files
+            let mut cf_matches =
+                load_cached_curseforge_matches_for_packages(&game_root, &safe_name, &package_files)?;
+            let fallback_paths: Vec<PackageFile> = package_files
                 .iter()
-                .filter(|item| !cached_cf_matches.contains_key(&item.rel))
+                .filter(|item| !cf_matches.contains_key(&item.rel))
                 .cloned()
                 .collect();
-            let fallback_candidates = hash_package_paths(app_handle, name, cf_candidates)?;
-            emit_export_progress(
-                app_handle,
-                name,
-                "lookup",
-                25,
-                100,
-                "Checking CurseForge files...",
-            );
-            let mut cf_matches = cached_cf_matches;
-            if !fallback_candidates.is_empty() {
+            if !fallback_paths.is_empty() {
+                emit_export_progress(
+                    app_handle,
+                    name,
+                    "lookup",
+                    25,
+                    100,
+                    "Checking missing CurseForge IDs...",
+                );
+                let fallback_candidates = hash_package_paths(app_handle, name, fallback_paths)?;
                 let fallback_matches = lookup_curseforge_fingerprints(&http, &fallback_candidates);
                 for item in &fallback_candidates {
                     if let Some(cf) = fallback_matches.get(&item.sha1) {
@@ -526,16 +579,6 @@ fn export_curseforge_pack(
     })
 }
 
-fn collect_package_files(
-    app_handle: &tauri::AppHandle,
-    name: &str,
-    inst_dir: &Path,
-    selected_paths: &HashSet<String>,
-) -> Result<Vec<FileCandidate>, String> {
-    let package_paths = collect_package_paths(inst_dir, selected_paths)?;
-    hash_package_paths(app_handle, name, package_paths)
-}
-
 fn collect_package_paths(
     inst_dir: &Path,
     selected_paths: &HashSet<String>,
@@ -568,6 +611,116 @@ fn collect_package_paths(
     }
     out.sort_by(|a, b| a.rel.to_lowercase().cmp(&b.rel.to_lowercase()));
     Ok(out)
+}
+
+fn collect_mrpack_candidates_with_cache(
+    app_handle: &tauri::AppHandle,
+    name: &str,
+    package_paths: Vec<PackageFile>,
+    cached: &HashMap<String, MrpackDownloadCacheEntry>,
+) -> Result<(Vec<FileCandidate>, HashMap<String, MrResolved>), String> {
+    let total = package_paths.len().max(1);
+    let mut out = Vec::new();
+    let mut matches = HashMap::new();
+    let mut needs_hash = Vec::new();
+
+    for (index, package) in package_paths.into_iter().enumerate() {
+        let progress = 5 + ((index + 1) * 15 / total);
+        emit_export_progress(
+            app_handle,
+            name,
+            "scan",
+            progress,
+            100,
+            &format!("Reading cached file links... {}/{}", index + 1, total),
+        );
+        let metadata = std::fs::metadata(&package.path).map_err(|e| e.to_string())?;
+        let size = metadata.len();
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .map(system_time_ms)
+            .unwrap_or_default();
+        if let Some(candidate) = cached_mrpack_candidate(&package, cached, size, modified_ms)? {
+            if let Some(entry) = cached.get(&package.rel) {
+                matches.insert(
+                    candidate.sha1.clone(),
+                    MrResolved {
+                        downloads: entry.downloads.clone(),
+                    },
+                );
+            }
+            out.push(candidate);
+        } else {
+            needs_hash.push(package);
+        }
+    }
+
+    let hashed = hash_package_paths(app_handle, name, needs_hash)?;
+    for item in hashed {
+        if let Some(entry) = cached.get(&item.rel) {
+            if entry.size == item.size
+                && entry.sha1.eq_ignore_ascii_case(&item.sha1)
+                && !entry.downloads.is_empty()
+            {
+                matches.insert(
+                    item.sha1.clone(),
+                    MrResolved {
+                        downloads: entry.downloads.clone(),
+                    },
+                );
+            }
+        }
+        out.push(item);
+    }
+    out.sort_by(|a, b| a.rel.to_lowercase().cmp(&b.rel.to_lowercase()));
+    Ok((out, matches))
+}
+
+fn cached_mrpack_candidate(
+    package: &PackageFile,
+    cached: &HashMap<String, MrpackDownloadCacheEntry>,
+    size: u64,
+    modified_ms: u64,
+) -> Result<Option<FileCandidate>, String> {
+    let Some(entry) = cached.get(&package.rel) else {
+        return Ok(None);
+    };
+    if entry.size != size || entry.modified_ms != modified_ms || entry.downloads.is_empty() {
+        return Ok(None);
+    }
+    let sha512 = match entry.sha512.clone() {
+        Some(value) => value,
+        None => hash_sha512_file(&package.path)?,
+    };
+    Ok(Some(FileCandidate {
+        rel: package.rel.clone(),
+        size,
+        sha1: entry.sha1.clone(),
+        sha512,
+        cf_fingerprint: entry.fingerprint.unwrap_or_default(),
+    }))
+}
+
+fn system_time_ms(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
+fn hash_sha512_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut sha512 = Sha512::new();
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        sha512.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", sha512.finalize()))
 }
 
 fn hash_package_paths(
@@ -612,35 +765,36 @@ fn load_cached_curseforge_matches(
     instance_name: &str,
     candidates: &[FileCandidate],
 ) -> HashMap<String, CfResolved> {
-    let index = load_source_index(game_root, instance_name);
+    let Some(cache) = load_export_mod_update_cache(game_root, instance_name) else {
+        return HashMap::new();
+    };
     let by_rel: HashMap<String, &FileCandidate> = candidates
         .iter()
         .map(|item| (item.rel.replace('\\', "/"), item))
         .collect();
     let mut out = HashMap::new();
 
-    for (rel, source) in index.files {
-        if source.source != "curseforge" {
-            continue;
-        }
+    for file in cache.files.into_values() {
+        let rel = file.rel.replace('\\', "/");
         let Some(candidate) = by_rel.get(&rel) else {
             continue;
         };
-        if source
-            .sha1
-            .as_deref()
-            .is_some_and(|sha1| !sha1.eq_ignore_ascii_case(&candidate.sha1))
-        {
-            continue;
-        }
-        let (Some(project_id), Some(file_id)) = (source.project_id, source.file_id) else {
+        let Some(source_sha1) = file.sha1.as_deref() else {
             continue;
         };
-        let file_name = source
-            .file_name
-            .as_deref()
-            .or_else(|| candidate.rel.rsplit('/').next())
-            .unwrap_or("");
+        if !source_sha1.eq_ignore_ascii_case(&candidate.sha1) {
+            continue;
+        }
+        let (Some(project_id), Some(file_id)) =
+            (file.curseforge_project_id, file.curseforge_file_id)
+        else {
+            continue;
+        };
+        let file_name = if file.file_name.is_empty() {
+            candidate.rel.rsplit('/').next().unwrap_or("")
+        } else {
+            file.file_name.as_str()
+        };
         let downloads = curseforge_download_candidates(file_id as u64, file_name, "");
         out.insert(
             candidate.sha1.clone(),
@@ -655,41 +809,57 @@ fn load_cached_curseforge_matches(
     out
 }
 
-fn load_cached_curseforge_matches_for_paths(
+fn load_cached_curseforge_matches_for_packages(
     game_root: &Path,
     instance_name: &str,
     package_files: &[PackageFile],
-) -> HashMap<String, CfResolved> {
-    let index = load_source_index(game_root, instance_name);
-    let rels: HashSet<String> = package_files
+) -> Result<HashMap<String, CfResolved>, String> {
+    let Some(cache) = load_export_mod_update_cache(game_root, instance_name) else {
+        return Ok(HashMap::new());
+    };
+    let by_rel: HashMap<String, &PackageFile> = package_files
         .iter()
-        .map(|item| item.rel.replace('\\', "/"))
+        .map(|item| (item.rel.replace('\\', "/"), item))
         .collect();
     let mut out = HashMap::new();
 
-    for (rel, source) in index.files {
-        if source.source != "curseforge" || !rels.contains(&rel) {
-            continue;
-        }
-        let (Some(project_id), Some(file_id)) = (source.project_id, source.file_id) else {
+    for file in cache.files.into_values() {
+        let rel = file.rel.replace('\\', "/");
+        let Some(package) = by_rel.get(&rel) else {
             continue;
         };
-        let file_name = source
-            .file_name
-            .clone()
-            .or_else(|| rel.rsplit('/').next().map(|value| value.to_string()))
+        let (Some(project_id), Some(file_id)) =
+            (file.curseforge_project_id, file.curseforge_file_id)
+        else {
+            continue;
+        };
+        let metadata = std::fs::metadata(&package.path).map_err(|err| err.to_string())?;
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .map(system_time_ms)
             .unwrap_or_default();
+        // CF 导出缓存命中只看本地文件指纹级元数据，避免全量重新 hash。
+        if file.size != metadata.len() || file.modified_ms != modified_ms {
+            continue;
+        }
+        let file_name = if file.file_name.is_empty() {
+            package.rel.rsplit('/').next().unwrap_or("")
+        } else {
+            file.file_name.as_str()
+        };
+        let downloads = curseforge_download_candidates(file_id as u64, file_name, "");
         out.insert(
-            rel,
+            package.rel.clone(),
             CfResolved {
                 project_id,
                 file_id,
-                downloads: curseforge_download_candidates(file_id as u64, &file_name, ""),
+                downloads,
             },
         );
     }
 
-    out
+    Ok(out)
 }
 
 fn get_modpack_export_items_blocking(
@@ -964,6 +1134,10 @@ fn hash_package_file(path: &Path) -> Result<(String, String, u32, u64), String> 
     ))
 }
 
+pub(crate) fn hash_update_candidate(path: &Path) -> Result<(String, String, u32, u64), String> {
+    hash_package_file(path)
+}
+
 fn lookup_modrinth_hashes(
     http: &reqwest::blocking::Client,
     candidates: &[FileCandidate],
@@ -997,7 +1171,7 @@ fn lookup_modrinth_hashes(
                 for file in files {
                     if file["hashes"]["sha1"].as_str() == Some(hash.as_str()) {
                         if let Some(url) = file["url"].as_str() {
-                            downloads.push(url.to_string());
+                            push_unique_url(&mut downloads, url.to_string());
                         }
                     }
                 }
@@ -1008,6 +1182,19 @@ fn lookup_modrinth_hashes(
         }
     }
     out
+}
+
+fn load_export_mod_update_cache(
+    game_root: &Path,
+    instance_name: &str,
+) -> Option<ExportModUpdateCache> {
+    let path = game_root
+        .join(MOD_UPDATE_CACHE_DIR)
+        .join(MOD_UPDATE_CACHE_SUBDIR)
+        .join(format!("{}.json", safe_index_name(instance_name)));
+    let data = std::fs::read_to_string(path).ok()?;
+    // CF 导出只信更新缓存里带 sha1 的 ID，避免同名文件串到旧结果。
+    serde_json::from_str(&data).ok()
 }
 
 fn lookup_curseforge_fingerprints(
@@ -1090,6 +1277,12 @@ fn lookup_curseforge_fingerprints(
                 .position(|item| class_by_project.get(&item.project_id) == Some(expected_class))
             {
                 out.insert(sha, matches.remove(index));
+                continue;
+            }
+            if matches
+                .iter()
+                .any(|item| class_by_project.contains_key(&item.project_id))
+            {
                 continue;
             }
         }
@@ -1331,7 +1524,11 @@ fn write_bytes(zip: &mut zip::ZipWriter<File>, path: &str, data: &[u8]) -> Resul
 
 fn should_skip_override_file(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower.starts_with('.') || lower.ends_with(".tmp") || lower.ends_with(".download")
+    // 禁用的 Mod 不允许进入导出包，避免 overrides 把 .jar.disabled 带出去。
+    lower.starts_with('.')
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".download")
+        || lower.ends_with(".disabled")
 }
 
 fn read_instance_json(inst_dir: &Path, name: &str) -> Result<serde_json::Value, String> {

@@ -801,6 +801,8 @@
                   <button class="mod-tab active" data-tab="installed" id="modTabInstalled">已安装 <span class="mod-count"
                       id="modCount">0</span></button>
                   <button class="mod-tab" data-tab="online" id="modTabOnline">在线搜索</button>
+                  <button class="mod-tab" data-tab="updates" id="modTabUpdates">可更新 <span class="mod-count"
+                      id="modUpdateCount">0</span></button>
                 </div>
                 <div class="online-category-tabs" id="onlineCategoryTabs">
                   <button class="online-cat-btn active" data-type="mod">Mod</button>
@@ -817,6 +819,17 @@
                 </div>
                 <div class="mod-list" id="modList">
                   <div class="mod-list-empty">加载中...</div>
+                </div>
+              </div>
+
+              <!-- 可更新 Tab -->
+              <div class="mod-tab-content" id="modTabUpdatesContent">
+                <div class="mod-update-toolbar">
+                  <span id="modUpdateStatus">只显示需要更新的 Mod</span>
+                  <button class="mod-bulk-update-btn" id="modBulkUpdateBtn" type="button">一键更新</button>
+                </div>
+                <div class="mod-update-list" id="modUpdateList">
+                  <div class="mod-list-empty">正在读取更新缓存...</div>
                 </div>
               </div>
 

@@ -1,5 +1,4 @@
 use crate::instance::{cf_api_key, resolve_game_dir, safe_path_name, version_dir};
-use crate::modpack_sources::{save_source_entry, SourceEntry};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -67,7 +66,7 @@ pub async fn download_online_mod(
     result.map_err(|e| format!("任务失败: {}", e))?
 }
 
-fn get_online_mod_versions_blocking(
+pub(crate) fn get_online_mod_versions_blocking(
     project_id: &str,
     loader: &str,
     project_type: &str,
@@ -694,11 +693,21 @@ fn curseforge_download_candidates(
     file_name: &str,
     api_download_url: &str,
 ) -> Vec<String> {
-    let mut urls = curseforge_cdn_urls(file_id, file_name);
+    let mut urls = Vec::new();
+    for url in curseforge_cdn_urls(file_id, file_name) {
+        push_unique_download_url(&mut urls, url);
+    }
     if !api_download_url.is_empty() {
-        urls.push(api_download_url.to_string());
+        push_unique_download_url(&mut urls, api_download_url.to_string());
     }
     urls
+}
+
+fn push_unique_download_url(urls: &mut Vec<String>, url: String) {
+    let normalized = url.trim();
+    if !normalized.is_empty() && !urls.iter().any(|existing| existing == normalized) {
+        urls.push(normalized.to_string());
+    }
 }
 
 fn do_download_to_dir_with_fallbacks(
@@ -726,50 +735,6 @@ fn do_download_to_dir_with_fallbacks(
     } else {
         last_err
     })
-}
-
-fn save_curseforge_download_source(
-    game_dir: &str,
-    name: &str,
-    sub_dir: &str,
-    file_name: &str,
-    project_id: &str,
-    file_id: u64,
-) {
-    let Ok(safe_name) = safe_path_name(name, "version name") else {
-        return;
-    };
-    let Ok(safe_file_name) = safe_path_name(file_name, "file name") else {
-        return;
-    };
-    let Ok(project_id) = project_id.parse::<u32>() else {
-        return;
-    };
-    let Ok(file_id) = u32::try_from(file_id) else {
-        return;
-    };
-    let game_root = resolve_game_dir(game_dir);
-    let rel = format!("{}/{}", sub_dir, safe_file_name);
-    if let Err(e) = save_source_entry(
-        &game_root,
-        &safe_name,
-        SourceEntry {
-            source: "curseforge".to_string(),
-            path: rel,
-            project_id: Some(project_id),
-            file_id: Some(file_id),
-            class_id: match sub_dir {
-                "mods" => Some(6),
-                "resourcepacks" => Some(12),
-                "shaderpacks" => Some(6552),
-                _ => None,
-            },
-            sha1: None,
-            file_name: Some(safe_file_name),
-        },
-    ) {
-        eprintln!("[cf] save source metadata failed: {}", e);
-    }
 }
 
 fn download_from_curseforge(
@@ -839,7 +804,6 @@ fn download_from_curseforge(
         Some(cancel_name),
     )?;
     push_downloaded_mod_path(&mut downloaded_mod_paths, sub_dir, file_name);
-    save_curseforge_download_source(game_dir, name, sub_dir, file_name, cf_id, file_id);
 
     // 检查 CurseForge 前置依赖
     let mut dep_names: Vec<String> = Vec::new();
@@ -1030,14 +994,6 @@ fn download_curseforge_dependency_file(
             Some(cancel_name),
         )
         .map_err(|e| format!("下载前置失败 {}: {}", dep_fname, e))?;
-        save_curseforge_download_source(
-            game_dir,
-            name,
-            "mods",
-            dep_fname,
-            &dep_mod_id.to_string(),
-            dep_file_id,
-        );
         eprintln!("[cf_dep] 已下载前置: {}", dep_fname);
         dep_names.push(dep_fname.to_string());
     }

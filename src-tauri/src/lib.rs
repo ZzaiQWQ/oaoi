@@ -18,6 +18,7 @@ mod mod_analyzer;
 mod mod_download;
 mod mod_manager;
 mod mod_search;
+mod mod_update;
 mod modcn;
 mod modpack;
 mod modpack_export;
@@ -506,13 +507,20 @@ pub fn run() {
             instance::open_url,
             instance::cancel_modpack_install,
             mod_manager::list_mods,
+            mod_manager::stream_mods,
             mod_manager::toggle_mod,
             mod_manager::delete_mod,
-            mod_manager::lookup_mod_urls,
             mod_analyzer::analyze_instance_mods,
             mod_search::search_online_mods,
             mod_download::get_online_mod_versions,
             mod_download::download_online_mod,
+            mod_update::get_mod_update_cache,
+            mod_update::warm_mod_update_cache,
+            mod_update::update_mods_from_cache,
+            mod_update::list_old_mod_backups,
+            mod_update::delete_old_mod_backups,
+            mod_update::list_mod_update_rollbacks,
+            mod_update::rollback_mod_updates,
             java_download::download_java,
             java_download::cancel_java_download,
             modpack::import_modpack,

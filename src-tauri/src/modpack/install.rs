@@ -10,7 +10,7 @@ use crate::instance::{
     cf_api_key, install_download_pool, register_download_manager, safe_join, safe_path_name,
     strip_launcher_private_version_fields, version_json_path,
 };
-use crate::modpack_sources::{save_source_entry, sha1_from_curseforge_hashes, SourceEntry};
+use crate::modpack_sources::sha1_from_curseforge_hashes;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,7 +22,6 @@ struct ModpackDownloadTask {
     urls: Vec<String>,
     dest: std::path::PathBuf,
     sha1: Option<String>,
-    source: Option<SourceEntry>,
 }
 
 struct CategoryCounter {
@@ -83,7 +82,6 @@ fn classify_modpack_path(dest: &Path) -> &'static str {
 struct ModpackTaskInfo {
     category: String,
     first_url: String,
-    source: Option<SourceEntry>,
 }
 
 fn modpack_download_options() -> DownloadEngineOptions {
@@ -142,8 +140,6 @@ fn is_cancel_related_error(error: &str) -> bool {
 fn download_modpack_tasks_with_engine(
     tasks: Vec<ModpackDownloadTask>,
     categories: Arc<HashMap<String, CategoryCounter>>,
-    game_dir: PathBuf,
-    inst_name: String,
     cancel_name: String,
 ) -> Result<(), ModpackDownloadError> {
     if tasks.is_empty() {
@@ -160,7 +156,6 @@ fn download_modpack_tasks_with_engine(
             ModpackTaskInfo {
                 category: classify_modpack_path(&task.dest).to_string(),
                 first_url,
-                source: task.source.clone(),
             },
         );
         requests.push(request);
@@ -202,16 +197,7 @@ fn download_modpack_tasks_with_engine(
     let mut errors = Vec::new();
     for outcome in outcomes {
         match outcome {
-            DownloadOutcome::Finished(result) => {
-                if let Some(source) = info_by_id
-                    .get(&result.request_id)
-                    .and_then(|info| info.source.clone())
-                {
-                    if let Err(e) = save_source_entry(&game_dir, &inst_name, source) {
-                        eprintln!("[modpack] save source metadata failed: {}", e);
-                    }
-                }
-            }
+            DownloadOutcome::Finished(_) => {}
             DownloadOutcome::Failed {
                 request_id, error, ..
             } => {
@@ -336,12 +322,6 @@ fn resolve_curseforge_file_task(
         );
     }
     let dest = target_dir.join(&file_name);
-    let rel = dest
-        .strip_prefix(inst_dir)
-        .ok()
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| file_name.clone());
-
     let mut urls = with_mod_mirrors(cf_cdn_urls(file_id, &file_name));
     if let Some(download_url) = item["downloadUrl"]
         .as_str()
@@ -378,15 +358,6 @@ fn resolve_curseforge_file_task(
         urls,
         dest,
         sha1: sha1.clone(),
-        source: Some(SourceEntry {
-            source: "curseforge".to_string(),
-            path: rel,
-            project_id: Some(project_id),
-            file_id: Some(file_id),
-            class_id,
-            sha1,
-            file_name: Some(file_name),
-        }),
     })
 }
 
@@ -446,7 +417,6 @@ fn resolve_curseforge_blind_file_task(
                 urls: resolved_urls,
                 dest,
                 sha1: None,
-                source: None,
             });
         }
     }
@@ -600,7 +570,6 @@ pub fn do_install_modpack_inner(
                         urls: with_mod_mirrors(f.urls.clone()),
                         dest,
                         sha1: f.sha1.clone(),
-                        source: None,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
@@ -751,12 +720,6 @@ pub fn do_install_modpack_inner(
                                                 );
                                             }
                                             let dest = target_dir.join(&fname);
-                                            let rel = dest
-                                                .strip_prefix(inst_dir)
-                                                .ok()
-                                                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                                                .unwrap_or_else(|| fname.clone());
-
                                             let mut urls =
                                                 with_mod_mirrors(cf_cdn_urls(fid, &fname));
                                             if !dl.is_empty() {
@@ -769,15 +732,6 @@ pub fn do_install_modpack_inner(
                                                     urls,
                                                     dest,
                                                     sha1: sha1.clone(),
-                                                    source: Some(SourceEntry {
-                                                        source: "curseforge".to_string(),
-                                                        path: rel,
-                                                        project_id: Some(pid),
-                                                        file_id: Some(fid),
-                                                        class_id: pid_class.get(&pid).copied(),
-                                                        sha1,
-                                                        file_name: Some(fname.clone()),
-                                                    }),
                                                 });
                                             }
                                         }
@@ -914,11 +868,9 @@ pub fn do_install_modpack_inner(
 
     let mod_download_handle = {
         let categories = categories.clone();
-        let game_dir = game_dir.to_path_buf();
-        let inst_name = inst_name.clone();
         let cancel_name = display_name.to_string();
         std::thread::spawn(move || {
-            download_modpack_tasks_with_engine(tasks, categories, game_dir, inst_name, cancel_name)
+            download_modpack_tasks_with_engine(tasks, categories, cancel_name)
         })
     };
 

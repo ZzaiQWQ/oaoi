@@ -1,6 +1,6 @@
 [package]
 name = "oaoi"
-version = "1.2.0"
+version = "1.2.1"
 description = "oaoi - Minecraft Launcher"
 authors = ["ZzaiQWQ"]
 license-file = "../LICENSE"
@@ -27,7 +27,7 @@ tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 sysinfo = "0.33"
 tauri-plugin-dialog = "2.6.0"
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls", "gzip", "deflate"] }
 tiny_http = "0.12"
 url = "2"
 sha1_smol = "1.0"
