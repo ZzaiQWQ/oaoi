@@ -945,33 +945,34 @@ pub fn do_install_modpack_inner(
                         resolved_java = String::new();
                         &resolved_java
                     } else {
-                    emit_progress(
-                        &app,
-                        &display_name,
-                        "java",
-                        0,
-                        1,
-                        &format!("正在下载 Java {}...", required_major),
-                    );
-                    match crate::java_download::download_java_sync_cancelable(
-                        required_major,
-                        &game_dir_input,
-                        Some(&display_name),
-                    ) {
-                        Ok(p) => {
-                            resolved_java = p;
-                            &resolved_java
+                        emit_progress(
+                            &app,
+                            &display_name,
+                            "java",
+                            0,
+                            1,
+                            &format!("正在下载 Java {}...", required_major),
+                        );
+                        match crate::java_download::download_java_sync_cancelable(
+                            required_major,
+                            &game_dir_input,
+                            Some(&display_name),
+                        ) {
+                            Ok(p) => {
+                                resolved_java = p;
+                                &resolved_java
+                            }
+                            Err(e) => {
+                                java_error = Some(format!(
+                                    "找不到 Java {}，自动下载失败: {}",
+                                    required_major, e
+                                ));
+                                let _ =
+                                    crate::instance::cancel_modpack_install(display_name.clone());
+                                resolved_java = String::new();
+                                &resolved_java
+                            }
                         }
-                        Err(e) => {
-                            java_error = Some(format!(
-                                "找不到 Java {}，自动下载失败: {}",
-                                required_major, e
-                            ));
-                            let _ = crate::instance::cancel_modpack_install(display_name.clone());
-                            resolved_java = String::new();
-                            &resolved_java
-                        }
-                    }
                     }
                 }
             };

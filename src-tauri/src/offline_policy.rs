@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const OFFLINE_REGION_MESSAGE: &str =
-    "当前地区暂不开放离线模式，请先登录正版账号后再启动游戏。";
+pub const OFFLINE_REGION_MESSAGE: &str = "当前地区暂不开放离线模式，请先登录正版账号后再启动游戏。";
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(15 * 24 * 60 * 60);
 const POLICY_CACHE_TTL_MS: u64 = 15 * 24 * 60 * 60 * 1000;
 static POLICY_CACHE: OnceLock<Mutex<Option<(Instant, OfflinePolicy)>>> = OnceLock::new();
@@ -57,7 +56,10 @@ fn has_online_credentials(access_token: Option<&str>, uuid: Option<&str>) -> boo
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "0")
         .is_some();
-    let uuid_ok = uuid.map(str::trim).filter(|value| !value.is_empty()).is_some();
+    let uuid_ok = uuid
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
     token_ok && uuid_ok
 }
 
@@ -70,10 +72,7 @@ fn evaluate_offline_policy() -> OfflinePolicy {
         .as_deref()
         .map(|value| value.eq_ignore_ascii_case("CN"))
         .unwrap_or(false);
-    let language_zh_cn = locale_name
-        .as_deref()
-        .map(is_zh_cn_locale)
-        .unwrap_or(false)
+    let language_zh_cn = locale_name.as_deref().map(is_zh_cn_locale).unwrap_or(false)
         || platform::ui_language_is_zh_cn();
     let timezone_cn = timezone_name
         .as_deref()
@@ -231,10 +230,13 @@ mod platform {
     }
 
     pub fn locale_name() -> Option<String> {
-        read_win_string(85, |buf, len| unsafe { GetUserDefaultLocaleName(buf, len) })
-            .or_else(|| read_win_string(85, |buf, len| unsafe {
-                GetSystemDefaultLocaleName(buf, len)
-            }))
+        read_win_string(85, |buf, len| unsafe { GetUserDefaultLocaleName(buf, len) }).or_else(
+            || {
+                read_win_string(85, |buf, len| unsafe {
+                    GetSystemDefaultLocaleName(buf, len)
+                })
+            },
+        )
     }
 
     pub fn ui_language_is_zh_cn() -> bool {

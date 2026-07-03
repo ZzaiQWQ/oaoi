@@ -24,10 +24,7 @@ pub fn release_version_at_least(mc_version: &str, min_minor: u32, min_patch: u32
 }
 
 fn parse_leading_number(value: &str) -> Option<u32> {
-    let digits: String = value
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect();
+    let digits: String = value.chars().take_while(|ch| ch.is_ascii_digit()).collect();
     if digits.is_empty() {
         None
     } else {

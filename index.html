@@ -770,6 +770,7 @@
                 <span class="info-value" id="instanceDetailLoaderVer">-</span>
               </div>
               <div class="instance-info-actions" data-no-drag>
+                <button class="instance-action-btn instance-action-fabric-update" id="instanceFabricUpdateBtn" hidden>更新</button>
                 <button class="instance-action-btn instance-action-launch" id="instanceLaunchBtn">启动</button>
                 <button class="instance-action-btn instance-action-delete" id="instanceDeleteBtn">删除</button>
               </div>
@@ -783,8 +784,8 @@
               <button class="instance-folder-btn" data-sub="resourcepacks" id="folderResourcePacks">材质包</button>
               <button class="instance-folder-btn" data-sub="shaderpacks" id="folderShaders">光影包</button>
               <button class="instance-folder-btn" data-sub="config" id="folderConfig">配置</button>
-              <button class="instance-folder-btn instance-config-btn" id="instanceConfigBtn">参数设置</button>
-              <button class="instance-folder-btn instance-analyze-btn" id="instanceAnalyzeBtn">一键检测</button>
+              <button class="instance-folder-btn instance-config-btn" id="instanceConfigBtn">启动参数</button>
+              <button class="instance-folder-btn instance-analyze-btn" id="instanceAnalyzeBtn">MOD检测</button>
               <button class="instance-folder-btn instance-export-btn" id="instanceExportBtn">导出整合包</button>
             </div>
 
@@ -798,11 +799,15 @@
             <div class="mod-manager-section" data-no-drag>
               <div class="mod-manager-header">
                 <div class="mod-tabs">
-                  <button class="mod-tab active" data-tab="installed" id="modTabInstalled">已安装 <span class="mod-count"
+                  <button class="mod-tab active" data-tab="installed" id="modTabInstalled">全部 <span class="mod-count"
                       id="modCount">0</span></button>
-                  <button class="mod-tab" data-tab="online" id="modTabOnline">在线搜索</button>
+                  <button class="mod-tab" data-tab="disabled" id="modTabDisabled">禁用 <span class="mod-count"
+                      id="modDisabledCount">0</span></button>
+                  <button class="mod-tab" data-tab="enabled" id="modTabEnabled">启用 <span class="mod-count"
+                      id="modEnabledCount">0</span></button>
                   <button class="mod-tab" data-tab="updates" id="modTabUpdates">可更新 <span class="mod-count"
                       id="modUpdateCount">0</span></button>
+                  <button class="mod-tab" data-tab="online" id="modTabOnline">在线搜索</button>
                 </div>
                 <div class="online-category-tabs" id="onlineCategoryTabs">
                   <button class="online-cat-btn active" data-type="mod">Mod</button>
@@ -811,10 +816,10 @@
                 </div>
               </div>
 
-              <!-- 已安装 Tab -->
+              <!-- 本地 Mod Tab -->
               <div class="mod-tab-content active" id="modTabInstalledContent">
                 <div class="mod-search-bar">
-                  <input type="text" id="modSearchInput" placeholder="搜索已安装 Mod..." class="mod-search-input">
+                  <input type="text" id="modSearchInput" placeholder="搜索全部 Mod..." class="mod-search-input">
                   <button class="mod-refresh-btn" id="modRefreshBtn" title="刷新列表">↻</button>
                 </div>
                 <div class="mod-list" id="modList">
@@ -904,24 +909,24 @@
         </div>
       </div>
 
-      <!-- 首次启动选择目录弹窗 -->
-      <div class="modal-overlay hidden" id="firstLaunchModal" style="z-index: 9999;">
-        <div class="modal-content" data-no-drag style="max-width: 460px;">
-          <div class="modal-header">
-            <h2>🌸 欢迎使用 oaoi 启动器</h2>
-          </div>
-          <div class="modal-body" style="text-align: center;">
-            <p style="margin-bottom: 16px; color: var(--theme-accent-strong, #c94a6a); font-size: 15px;">
-              请选择一个文件夹作为游戏安装目录<br>
-              <small style="color: #999;">所有版本文件将存放在此目录下</small>
-            </p>
-            <div id="firstLaunchDirDisplay"
-              style="background: var(--modal-surface-accent-15, var(--theme-accent-soft, rgba(255,182,193,0.15))); border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; word-break: break-all; color: #999; min-height: 20px;">
-              未选择
+      <!-- 首次目录选择 -->
+      <div class="modal-overlay hidden oaoi-modal-host first-launch-modal" id="firstLaunchModal">
+        <div class="modal-content oaoi-modal-card first-launch-card" data-no-drag>
+          <div class="modal-header first-launch-header">
+            <div>
+              <h2>欢迎使用 OAOI</h2>
             </div>
-            <button id="firstLaunchDirBtn" class="btn btn-secondary" style="margin-bottom: 8px;">📂 选择文件夹</button>
           </div>
-          <div class="modal-footer">
+          <div class="modal-body first-launch-body">
+            <p class="first-launch-desc">
+              选择你想要创建的游戏目录，或者选择已有的 .minecraft 目录。
+            </p>
+            <div id="firstLaunchDirDisplay" class="first-launch-path">
+              请选择目录
+            </div>
+          </div>
+          <div class="modal-footer first-launch-actions">
+            <button id="firstLaunchDirBtn" class="btn btn-secondary">选择目录</button>
             <button id="firstLaunchConfirmBtn" class="btn btn-primary" disabled>确认</button>
           </div>
         </div>

@@ -441,9 +441,7 @@ fn compare_mc_versions(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn is_version_named_instance(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_digit())
+    name.chars().next().is_some_and(|ch| ch.is_ascii_digit())
         && !version_number_parts(name).is_empty()
 }
 
@@ -487,7 +485,120 @@ fn loader_version_from_library(name: &str, marker: &str) -> Option<String> {
     name.split(':').nth(2).map(|version| version.to_string())
 }
 
+fn forge_version_from_fmlloader(name: &str) -> Option<String> {
+    let version = loader_version_from_library(name, "net.minecraftforge:fmlloader:")?;
+    // 新版 Forge 的 fmlloader 版本通常是 mcVersion-forgeVersion，只展示真正的 Forge 版本。
+    version
+        .rsplit_once('-')
+        .map(|(_, forge_version)| forge_version.to_string())
+        .or(Some(version))
+}
+
+fn collect_argument_values(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text.to_string()),
+        serde_json::Value::Array(values) => {
+            for item in values {
+                collect_argument_values(item, out);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(value) = object.get("value") {
+                collect_argument_values(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn argument_value_after_flag(
+    json: &serde_json::Value,
+    section: &str,
+    flag: &str,
+) -> Option<String> {
+    let mut args = Vec::new();
+    collect_argument_values(json.get("arguments")?.get(section)?, &mut args);
+    args.windows(2).find_map(|pair| {
+        let key = pair[0].trim();
+        let value = pair[1].trim();
+        if key == flag && !value.is_empty() && !value.starts_with("--") {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn has_loader_metadata_type(json: &serde_json::Value, expected_type: &str) -> bool {
+    json.get("loader")
+        .and_then(|loader| loader.get("type"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|loader_type| loader_type.eq_ignore_ascii_case(expected_type))
+}
+
+fn loader_metadata_version(json: &serde_json::Value, expected_type: &str) -> Option<String> {
+    if !has_loader_metadata_type(json, expected_type) {
+        return None;
+    }
+    json.get("loader")?
+        .get("version")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn has_neoforge_library(json: &serde_json::Value) -> bool {
+    json.get("libraries")
+        .and_then(|v| v.as_array())
+        .is_some_and(|libraries| {
+            libraries.iter().any(|lib| {
+                lib.get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| name.contains("net.neoforged"))
+            })
+        })
+}
+
+fn has_argument_value(json: &serde_json::Value, section: &str, expected: &str) -> bool {
+    let Some(arguments) = json.get("arguments").and_then(|v| v.get(section)) else {
+        return false;
+    };
+    let mut values = Vec::new();
+    collect_argument_values(arguments, &mut values);
+    values.iter().any(|value| value == expected)
+}
+
+fn has_forge_runtime_marker(json: &serde_json::Value, main_class: &str) -> bool {
+    if main_class.contains("cpw.mods.bootstraplauncher") && has_argument_value(json, "game", "forgeclient") {
+        return true;
+    }
+    json.get("libraries")
+        .and_then(|v| v.as_array())
+        .is_some_and(|libraries| {
+            libraries.iter().any(|lib| {
+                lib.get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| {
+                        name.starts_with("net.minecraftforge:fmlloader:")
+                            || name.starts_with("net.minecraftforge:fmlearlydisplay:")
+                    })
+            })
+        })
+}
+
 pub fn detect_loader(json: &serde_json::Value, _version_name: &str) -> (String, String) {
+    if let Some(version) = loader_metadata_version(json, "neoforge") {
+        return ("neoforge".to_string(), version);
+    }
+
+    if let Some(version) = argument_value_after_flag(json, "game", "--fml.neoForgeVersion") {
+        return ("neoforge".to_string(), version);
+    }
+    if let Some(version) = argument_value_after_flag(json, "game", "--fml.forgeVersion") {
+        return ("forge".to_string(), version);
+    }
+
     if let Some(libraries) = json.get("libraries").and_then(|v| v.as_array()) {
         for lib in libraries {
             let name = lib.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -506,6 +617,9 @@ pub fn detect_loader(json: &serde_json::Value, _version_name: &str) -> (String, 
             {
                 return ("forge".to_string(), version);
             }
+            if let Some(version) = forge_version_from_fmlloader(name) {
+                return ("forge".to_string(), version);
+            }
             if let Some(version) = loader_version_from_library(name, "net.neoforged:neoforge:") {
                 return ("neoforge".to_string(), version);
             }
@@ -515,11 +629,26 @@ pub fn detect_loader(json: &serde_json::Value, _version_name: &str) -> (String, 
         }
     }
 
+    let main_class = json
+        .get("mainClass")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if main_class.contains("net.neoforged") || has_neoforge_library(json) {
+        // 新版 NeoForge 不一定保留 net.neoforged:neoforge 主库，需用启动参数和库前缀兜底识别。
+        return ("neoforge".to_string(), String::new());
+    }
+    if has_loader_metadata_type(json, "neoforge") {
+        return ("neoforge".to_string(), String::new());
+    }
+
     if json
         .get("minecraftArguments")
         .and_then(|v| v.as_str())
         .is_some_and(|args| args.contains("FMLTweaker"))
     {
+        return ("forge".to_string(), String::new());
+    }
+    if has_forge_runtime_marker(json, main_class) {
         return ("forge".to_string(), String::new());
     }
 

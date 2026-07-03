@@ -1,8 +1,8 @@
 use super::{
-    build_data_map, download_file_with_progress, get_jar_main_class, make_emitter,
-    installer_generated_client_library, maven_name_to_path, merge_libraries, parallel_download,
-    resolve_data_arg, run_java_process_cancelable, safe_maven_path, wait_for_install_file,
-    FORGE_LOCK,
+    build_data_map, download_file_with_progress, get_jar_main_class,
+    installer_generated_client_library, make_emitter, maven_name_to_path, merge_libraries,
+    parallel_download, resolve_data_arg, run_java_process_cancelable, safe_maven_path,
+    wait_for_install_file, FORGE_LOCK,
 };
 use crate::instance::{libraries_dir, safe_join, version_jar_path};
 use tauri::Emitter;

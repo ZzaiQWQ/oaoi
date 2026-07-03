@@ -347,9 +347,9 @@ function showConfirm(message, options = {}) {
 
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
-    overlay.className = 'oaoi-confirm-overlay';
+    overlay.className = 'oaoi-confirm-overlay oaoi-modal-host';
     overlay.innerHTML = `
-      <div class="oaoi-confirm-card${safeDialogClass ? ` ${safeDialogClass}` : ''}">
+      <div class="oaoi-confirm-card oaoi-modal-card${safeDialogClass ? ` ${safeDialogClass}` : ''}">
         <div class="oaoi-confirm-header">
           <span class="oaoi-confirm-title">${escapeHtml(title)}</span>
         </div>
@@ -368,8 +368,6 @@ function showConfirm(message, options = {}) {
       if (closed) return;
       closed = true;
       document.removeEventListener('keydown', onKey);
-      overlay.querySelector('.oaoi-confirm-card').classList.add('oaoi-confirm-out');
-      overlay.classList.add('oaoi-confirm-overlay-out');
       setTimeout(() => { overlay.remove(); resolve(result); }, 200);
     }
 
@@ -391,9 +389,9 @@ function showAlert(message, options = {}) {
 
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
-    overlay.className = 'oaoi-confirm-overlay';
+    overlay.className = 'oaoi-confirm-overlay oaoi-modal-host';
     overlay.innerHTML = `
-      <div class="oaoi-confirm-card oaoi-alert-confirm">
+      <div class="oaoi-confirm-card oaoi-modal-card oaoi-alert-confirm">
         <div class="oaoi-confirm-header">
           <span class="oaoi-confirm-title">${escapeHtml(title)}</span>
         </div>
@@ -411,8 +409,6 @@ function showAlert(message, options = {}) {
       if (closed) return;
       closed = true;
       document.removeEventListener('keydown', onKey);
-      overlay.querySelector('.oaoi-confirm-card').classList.add('oaoi-confirm-out');
-      overlay.classList.add('oaoi-confirm-overlay-out');
       setTimeout(() => { overlay.remove(); resolve(true); }, 200);
     }
 
@@ -436,35 +432,13 @@ function showAlert(message, options = {}) {
   const style = document.createElement('style');
   style.id = 'oaoiConfirmStyles';
   style.textContent = `
-    .oaoi-confirm-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 99998;
-      background: rgba(0, 0, 0, 0.3);
-      backdrop-filter: blur(4px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      animation: confirmOverlayIn 0.2s ease;
+    .oaoi-confirm-overlay.oaoi-modal-host {
+      --modal-z: 99998;
+      --modal-width: fit-content;
     }
-    .oaoi-confirm-overlay-out {
-      animation: confirmOverlayOut 0.2s ease forwards;
-    }
-    @keyframes confirmOverlayIn {
-      from { opacity: 0; }
-      to   { opacity: 1; }
-    }
-    @keyframes confirmOverlayOut {
-      to { opacity: 0; }
-    }
-    .oaoi-confirm-card {
-      background: var(--theme-simple-modal-surface, linear-gradient(135deg, var(--modal-surface-pink-100-100, #fff5f7) 0%, var(--modal-surface-white-100, #ffffff) 100%));
-      border-radius: 18px;
-      width: 340px;
-      max-width: 88vw;
-      box-shadow: var(--theme-confirm-shadow, 0 16px 48px rgba(232, 69, 116, 0.18), 0 0 0 1px rgba(255, 200, 215, 0.3));
-      overflow: hidden;
-      animation: confirmCardIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    .oaoi-confirm-card.oaoi-modal-card {
+      min-width: 280px;
+      max-width: min(420px, calc(100vw - 48px));
     }
     .oaoi-confirm-card.oaoi-update-confirm {
       width: 460px;
@@ -473,16 +447,6 @@ function showAlert(message, options = {}) {
     }
     .oaoi-confirm-card.oaoi-alert-confirm {
       max-height: calc(100vh - 48px);
-    }
-    .oaoi-confirm-out {
-      animation: confirmCardOut 0.2s ease forwards;
-    }
-    @keyframes confirmCardIn {
-      from { opacity: 0; transform: scale(0.92) translateY(12px); }
-      to   { opacity: 1; transform: scale(1) translateY(0); }
-    }
-    @keyframes confirmCardOut {
-      to { opacity: 0; transform: scale(0.95) translateY(8px); }
     }
     .oaoi-confirm-header {
       display: flex;

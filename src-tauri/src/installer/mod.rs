@@ -506,7 +506,10 @@ pub fn download_file_if_needed_cancelable(
     let fallback_url = mirror_url(url, !use_mirror);
     if fallback_url != real_url {
         let fallback_name = if use_mirror { "官方" } else { "镜像" };
-        eprintln!("[download] 当前源失败，回退{}: {}", fallback_name, fallback_url);
+        eprintln!(
+            "[download] 当前源失败，回退{}: {}",
+            fallback_name, fallback_url
+        );
         for attempt in 0..3 {
             if attempt > 0 {
                 let wait_secs = download_retry_delay_secs(&last_err, attempt);
@@ -639,7 +642,10 @@ where
     let fallback_url = mirror_url(url, !use_mirror);
     if fallback_url != real_url {
         let fallback_name = if use_mirror { "官方" } else { "镜像" };
-        eprintln!("[download] 当前源失败，回退{}: {}", fallback_name, fallback_url);
+        eprintln!(
+            "[download] 当前源失败，回退{}: {}",
+            fallback_name, fallback_url
+        );
         let mut allow_parallel = true;
         for attempt in 0..3 {
             if attempt > 0 {
@@ -689,13 +695,7 @@ where
                     }
                 }
             } else {
-                do_download_with_progress(
-                    http,
-                    &fallback_url,
-                    dest,
-                    cancel_name,
-                    &mut on_progress,
-                )
+                do_download_with_progress(http, &fallback_url, dest, cancel_name, &mut on_progress)
             };
             match download_result {
                 Ok(()) => match verify_downloaded_file(dest, expected_sha1) {

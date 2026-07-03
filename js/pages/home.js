@@ -118,6 +118,34 @@ let isLaunching = false;
 let javaDownloadModalTimer = null;
 let launchRepairModalTimer = null;
 
+function getCachedJavaList() {
+  try {
+    const cached = JSON.parse(localStorage.getItem('javaSearchResults') || '[]');
+    return Array.isArray(cached) ? cached : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedJavaList(javas) {
+  if (Array.isArray(javas)) {
+    localStorage.setItem('javaSearchResults', JSON.stringify(javas));
+  }
+}
+
+async function findCachedJava(tauri, requiredMajor) {
+  const cached = getCachedJavaList();
+  const matched = cached.find(j => Number(j.major) === requiredMajor && j.path);
+  if (!matched) return null;
+  try {
+    const exists = await tauri.core.invoke('java_path_exists', { path: matched.path });
+    return exists ? matched : null;
+  } catch (e) {
+    console.warn('[java] 缓存 Java 路径校验失败:', e);
+    return null;
+  }
+}
+
 function ensureJavaDownloadModal() {
   let modal = document.getElementById('javaDownloadModal');
   if (modal) return modal;
@@ -712,10 +740,16 @@ function initLaunchButton() {
       try {
         const tauri = await waitForTauri();
 
-        // 1. 先扫描系统（包括 gameDir/java/）
-        const javas = await tauri.core.invoke('find_java', { gameDir });
-        console.log(`[java] 扫描到 ${javas.length} 个 Java`);
-        const matched = javas.find(j => j.major === requiredMajor);
+        // 启动时先用设置页缓存，缓存没有合适版本时才完整扫描。
+        let matched = await findCachedJava(tauri, requiredMajor);
+        if (matched) {
+          console.log(`[java] 使用缓存: Java ${requiredMajor} → ${matched.path}`);
+        } else {
+          const javas = await tauri.core.invoke('find_java', { gameDir });
+          saveCachedJavaList(javas);
+          console.log(`[java] 扫描到 ${javas.length} 个 Java`);
+          matched = javas.find(j => Number(j.major) === requiredMajor);
+        }
 
         if (matched) {
           javaPath = matched.path;

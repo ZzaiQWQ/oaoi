@@ -3,6 +3,7 @@
 let currentDetailInstance = null;
 let currentDetailInfo = null; // { mc_version, loader_type }
 let currentModList = [];
+let currentModListFilter = 'all';
 let modListLoadSeq = 0;
 let modListRenderSeq = 0;
 let modListStreamEventBound = false;
@@ -17,8 +18,11 @@ let currentModRollbackRecords = [];
 let currentModBulkTab = 'updates';
 let modUpdateReady = false;
 let modUpdateCacheEventBound = false;
+let fabricUpgradeSeq = 0;
+let fabricUpgradeRunning = false;
 let instanceSettingsModal = null;
 let modBulkUpdateModal = null;
+let quickAccessFitTimer = 0;
 const modpackExportTask = {
   running: false,
   name: '',
@@ -54,6 +58,8 @@ function showInstanceDetail(instanceName) {
   document.getElementById('instanceDetailLoaderVer').textContent =
     instance.loader_version || '-';
   updateInstanceSettingsSummary();
+  scheduleQuickAccessFit();
+  refreshFabricUpgradeButton();
 
   // 切换到详情页
   const pages = document.querySelectorAll('.page');
@@ -88,8 +94,7 @@ function showInstanceDetail(instanceName) {
   resetModUpdateState('正在读取更新缓存...');
   const modListEl = document.getElementById('modList');
   if (modListEl) modListEl.innerHTML = '<div class="mod-list-empty">加载中...</div>';
-  const modCountEl = document.getElementById('modCount');
-  if (modCountEl) modCountEl.textContent = String(instance.modCount ?? 0);
+  updateLocalModCounts();
   requestAnimationFrame(() => {
     setTimeout(() => {
       if (currentDetailInstance === instanceName) loadModList(instanceName);
@@ -113,7 +118,133 @@ function updateInstanceSettingsSummary() {
   if (javaMode && javaMode !== 'global') parts.push(javaMode === 'auto' ? '自动 Java' : '指定 Java');
   if (jvmPreset === 'clean') parts.push('纯净 JVM');
   else if (jvmPreset !== 'global') parts.push('自定义 JVM');
-  summary.textContent = parts.length ? `参数设置 (${parts.join(' · ')})` : '参数设置';
+  summary.textContent = parts.length ? `启动参数 (${parts.join(' · ')})` : '启动参数';
+  scheduleQuickAccessFit();
+}
+
+function scheduleQuickAccessFit() {
+  cancelAnimationFrame(quickAccessFitTimer);
+  quickAccessFitTimer = requestAnimationFrame(fitQuickAccessRow);
+}
+
+function fitQuickAccessRow() {
+  const row = document.querySelector('.instance-folder-row');
+  if (!row) return;
+  row.style.setProperty('--quick-access-scale', '1');
+
+  const buttons = Array.from(row.querySelectorAll('.instance-folder-btn'))
+    .filter(btn => !btn.hidden && btn.offsetParent !== null);
+  if (!buttons.length) return;
+
+  const style = getComputedStyle(row);
+  const gap = parseFloat(style.columnGap || style.gap || '0') || 0;
+  const needWidth = buttons.reduce((sum, btn) => sum + btn.offsetWidth, 0) + gap * (buttons.length - 1);
+  const availableWidth = row.clientWidth || row.parentElement?.clientWidth || needWidth;
+  const scale = needWidth > availableWidth && availableWidth > 0
+    ? availableWidth / needWidth
+    : 1;
+
+  // 只缩放快速访问这一行，文字完整保留，不省略也不换行。
+  row.style.setProperty('--quick-access-scale', Math.min(1, scale).toFixed(4));
+}
+
+function setFabricUpgradeButton({ hidden = true, disabled = false, text = '更新', target = '' } = {}) {
+  const btn = document.getElementById('instanceFabricUpdateBtn');
+  if (!btn) return;
+  btn.hidden = hidden;
+  btn.disabled = disabled;
+  btn.textContent = text;
+  btn.dataset.targetLoader = target;
+}
+
+async function refreshFabricUpgradeButton() {
+  const seq = ++fabricUpgradeSeq;
+  const info = currentDetailInfo || {};
+  if (fabricUpgradeRunning || info.loader_type !== 'fabric' || !info.mc_version || !info.loader_version) {
+    setFabricUpgradeButton({ hidden: true });
+    return;
+  }
+
+  try {
+    const tauri = await waitForTauri();
+    const versions = await tauri.core.invoke('get_fabric_versions', { mcVersion: info.mc_version });
+    if (seq !== fabricUpgradeSeq || currentDetailInfo !== info) return;
+    const latest = Array.isArray(versions) ? String(versions[0] || '').trim() : '';
+    if (!latest || latest === String(info.loader_version || '').trim()) {
+      setFabricUpgradeButton({ hidden: true });
+      return;
+    }
+    const btn = document.getElementById('instanceFabricUpdateBtn');
+    setFabricUpgradeButton({ hidden: false, text: '更新', target: latest });
+    if (btn) btn.title = `更新 Fabric Loader：${info.loader_version} -> ${latest}`;
+  } catch (err) {
+    console.warn('检查 Fabric Loader 更新失败:', err);
+    if (seq === fabricUpgradeSeq) setFabricUpgradeButton({ hidden: true });
+  }
+}
+
+function applyFabricUpgradeResult(result) {
+  const newLoaderVersion = result?.newLoaderVersion || '';
+  if (!newLoaderVersion || !currentDetailInstance) return;
+  const info = currentDetailInfo || {};
+  info.loader_version = newLoaderVersion;
+  const cached = instancesCache.find(item => item.name === currentDetailInstance);
+  if (cached) cached.loader_version = newLoaderVersion;
+  const loaderEl = document.getElementById('instanceDetailLoaderVer');
+  if (loaderEl) loaderEl.textContent = newLoaderVersion;
+}
+
+async function upgradeCurrentFabricLoader() {
+  if (fabricUpgradeRunning || !currentDetailInstance || currentDetailInfo?.loader_type !== 'fabric') return;
+  const btn = document.getElementById('instanceFabricUpdateBtn');
+  const targetLoaderVersion = btn?.dataset.targetLoader || '';
+  const currentLoaderVersion = currentDetailInfo?.loader_version || '';
+  if (!targetLoaderVersion) return;
+
+  const confirmed = await showConfirm(
+    `将 Fabric Loader 从 ${currentLoaderVersion} 更新到 ${targetLoaderVersion}。\n更新前会备份版本配置，成功后自动删除备份。`,
+    { title: '更新 Fabric Loader', confirmText: '开始更新' }
+  );
+  if (!confirmed) return;
+
+  fabricUpgradeRunning = true;
+  const oldSeq = ++fabricUpgradeSeq;
+  setFabricUpgradeButton({ hidden: false, disabled: true, text: '更新中...', target: targetLoaderVersion });
+
+  let unlisten = null;
+  try {
+    const tauri = await waitForTauri();
+    unlisten = await tauri.event.listen('install-progress', (event) => {
+      const payload = event.payload || {};
+      if (payload.name !== currentDetailInstance) return;
+      if (!['fabric-upgrade', 'fabric-libs'].includes(payload.stage)) return;
+      const current = Number(payload.current || 0);
+      const total = Number(payload.total || 0);
+      const text = total > 0 ? `更新 ${current}/${total}` : '更新中...';
+      setFabricUpgradeButton({ hidden: false, disabled: true, text, target: targetLoaderVersion });
+    });
+
+    const gameDir = localStorage.getItem('gameDir') || '';
+    const result = await tauri.core.invoke('upgrade_fabric_loader', {
+      gameDir,
+      name: currentDetailInstance,
+      mcVersion: currentDetailInfo?.mc_version || '',
+      currentLoaderVersion,
+      targetLoaderVersion,
+      useMirror: localStorage.getItem('downloadSource') === 'bmcl',
+    });
+    if (oldSeq !== fabricUpgradeSeq) return;
+    applyFabricUpgradeResult(result);
+    setFabricUpgradeButton({ hidden: true });
+    showToast(`Fabric Loader 已更新到 ${result?.newLoaderVersion || targetLoaderVersion}`, 'success');
+  } catch (err) {
+    showToast('Fabric Loader 更新失败: ' + err, 'error', 10000);
+    setFabricUpgradeButton({ hidden: false, disabled: false, text: '更新', target: targetLoaderVersion });
+  } finally {
+    if (unlisten) unlisten();
+    fabricUpgradeRunning = false;
+    if (currentDetailInfo?.loader_type === 'fabric') refreshFabricUpgradeButton();
+  }
 }
 
 function getInstanceJvmPresetKey() {
@@ -735,7 +866,7 @@ function formatInstanceAnalyzeResult(result) {
 async function analyzeCurrentInstanceMods() {
   if (!currentDetailInstance) return;
   const btn = document.getElementById('instanceAnalyzeBtn');
-  const originalText = btn?.textContent || '一键检测';
+  const originalText = btn?.textContent || 'MOD检测';
   if (btn) {
     btn.disabled = true;
     btn.textContent = '检测中...';
@@ -750,12 +881,12 @@ async function analyzeCurrentInstanceMods() {
       loader: currentDetailInfo?.loader_type || '',
     });
     await showAlert(formatInstanceAnalyzeResult(result), {
-      title: '一键检测结果',
+      title: 'MOD检测结果',
       confirmText: '我知道了',
     });
   } catch (err) {
     await showAlert(`检测失败：${err}`, {
-      title: '一键检测失败',
+      title: 'MOD检测失败',
       confirmText: '我知道了',
     });
   } finally {
@@ -768,19 +899,26 @@ async function analyzeCurrentInstanceMods() {
 
 // Tab 切换
 function switchModTab(tab) {
-  document.querySelectorAll('.mod-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-  document.getElementById('modTabInstalledContent')?.classList.toggle('active', tab === 'installed');
-  document.getElementById('modTabOnlineContent')?.classList.toggle('active', tab === 'online');
-  document.getElementById('modTabUpdatesContent')?.classList.toggle('active', tab === 'updates');
+  const localTabs = ['installed', 'disabled', 'enabled'];
+  const nextTab = ['installed', 'disabled', 'enabled', 'updates', 'online'].includes(tab) ? tab : 'installed';
+  document.querySelectorAll('.mod-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === nextTab));
+  document.getElementById('modTabInstalledContent')?.classList.toggle('active', localTabs.includes(nextTab));
+  document.getElementById('modTabOnlineContent')?.classList.toggle('active', nextTab === 'online');
+  document.getElementById('modTabUpdatesContent')?.classList.toggle('active', nextTab === 'updates');
   // 显示/隐藏类别按钮
-  document.getElementById('onlineCategoryTabs')?.classList.toggle('visible', tab === 'online');
-  if (tab === 'updates' && currentDetailInstance) {
+  document.getElementById('onlineCategoryTabs')?.classList.toggle('visible', nextTab === 'online');
+  if (localTabs.includes(nextTab)) {
+    currentModListFilter = nextTab === 'disabled' ? 'disabled' : (nextTab === 'enabled' ? 'enabled' : 'all');
+    updateModListSearchPlaceholder();
+    renderModList(currentModList);
+  }
+  if (nextTab === 'updates' && currentDetailInstance) {
     if (modUpdateCheckedKey !== getModUpdateCheckKey()) {
       loadModUpdateCache({ warm: true });
     }
   }
   // 切到在线搜索时自动加载热门
-  if (tab === 'online') {
+  if (nextTab === 'online') {
     const listEl = document.getElementById('onlineModList');
     const cacheKey = `all:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:`;
     if (listEl && listEl.querySelector('.mod-list-empty') && !onlineSearchCache[cacheKey]) {
@@ -797,13 +935,12 @@ function afterNextPaint() {
 async function loadModList(instanceName = currentDetailInstance) {
   if (!instanceName) return;
   const listEl = document.getElementById('modList');
-  const countEl = document.getElementById('modCount');
   const loadSeq = ++modListLoadSeq;
   const requestId = `${instanceName}|${loadSeq}|${Date.now()}`;
   modListStreamRequestId = requestId;
   currentModList = [];
   if (listEl) listEl.innerHTML = '<div class="mod-list-empty">加载中...</div>';
-  if (countEl) countEl.textContent = '0';
+  updateLocalModCounts();
   try {
     await afterNextPaint();
     if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
@@ -822,14 +959,13 @@ async function loadModListFallback(instanceName, loadSeq, reason) {
   if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
   console.warn('流式加载 Mod 列表失败，回退到普通列表:', reason);
   const listEl = document.getElementById('modList');
-  const countEl = document.getElementById('modCount');
   try {
     const tauri = await waitForTauri();
     const gameDir = localStorage.getItem('gameDir') || '';
     const mods = await tauri.core.invoke('list_mods', { gameDir, name: instanceName });
     if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
     currentModList = mods;
-    if (countEl) countEl.textContent = mods.length;
+    updateLocalModCounts();
     renderModList(mods, { final: true });
   } catch (err) {
     console.warn('加载 Mod 列表失败:', err);
@@ -844,7 +980,6 @@ async function bindModListStreamEvents() {
     const payload = event.payload || {};
     if (payload.request_id !== modListStreamRequestId) return;
     if (payload.name !== currentDetailInstance) return;
-    const countEl = document.getElementById('modCount');
     if (payload.status === 'batch') {
       const incoming = Array.isArray(payload.mods) ? payload.mods : [];
       const seen = new Set(currentModList.map(item => item.file_name));
@@ -853,7 +988,7 @@ async function bindModListStreamEvents() {
         currentModList.push(item);
         seen.add(item.file_name);
       });
-      if (countEl) countEl.textContent = String(currentModList.length);
+      updateLocalModCounts();
       renderModList(currentModList, { final: false });
       return;
     }
@@ -862,7 +997,7 @@ async function bindModListStreamEvents() {
       return;
     }
     if (payload.status === 'done') {
-      if (countEl) countEl.textContent = String(currentModList.length);
+      updateLocalModCounts();
       renderModList(currentModList, { final: true });
     }
   });
@@ -873,21 +1008,62 @@ function modActionId(fileName) {
   return String(fileName || '').replace(/[^a-zA-Z0-9]/g, '_');
 }
 
-function renderModIcon(iconUrl, className, id = '') {
+function normalizeModIconUrls(iconUrl, iconUrls = []) {
+  const urls = Array.isArray(iconUrls) ? iconUrls : [];
+  const out = [];
+  [iconUrl, ...urls].forEach(url => {
+    const text = String(url || '').trim();
+    if (text && !out.includes(text)) out.push(text);
+  });
+  return out;
+}
+
+function handleModIconError(img) {
+  if (!img) return;
+  let urls = [];
+  try {
+    urls = JSON.parse(img.dataset.iconUrls || '[]');
+  } catch (_) {
+    urls = [];
+  }
+  const nextIndex = Number(img.dataset.iconIndex || '0') + 1;
+  if (nextIndex < urls.length) {
+    img.dataset.iconIndex = String(nextIndex);
+    img.src = urls[nextIndex];
+    return;
+  }
+  const placeholder = document.createElement('span');
+  placeholder.className = `${img.className || ''} mod-icon-placeholder`.trim();
+  if (img.id) placeholder.id = img.id;
+  img.replaceWith(placeholder);
+}
+
+function renderModIcon(iconUrl, className, id = '', iconUrls = []) {
   const idAttr = id ? ` id="${escapeHtml(id)}"` : '';
-  if (iconUrl) {
-    return `<img${idAttr} class="${className}" src="${escapeHtml(iconUrl)}" alt="">`;
+  const urls = normalizeModIconUrls(iconUrl, iconUrls);
+  if (urls.length) {
+    const encodedUrls = escapeHtml(JSON.stringify(urls));
+    return `<img${idAttr} class="${className}" src="${escapeHtml(urls[0])}" data-icon-index="0" data-icon-urls="${encodedUrls}" onerror="handleModIconError(this)" alt="">`;
   }
   return `<span${idAttr} class="${className} mod-icon-placeholder"></span>`;
 }
 
-function getInstalledModIcon(fileName) {
+function getInstalledMod(fileName) {
   const normalized = String(fileName || '').replace(/\.disabled$/i, '');
-  const mod = currentModList.find(item => {
+  return currentModList.find(item => {
     const itemName = String(item.file_name || '');
     return itemName === fileName || itemName.replace(/\.disabled$/i, '') === normalized;
   });
+}
+
+function getInstalledModIcon(fileName) {
+  const mod = getInstalledMod(fileName);
   return mod?.icon_url || '';
+}
+
+function getInstalledModIconUrls(fileName) {
+  const mod = getInstalledMod(fileName);
+  return normalizeModIconUrls(mod?.icon_url || '', mod?.icon_urls || []);
 }
 
 function applyModIconPatches(icons) {
@@ -895,30 +1071,37 @@ function applyModIconPatches(icons) {
   let changed = false;
   for (const patch of icons) {
     const fileName = patch?.file_name || '';
-    const iconUrl = patch?.icon_url || '';
-    if (!fileName || !iconUrl) continue;
+    const iconUrls = normalizeModIconUrls(patch?.icon_url || '', patch?.icon_urls || []);
+    const iconUrl = iconUrls[0] || '';
+    if (!fileName || !iconUrls.length) continue;
     const mod = currentModList.find(item => item.file_name === fileName);
     if (!mod) continue;
     mod.icon_url = iconUrl;
+    mod.icon_urls = iconUrls;
     changed = true;
     const iconEl = document.getElementById(`mod-icon-${modActionId(fileName)}`);
     if (iconEl) {
-      iconEl.outerHTML = renderModIcon(iconUrl, 'mod-icon', `mod-icon-${modActionId(fileName)}`);
+      iconEl.outerHTML = renderModIcon(iconUrl, 'mod-icon', `mod-icon-${modActionId(fileName)}`, iconUrls);
     }
   }
   if (changed && currentModUpdateList.length) {
     renderModUpdateList(currentModUpdateList);
-    icons.forEach(patch => patchModBulkIcon(patch?.file_name || '', patch?.icon_url || ''));
+    icons.forEach(patch => patchModBulkIcon(
+      patch?.file_name || '',
+      patch?.icon_url || '',
+      patch?.icon_urls || []
+    ));
   }
 }
 
-function patchModBulkIcon(fileName, iconUrl) {
-  if (!fileName || !iconUrl || !modBulkUpdateModal || modBulkUpdateModal.classList.contains('hidden')) return;
+function patchModBulkIcon(fileName, iconUrl, iconUrls = []) {
+  const urls = normalizeModIconUrls(iconUrl, iconUrls);
+  if (!fileName || !urls.length || !modBulkUpdateModal || modBulkUpdateModal.classList.contains('hidden')) return;
   modBulkUpdateModal.querySelectorAll('.mod-bulk-update-item').forEach(item => {
     if (item.dataset.file !== fileName) return;
     const iconEl = item.querySelector('.mod-bulk-update-icon');
     if (iconEl) {
-      iconEl.outerHTML = renderModIcon(iconUrl, 'mod-bulk-update-icon');
+      iconEl.outerHTML = renderModIcon(urls[0], 'mod-bulk-update-icon', '', urls);
     }
   });
 }
@@ -932,7 +1115,7 @@ function renderModItem(mod) {
   return `
     <div class="mod-item ${mod.enabled ? '' : 'disabled'}" data-file="${safeFileName}">
       <button class="mod-toggle ${mod.enabled ? 'active' : ''}" data-file="${safeFileName}" title="${mod.enabled ? '点击禁用' : '点击启用'}"></button>
-      ${renderModIcon(mod.icon_url || '', 'mod-icon', `mod-icon-${actionId}`)}
+      ${renderModIcon(mod.icon_url || '', 'mod-icon', `mod-icon-${actionId}`, mod.icon_urls || [])}
       <span class="mod-name" title="${safeFileName}">${escapeHtml(displayName)}</span>
       <span class="mod-actions" id="mod-actions-${actionId}">
         <button class="mod-delete-btn" data-file="${safeFileName}" title="删除">🗑</button>
@@ -942,20 +1125,83 @@ function renderModItem(mod) {
   `;
 }
 
-// 渲染已安装 mod 列表
+function updateLocalModCounts() {
+  const total = currentModList.length;
+  const disabled = currentModList.filter(item => !item.enabled).length;
+  const enabled = total - disabled;
+  const totalEl = document.getElementById('modCount');
+  const disabledEl = document.getElementById('modDisabledCount');
+  const enabledEl = document.getElementById('modEnabledCount');
+  const disabledTab = document.getElementById('modTabDisabled');
+  const enabledTab = document.getElementById('modTabEnabled');
+  if (totalEl) totalEl.textContent = String(total);
+  if (disabledEl) disabledEl.textContent = String(disabled);
+  if (enabledEl) enabledEl.textContent = String(enabled);
+  if (disabledTab) {
+    // 没有禁用 Mod 时，全部列表已经等同于启用列表。
+    disabledTab.hidden = disabled === 0;
+    if (enabledTab) enabledTab.hidden = disabled === 0;
+    if (disabled === 0 && ['disabled', 'enabled'].includes(currentModListFilter)) {
+      switchModTab('installed');
+    }
+  }
+}
+
+function localModListFilterLabel() {
+  if (currentModListFilter === 'disabled') return '禁用 Mod';
+  if (currentModListFilter === 'enabled') return '启用 Mod';
+  return '全部 Mod';
+}
+
+function updateModListSearchPlaceholder() {
+  const input = document.getElementById('modSearchInput');
+  if (input) input.placeholder = `搜索${localModListFilterLabel()}...`;
+}
+
+function modMatchesLocalFilter(mod) {
+  if (currentModListFilter === 'disabled') return !mod.enabled;
+  if (currentModListFilter === 'enabled') return !!mod.enabled;
+  return true;
+}
+
+function filterLocalModList(mods) {
+  const searchVal = (document.getElementById('modSearchInput')?.value || '').toLowerCase();
+  return mods
+    .filter(modMatchesLocalFilter)
+    .filter(m => !searchVal
+      || m.file_name.toLowerCase().includes(searchVal)
+      || (m.cn_name && m.cn_name.toLowerCase().includes(searchVal)));
+}
+
+function modVisibleInCurrentList(mod) {
+  const searchVal = (document.getElementById('modSearchInput')?.value || '').toLowerCase();
+  if (!modMatchesLocalFilter(mod)) return false;
+  return !searchVal
+    || mod.file_name.toLowerCase().includes(searchVal)
+    || (mod.cn_name && mod.cn_name.toLowerCase().includes(searchVal));
+}
+
+function localModListEmptyText(mods) {
+  const searchVal = (document.getElementById('modSearchInput')?.value || '').trim();
+  if (mods.length === 0) return '暂无 Mod';
+  if (searchVal) return '无匹配结果';
+  if (currentModListFilter === 'disabled') return '暂无已禁用 Mod';
+  if (currentModListFilter === 'enabled') return '暂无未禁用 Mod';
+  return '暂无 Mod';
+}
+
+// 渲染本地 Mod 列表，全部/已禁用/未禁用共用这一套。
 function renderModList(mods, options = {}) {
   const listEl = document.getElementById('modList');
   if (!listEl) return;
   const { final = true } = options;
   const renderSeq = ++modListRenderSeq;
+  updateLocalModCounts();
 
-  const searchVal = (document.getElementById('modSearchInput')?.value || '').toLowerCase();
-  const filtered = searchVal
-    ? mods.filter(m => m.file_name.toLowerCase().includes(searchVal) || (m.cn_name && m.cn_name.toLowerCase().includes(searchVal)))
-    : mods;
+  const filtered = filterLocalModList(mods);
 
   if (filtered.length === 0) {
-    listEl.innerHTML = `<div class="mod-list-empty">${mods.length === 0 ? '暂无 Mod' : '无匹配结果'}</div>`;
+    listEl.innerHTML = `<div class="mod-list-empty">${escapeHtml(localModListEmptyText(mods))}</div>`;
     if (final && modUpdateCheckedKey !== getModUpdateCheckKey()) {
       loadModUpdateCache({ warm: true });
     }
@@ -1148,7 +1394,9 @@ function renderModUpdateList(updates, emptyText = '暂无需要更新的 Mod') {
   listEl.innerHTML = updates.map(update => {
     const iconHtml = renderModIcon(
       getInstalledModIcon(update.fileName || ''),
-      'mod-update-icon'
+      'mod-update-icon',
+      '',
+      getInstalledModIconUrls(update.fileName || '')
     );
     const linksHtml = [
       update.mrUrl ? `<a href="#" class="mod-link mr" data-url="${escapeHtml(update.mrUrl)}" title="Modrinth">MR</a>` : '',
@@ -1292,7 +1540,12 @@ function renderModBulkUpdateChoices(modal) {
   listEl.innerHTML = currentModUpdateList.map(update => `
     <label class="mod-bulk-update-item" data-file="${escapeHtml(update.fileName || '')}">
       <input class="mod-bulk-update-check" type="checkbox" value="${escapeHtml(update.fileName || '')}" checked>
-      ${renderModIcon(getInstalledModIcon(update.fileName || ''), 'mod-bulk-update-icon')}
+      ${renderModIcon(
+        getInstalledModIcon(update.fileName || ''),
+        'mod-bulk-update-icon',
+        '',
+        getInstalledModIconUrls(update.fileName || '')
+      )}
       <span class="mod-bulk-update-lines">
         <span title="${escapeHtml(update.fileName || '')}">当前版本：${escapeHtml(update.fileName || '')}</span>
         <span title="${escapeHtml(update.latestFileName || '')}">最新版：${escapeHtml(update.latestFileName || '')}</span>
@@ -1625,6 +1878,61 @@ function _applyModUrls(info) {
   });
 }
 
+function toggledModFileName(fileName, enabled) {
+  if (enabled) return String(fileName || '').replace(/\.disabled$/i, '');
+  return /\.disabled$/i.test(fileName) ? fileName : `${fileName}.disabled`;
+}
+
+function sameLocalModFileName(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (a === b) return true;
+  return a.replace(/\.disabled$/i, '') === b.replace(/\.disabled$/i, '');
+}
+
+function applyLocalModToggle(oldFileName, enabled) {
+  const index = currentModList.findIndex(item => item.file_name === oldFileName);
+  if (index === -1) return;
+  const nextFileName = toggledModFileName(oldFileName, enabled);
+  const mod = {
+    ...currentModList[index],
+    file_name: nextFileName,
+    enabled,
+  };
+  currentModList[index] = mod;
+  updateLocalModCounts();
+
+  const itemEl = Array.from(document.querySelectorAll('#modList .mod-item'))
+    .find(item => item.dataset.file === oldFileName);
+  if (!itemEl) {
+    renderModList(currentModList);
+    return;
+  }
+  if (!modVisibleInCurrentList(mod)) {
+    itemEl.remove();
+    if (!document.querySelector('#modList .mod-item')) {
+      renderModList(currentModList);
+    }
+    return;
+  }
+  itemEl.outerHTML = renderModItem(mod);
+  applyModSourceLinks(currentModSourceLinks);
+}
+
+function applyLocalModDelete(fileName) {
+  const target = String(fileName || '');
+  if (!target) return;
+  // 删除后只同步当前页面状态，避免重新扫描整个 mods 目录导致列表闪一下。
+  currentModList = currentModList.filter(item => !sameLocalModFileName(item.file_name, target));
+  currentModUpdateList = currentModUpdateList.filter(item => !sameLocalModFileName(item.fileName, target));
+  currentModSourceLinks = currentModSourceLinks.filter(info => !sameLocalModFileName(info.fileName || info.file_name, target));
+  renderModList(currentModList, { final: false });
+  renderModUpdateList(currentModUpdateList);
+  if (modBulkUpdateModal && !modBulkUpdateModal.classList.contains('hidden')) {
+    renderModBulkUpdateChoices(modBulkUpdateModal);
+  }
+}
+
 function bindModListEvents() {
   const listEl = document.getElementById('modList');
   if (!listEl || listEl.dataset.bound === 'true') return;
@@ -1646,9 +1954,11 @@ function bindModListEvents() {
       try {
         const tauri = await waitForTauri();
         const gameDir = localStorage.getItem('gameDir') || '';
-        await tauri.core.invoke('toggle_mod', { gameDir, name: currentDetailInstance, fileName: toggleBtn.dataset.file });
+        const fileName = toggleBtn.dataset.file;
+        const enabled = await tauri.core.invoke('toggle_mod', { gameDir, name: currentDetailInstance, fileName });
         resetModUpdateState('正在读取更新缓存...');
-        await loadModList(currentDetailInstance);
+        applyLocalModToggle(fileName, !!enabled);
+        loadModUpdateCache({ warm: true });
       } catch (err) {
         console.warn('切换 Mod 状态失败:', err);
       }
@@ -1674,9 +1984,9 @@ function bindModListEvents() {
     try {
       const tauri = await waitForTauri();
       const gameDir = localStorage.getItem('gameDir') || '';
-      await tauri.core.invoke('delete_mod', { gameDir, name: currentDetailInstance, fileName: deleteBtn.dataset.file });
-      resetModUpdateState('正在读取更新缓存...');
-      await loadModList(currentDetailInstance);
+      const fileName = deleteBtn.dataset.file;
+      await tauri.core.invoke('delete_mod', { gameDir, name: currentDetailInstance, fileName });
+      applyLocalModDelete(fileName);
     } catch (err) {
       console.warn('删除 Mod 失败:', err);
     }
@@ -2095,6 +2405,7 @@ function initInstanceDetailPage() {
   bindModListEvents();
   bindModUpdateListEvents();
   bindModUpdateCacheEvents();
+  window.addEventListener('resize', scheduleQuickAccessFit);
 
   const backBtn = document.getElementById('instanceBackBtn');
   if (backBtn) {
@@ -2130,6 +2441,7 @@ function initInstanceDetailPage() {
   });
   document.getElementById('instanceExportBtn')?.addEventListener('click', showModpackExportModal);
   document.getElementById('instanceAnalyzeBtn')?.addEventListener('click', analyzeCurrentInstanceMods);
+  document.getElementById('instanceFabricUpdateBtn')?.addEventListener('click', upgradeCurrentFabricLoader);
 
   // Tab 切换
   document.querySelectorAll('.mod-tab').forEach(tab => {

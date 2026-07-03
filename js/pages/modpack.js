@@ -1,6 +1,43 @@
 // ============ 整合包搜索/版本选择/一键安装 ============
 // 由 download.js 中的 initDownloadPage() 调用
 
+function normalizeModpackIconUrls(iconUrl, iconUrls = []) {
+  const urls = Array.isArray(iconUrls) ? iconUrls : [];
+  const out = [];
+  [iconUrl, ...urls].forEach(url => {
+    const text = String(url || '').trim();
+    if (text && !out.includes(text)) out.push(text);
+  });
+  return out;
+}
+
+function handleModpackIconError(img) {
+  if (!img) return;
+  let urls = [];
+  try {
+    urls = JSON.parse(img.dataset.iconUrls || '[]');
+  } catch (_) {
+    urls = [];
+  }
+  const nextIndex = Number(img.dataset.iconIndex || '0') + 1;
+  if (nextIndex < urls.length) {
+    img.dataset.iconIndex = String(nextIndex);
+    img.src = urls[nextIndex];
+    return;
+  }
+  const placeholder = document.createElement('span');
+  placeholder.className = img.className || 'modpack-icon';
+  img.replaceWith(placeholder);
+}
+
+function renderModpackIcon(modpack) {
+  const urls = normalizeModpackIconUrls(modpack?.icon_url || '', modpack?.icon_urls || []);
+  if (!urls.length) return '<span class="modpack-icon"></span>';
+  const encodedUrls = escapeHtml(JSON.stringify(urls));
+  // 图标地址按后端候选顺序尝试，避免单个 CDN 失败时整张卡片没图。
+  return `<img class="modpack-icon" src="${escapeHtml(urls[0])}" data-icon-index="0" data-icon-urls="${encodedUrls}" alt="" onerror="handleModpackIconError(this)">`;
+}
+
 function initModpackTab() {
   // ===== Tab 切换逻辑 =====
   let modpacksLoaded = false;
@@ -118,7 +155,7 @@ function initModpackTab() {
       const sourceClass = src.cssClass;
       const hasMR = src.hasMR;
       const hasCF = src.hasCF;
-      const iconUrl = esc(mp.icon_url || '');
+      const iconHtml = renderModpackIcon(mp);
       const mrUrl = esc(mp.mr_url || '');
       const cfUrl = esc(mp.cf_url || '');
       const projectId = esc(mp.project_id || '');
@@ -126,7 +163,7 @@ function initModpackTab() {
       const title = esc(mp.title || '');
       return `
         <div class="modpack-card">
-          <img class="modpack-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">
+          ${iconHtml}
           <div class="modpack-info">
             <div class="modpack-title" title="${title}">
               <span class="mod-source-tag ${sourceClass}">${esc(sourceLabel)}</span> ${title}
@@ -181,10 +218,35 @@ function initModpackTab() {
   // ===== 版本选择弹窗 =====
   const modpackVersionModal = document.getElementById('modpackVersionModal');
   const modpackVersionCancel = document.getElementById('modpackVersionCancel');
+  const MODPACK_VERSION_PAGE_SIZE = 20;
+  const modpackVersionState = {
+    projectId: '',
+    source: '',
+    title: '',
+    offset: 0,
+    loading: false,
+    noMore: false,
+    requestId: 0,
+    versions: [],
+  };
   if (modpackVersionCancel) {
     modpackVersionCancel.addEventListener('click', () => {
       modpackVersionModal?.classList.add('hidden');
     });
+  }
+  const modpackVersionListEl = document.getElementById('modpackVersionList');
+  const modpackVersionScrollRoot = modpackVersionListEl?.closest('.modal-body') || modpackVersionListEl;
+  const handleModpackVersionScroll = () => {
+    if (modpackVersionState.loading || modpackVersionState.noMore) return;
+    const root = modpackVersionScrollRoot;
+    if (!root) return;
+    if (root.scrollTop + root.clientHeight >= root.scrollHeight - 80) {
+      loadMoreModpackVersions();
+    }
+  };
+  modpackVersionListEl?.addEventListener('scroll', handleModpackVersionScroll);
+  if (modpackVersionScrollRoot && modpackVersionScrollRoot !== modpackVersionListEl) {
+    modpackVersionScrollRoot.addEventListener('scroll', handleModpackVersionScroll);
   }
 
   async function showModpackVersionModal(projectId, source, title) {
@@ -195,27 +257,72 @@ function initModpackTab() {
 
     titleEl.textContent = `${title} - 选择版本`;
     listEl.innerHTML = '<div class="dl-loading">正在加载版本列表...</div>';
+    Object.assign(modpackVersionState, {
+      projectId,
+      source,
+      title,
+      offset: 0,
+      loading: false,
+      noMore: false,
+      requestId: modpackVersionState.requestId + 1,
+      versions: [],
+    });
     modal.classList.remove('hidden');
 
+    await loadMoreModpackVersions({ initial: true });
+  }
+
+  async function loadMoreModpackVersions(options = {}) {
+    const { initial = false } = options;
+    const listEl = document.getElementById('modpackVersionList');
+    if (!listEl || modpackVersionState.loading || modpackVersionState.noMore) return;
+    const requestId = modpackVersionState.requestId;
+    modpackVersionState.loading = true;
+    if (!initial) {
+      listEl.insertAdjacentHTML('beforeend', '<div class="dl-loading modpack-version-load-more">加载更多...</div>');
+    }
     try {
       const tauri = await waitForTauri();
-      const versions = await tauri.core.invoke('get_modpack_versions', { projectId, source });
+      const versions = await tauri.core.invoke('get_modpack_versions', {
+        projectId: modpackVersionState.projectId,
+        source: modpackVersionState.source,
+        offset: modpackVersionState.offset,
+      });
+      if (requestId !== modpackVersionState.requestId) return;
+      listEl.querySelector('.modpack-version-load-more')?.remove();
       if (versions.length === 0) {
-        listEl.innerHTML = '<div class="dl-loading">暂无可用版本</div>';
+        if (initial) listEl.innerHTML = '<div class="dl-loading">暂无可用版本</div>';
+        modpackVersionState.noMore = true;
         return;
       }
-      renderModpackVersions(versions, title);
+      if (initial) listEl.innerHTML = '';
+      appendModpackVersions(versions);
+      modpackVersionState.offset += MODPACK_VERSION_PAGE_SIZE;
+      if (versions.length < MODPACK_VERSION_PAGE_SIZE) modpackVersionState.noMore = true;
     } catch (err) {
-      listEl.innerHTML = `<div class="dl-loading">❌ 加载失败: ${escapeHtml(err)}</div>`;
+      if (requestId !== modpackVersionState.requestId) return;
+      listEl.querySelector('.modpack-version-load-more')?.remove();
+      if (initial) {
+        listEl.innerHTML = `<div class="dl-loading">❌ 加载失败: ${escapeHtml(err)}</div>`;
+      } else {
+        console.error('加载更多整合包版本失败:', err);
+      }
+    } finally {
+      if (requestId === modpackVersionState.requestId) {
+        modpackVersionState.loading = false;
+      }
     }
   }
 
-  function renderModpackVersions(versions, modpackTitle) {
+  function appendModpackVersions(versions) {
     const listEl = document.getElementById('modpackVersionList');
     if (!listEl) return;
     const esc = escapeHtml;
+    const startIndex = modpackVersionState.versions.length;
+    modpackVersionState.versions.push(...versions);
 
-    listEl.innerHTML = versions.map((v, idx) => {
+    const html = versions.map((v, idx) => {
+      const realIndex = startIndex + idx;
       const size = formatFileSize(v.file_size);
       return `
         <div class="dl-item">
@@ -226,15 +333,17 @@ function initModpackTab() {
               ${size ? `📦 ${escapeHtml(size)}` : ''} ${v.date ? `· ${escapeHtml(v.date)}` : ''}
             </div>
           </div>
-          <button class="dl-install-btn" data-index="${idx}" data-url="${esc(v.download_url)}" data-filename="${esc(v.file_name)}">安装</button>
+          <button class="dl-install-btn" data-index="${realIndex}" data-url="${esc(v.download_url)}" data-filename="${esc(v.file_name)}">安装</button>
         </div>
       `;
     }).join('');
+    listEl.insertAdjacentHTML('beforeend', html);
 
     // 绑定安装按钮
-    listEl.querySelectorAll('.dl-install-btn').forEach(btn => {
+    listEl.querySelectorAll('.dl-install-btn:not([data-bound])').forEach(btn => {
+      btn.dataset.bound = '1';
       btn.addEventListener('click', async () => {
-        const version = versions[Number(btn.dataset.index)] || {};
+        const version = modpackVersionState.versions[Number(btn.dataset.index)] || {};
         const downloadUrls = Array.isArray(version.download_urls)
           ? version.download_urls.filter(Boolean)
           : [];

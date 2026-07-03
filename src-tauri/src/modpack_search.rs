@@ -6,10 +6,16 @@ use crate::instance::{
     cf_api_key, install_download_pool, is_cancelled, register_download_manager, safe_path_name,
     try_register_cancel, unregister_cancel,
 };
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ===== 整合包在线搜索 =====
+
+const MODRINTH_MIRROR_API: &str = "https://mod.mcimirror.top/modrinth/v2";
+const MODRINTH_OFFICIAL_API: &str = "https://api.modrinth.com/v2";
+const CURSEFORGE_MIRROR_API: &str = "https://mod.mcimirror.top/curseforge/v1";
+const CURSEFORGE_OFFICIAL_API: &str = "https://api.curseforge.com/v1";
 
 #[derive(serde::Serialize, Clone)]
 pub struct ModpackResult {
@@ -18,6 +24,7 @@ pub struct ModpackResult {
     pub author: String,
     pub downloads: u64,
     pub icon_url: String,
+    pub icon_urls: Vec<String>,
     pub mr_url: String,
     pub cf_url: String,
     pub project_id: String,
@@ -76,6 +83,13 @@ fn do_search_modpacks(query: &str, offset: u32) -> Result<Vec<ModpackResult>, St
             // 双平台: 合并 CF 链接到已有的 MR 条目
             merged[idx].cf_url = cf.cf_url;
             merged[idx].source = "both".to_string();
+            let mut icon_urls = merged[idx].icon_urls.clone();
+            icon_urls.extend(cf.icon_urls);
+            let icon_urls = unique_icon_urls(icon_urls);
+            if merged[idx].icon_url.is_empty() {
+                merged[idx].icon_url = icon_urls.first().cloned().unwrap_or_default();
+            }
+            merged[idx].icon_urls = icon_urls;
             // 取较大的下载量
             if cf.downloads > merged[idx].downloads {
                 merged[idx].downloads = cf.downloads;
@@ -94,28 +108,60 @@ fn search_mr_modpacks(
     query: &str,
     offset: u32,
 ) -> Result<Vec<ModpackResult>, String> {
-    let url = if query.is_empty() {
-        format!("https://api.modrinth.com/v2/search?facets=[[\"project_type:modpack\"]]&limit=20&offset={}&index=downloads", offset)
+    let mirror_url = build_mr_modpack_search_url(MODRINTH_MIRROR_API, query, offset);
+    let official_url = build_mr_modpack_search_url(MODRINTH_OFFICIAL_API, query, offset);
+
+    let mut last_err = None;
+    for url in [mirror_url, official_url] {
+        match fetch_mr_modpack_search(http, &url) {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(results) if url.contains(MODRINTH_OFFICIAL_API) => return Ok(results),
+            Ok(_) => {}
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "Modrinth 整合包搜索无结果".to_string()))
+}
+
+fn build_mr_modpack_search_url(base: &str, query: &str, offset: u32) -> String {
+    if query.is_empty() {
+        format!(
+            "{}/search?facets=[[\"project_type:modpack\"]]&limit=20&offset={}&index=downloads",
+            base, offset
+        )
     } else {
         format!(
-            "https://api.modrinth.com/v2/search?query={}&facets=[[\"project_type:modpack\"]]&limit=20&offset={}&index=relevance",
-            urlencoding::encode(query), offset
+            "{}/search?query={}&facets=[[\"project_type:modpack\"]]&limit=20&offset={}&index=relevance",
+            base,
+            urlencoding::encode(query),
+            offset
         )
-    };
+    }
+}
 
-    let resp = http.get(&url).send().map_err(|e| e.to_string())?;
+fn fetch_mr_modpack_search(
+    http: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<Vec<ModpackResult>, String> {
+    let resp = http.get(url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-
     let mut results = Vec::new();
     if let Some(hits) = json["hits"].as_array() {
         for hit in hits {
             let slug = hit["slug"].as_str().unwrap_or("").to_string();
+            let icon_urls =
+                unique_icon_urls(vec![hit["icon_url"].as_str().unwrap_or("").to_string()]);
             results.push(ModpackResult {
                 title: hit["title"].as_str().unwrap_or("").to_string(),
                 description: hit["description"].as_str().unwrap_or("").to_string(),
                 author: hit["author"].as_str().unwrap_or("").to_string(),
                 downloads: hit["downloads"].as_u64().unwrap_or(0),
-                icon_url: hit["icon_url"].as_str().unwrap_or("").to_string(),
+                icon_url: icon_urls.first().cloned().unwrap_or_default(),
+                icon_urls,
                 mr_url: format!("https://modrinth.com/modpack/{}", slug),
                 cf_url: String::new(),
                 project_id: hit["project_id"].as_str().unwrap_or("").to_string(),
@@ -131,21 +177,46 @@ fn search_cf_modpacks(
     query: &str,
     offset: u32,
 ) -> Result<Vec<ModpackResult>, String> {
+    let mirror_url = build_cf_modpack_search_url(CURSEFORGE_MIRROR_API, query, offset);
+    let official_url = build_cf_modpack_search_url(CURSEFORGE_OFFICIAL_API, query, offset);
+
+    let mut last_err = None;
+    for (url, official) in [(mirror_url, false), (official_url, true)] {
+        match fetch_cf_modpack_search(http, &url, official) {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            Ok(results) if official => return Ok(results),
+            Ok(_) => {}
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "CurseForge 整合包搜索无结果".to_string()))
+}
+
+fn build_cf_modpack_search_url(base: &str, query: &str, offset: u32) -> String {
     let sort_field = if query.is_empty() { "6" } else { "1" };
-    let url = format!(
-        "https://api.curseforge.com/v1/mods/search?gameId=432&classId=4471&searchFilter={}&pageSize=20&sortField={}&sortOrder=desc&index={}",
+    format!(
+        "{}/mods/search?gameId=432&classId=4471&searchFilter={}&pageSize=20&sortField={}&sortOrder=desc&index={}",
+        base,
         urlencoding::encode(query),
         sort_field,
         offset,
-    );
+    )
+}
 
-    let resp = http
-        .get(&url)
-        .header("x-api-key", &cf_api_key())
-        .header("Accept", "application/json")
-        .send()
-        .map_err(|e| e.to_string())?;
-
+fn fetch_cf_modpack_search(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    official: bool,
+) -> Result<Vec<ModpackResult>, String> {
+    let mut req = http.get(url).header("Accept", "application/json");
+    if official {
+        req = req.header("x-api-key", &cf_api_key());
+    }
+    let resp = req.send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
@@ -156,7 +227,14 @@ fn search_cf_modpacks(
                 .and_then(|a| a.first())
                 .and_then(|a| a["name"].as_str())
                 .unwrap_or("");
-            let logo = item["logo"]["url"].as_str().unwrap_or("");
+            let mut icon_urls = Vec::new();
+            if let Some(url) = item["logo"]["thumbnailUrl"].as_str() {
+                push_curseforge_icon_urls(&mut icon_urls, url);
+            }
+            if let Some(url) = item["logo"]["url"].as_str() {
+                push_curseforge_icon_urls(&mut icon_urls, url);
+            }
+            let icon_urls = unique_icon_urls(icon_urls);
             let id = item["id"].as_u64().unwrap_or(0);
             let fallback_url = format!("https://www.curseforge.com/minecraft/modpacks/{}", id);
             let cf_url = item["links"]["websiteUrl"]
@@ -167,7 +245,8 @@ fn search_cf_modpacks(
                 description: item["summary"].as_str().unwrap_or("").to_string(),
                 author: authors.to_string(),
                 downloads: item["downloadCount"].as_u64().unwrap_or(0),
-                icon_url: logo.to_string(),
+                icon_url: icon_urls.first().cloned().unwrap_or_default(),
+                icon_urls,
                 mr_url: String::new(),
                 cf_url: cf_url.to_string(),
                 project_id: id.to_string(),
@@ -178,7 +257,53 @@ fn search_cf_modpacks(
     Ok(results)
 }
 
+fn push_curseforge_icon_urls(out: &mut Vec<String>, url: &str) {
+    let Some(path) = forgecdn_path(url) else {
+        out.push(url.to_string());
+        return;
+    };
+    // CF 图片有多个 CDN 域名，前端会按顺序失败切换。
+    for host in [
+        "media.forgecdn.net",
+        "edge.forgecdn.net",
+        "mediafilez.forgecdn.net",
+    ] {
+        out.push(format!("https://{}{}", host, path));
+    }
+}
+
+fn forgecdn_path(url: &str) -> Option<&str> {
+    for host in [
+        "https://media.forgecdn.net",
+        "https://edge.forgecdn.net",
+        "https://mediafilez.forgecdn.net",
+        "http://media.forgecdn.net",
+        "http://edge.forgecdn.net",
+        "http://mediafilez.forgecdn.net",
+    ] {
+        if let Some(path) = url.strip_prefix(host) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn unique_icon_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for url in urls {
+        let trimmed = url.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
 // ===== 整合包版本列表 + 一键安装 =====
+
+const MODPACK_VERSION_PAGE_SIZE: usize = 20;
 
 #[derive(serde::Serialize, Clone)]
 pub struct ModpackVersionInfo {
@@ -196,8 +321,10 @@ pub struct ModpackVersionInfo {
 pub async fn get_modpack_versions(
     project_id: String,
     source: String,
+    offset: Option<u32>,
 ) -> Result<Vec<ModpackVersionInfo>, String> {
-    tokio::task::spawn_blocking(move || do_get_modpack_versions(&project_id, &source))
+    let offset = offset.unwrap_or(0);
+    tokio::task::spawn_blocking(move || do_get_modpack_versions(&project_id, &source, offset))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -205,6 +332,7 @@ pub async fn get_modpack_versions(
 fn do_get_modpack_versions(
     project_id: &str,
     source: &str,
+    offset: u32,
 ) -> Result<Vec<ModpackVersionInfo>, String> {
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -213,15 +341,16 @@ fn do_get_modpack_versions(
         .map_err(|e| e.to_string())?;
 
     match source {
-        "modrinth" | "both" => get_mr_modpack_versions(&http, project_id),
-        "curseforge" => get_cf_modpack_versions(&http, project_id),
-        _ => get_mr_modpack_versions(&http, project_id),
+        "modrinth" | "both" => get_mr_modpack_versions(&http, project_id, offset),
+        "curseforge" => get_cf_modpack_versions(&http, project_id, offset),
+        _ => get_mr_modpack_versions(&http, project_id, offset),
     }
 }
 
 fn get_mr_modpack_versions(
     http: &reqwest::blocking::Client,
     project_id: &str,
+    offset: u32,
 ) -> Result<Vec<ModpackVersionInfo>, String> {
     let url = format!("https://api.modrinth.com/v2/project/{}/version", project_id);
     let resp = http.get(&url).send().map_err(|e| e.to_string())?;
@@ -229,7 +358,12 @@ fn get_mr_modpack_versions(
     let arr = json.as_array().ok_or("格式错误")?;
 
     let mut results = Vec::new();
-    for ver in arr.iter().take(20) {
+    // Modrinth 项目版本接口一次返回完整列表，这里按前端滚动页切片。
+    for ver in arr
+        .iter()
+        .skip(offset as usize)
+        .take(MODPACK_VERSION_PAGE_SIZE)
+    {
         let game_versions = ver["game_versions"]
             .as_array()
             .map(|a| {
@@ -285,10 +419,11 @@ fn get_mr_modpack_versions(
 fn get_cf_modpack_versions(
     http: &reqwest::blocking::Client,
     project_id: &str,
+    offset: u32,
 ) -> Result<Vec<ModpackVersionInfo>, String> {
     let url = format!(
-        "https://api.curseforge.com/v1/mods/{}/files?pageSize=20",
-        project_id
+        "https://api.curseforge.com/v1/mods/{}/files?pageSize={}&index={}",
+        project_id, MODPACK_VERSION_PAGE_SIZE, offset
     );
     let resp = http
         .get(&url)
@@ -300,7 +435,7 @@ fn get_cf_modpack_versions(
     let data = json["data"].as_array().ok_or("格式错误")?;
 
     let mut results = Vec::new();
-    for file in data.iter().take(20) {
+    for file in data.iter().take(MODPACK_VERSION_PAGE_SIZE) {
         let game_versions = file["gameVersions"]
             .as_array()
             .map(|a| {

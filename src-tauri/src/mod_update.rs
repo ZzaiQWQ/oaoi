@@ -1,8 +1,10 @@
+use crate::downloader::event::{DownloadEvent, DownloadOutcome};
+use crate::downloader::{
+    DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
+};
 use crate::instance::{resolve_game_dir, safe_path_name, version_dir};
 use crate::mod_download::OnlineModVersionInfo;
 use crate::modpack_sources::safe_index_name;
-use crate::downloader::event::{DownloadEvent, DownloadOutcome};
-use crate::downloader::{DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -468,13 +470,7 @@ pub async fn update_mods_from_cache(
     selected_file_names: Vec<String>,
 ) -> Result<ModBulkUpdateResult, String> {
     tokio::task::spawn_blocking(move || {
-        update_mods_from_cache_blocking(
-            &game_dir,
-            &name,
-            &mc_version,
-            &loader,
-            selected_file_names,
-        )
+        update_mods_from_cache_blocking(&game_dir, &name, &mc_version, &loader, selected_file_names)
     })
     .await
     .map_err(|e| format!("任务失败: {}", e))?
@@ -543,21 +539,20 @@ fn refresh_mod_update_cache_blocking(
         .map_err(|e| e.to_string())?;
 
     let old_cache = load_update_cache(&game_root, &safe_name);
-    let valid_old_cache = old_cache
-        .as_ref()
-        .filter(|item| item.version == UPDATE_CACHE_VERSION && cache_runtime_matches(item, mc_version, loader));
+    let valid_old_cache = old_cache.as_ref().filter(|item| {
+        item.version == UPDATE_CACHE_VERSION && cache_runtime_matches(item, mc_version, loader)
+    });
     let mut files = scan_local_mod_files(&game_root, &safe_name, valid_old_cache)?;
     let has_cache = valid_old_cache.is_some();
     let local_changed = valid_old_cache
         .map(|item| local_cache_changed(item, &files))
         .unwrap_or(true);
-    let update_expired = valid_old_cache
-        .map(update_cache_expired)
-        .unwrap_or(true);
+    let update_expired = valid_old_cache.map(update_cache_expired).unwrap_or(true);
     let source_checks_pending = valid_old_cache
         .map(cache_source_checks_pending)
         .unwrap_or(true);
-    let should_check_updates = force_update || !has_cache || update_expired || source_checks_pending;
+    let should_check_updates =
+        force_update || !has_cache || update_expired || source_checks_pending;
     let force_missing_recheck = has_cache && (force_update || update_expired);
     let should_refresh_sources =
         !has_cache || local_changed || force_missing_recheck || source_checks_pending;
@@ -747,7 +742,10 @@ fn update_mods_from_cache_blocking(
     for update in updates {
         let key = mod_cache_key(&update.file_name);
         let Some(cached_plan) = plans_by_key.get(&key) else {
-            failed.push(format!("{}: 更新下载地址还没有写入缓存，请等待后台检测完成", update.file_name));
+            failed.push(format!(
+                "{}: 更新下载地址还没有写入缓存，请等待后台检测完成",
+                update.file_name
+            ));
             continue;
         };
         match prepare_single_mod_update(
@@ -870,9 +868,14 @@ fn build_mod_update_download_request(item: &PendingModUpdate) -> DownloadRequest
         .into_iter()
         .map(DownloadCandidate::new)
         .collect::<Vec<_>>();
-    let mut request = DownloadRequest::new(item.request_id.clone(), candidates, &item.temp_path)
-        .without_resume();
-    if let Some(sha1) = item.plan.sha1.as_deref().filter(|value| !value.trim().is_empty()) {
+    let mut request =
+        DownloadRequest::new(item.request_id.clone(), candidates, &item.temp_path).without_resume();
+    if let Some(sha1) = item
+        .plan
+        .sha1
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         request = request.with_expected_sha1(sha1.trim().to_string());
     }
     request
@@ -914,9 +917,14 @@ fn install_single_mod_update(
         .as_deref()
         .is_some_and(|expected| !expected.eq_ignore_ascii_case(&sha1))
     {
-        return Err(format!("sha1 不匹配: expected {}, got {}", item.plan.sha1.as_deref().unwrap_or(""), sha1));
+        return Err(format!(
+            "sha1 不匹配: expected {}, got {}",
+            item.plan.sha1.as_deref().unwrap_or(""),
+            sha1
+        ));
     }
-    let backups = replace_downloaded_file(&item.temp_path, &item.target_path, &[item.old_path.clone()])?;
+    let backups =
+        replace_downloaded_file(&item.temp_path, &item.target_path, &[item.old_path.clone()])?;
     if let Some((old_backup, _)) = backups
         .iter()
         .find(|(_, original)| *original == item.old_path)
@@ -931,7 +939,11 @@ fn install_single_mod_update(
             game_root,
             safe_name,
             ModUpdateRollbackRecord {
-                id: mod_update_rollback_id(&item.update.file_name, &item.target_file_name, updated_at_ms),
+                id: mod_update_rollback_id(
+                    &item.update.file_name,
+                    &item.target_file_name,
+                    updated_at_ms,
+                ),
                 display_name: item.update.display_name.clone(),
                 old_file_name: item.update.file_name.clone(),
                 old_backup_file_name: old_backup
@@ -1077,7 +1089,9 @@ fn list_old_mod_backups_blocking(
         if !path.is_file() {
             continue;
         }
-        let Some(file_name) = path.file_name().map(|value| value.to_string_lossy().to_string())
+        let Some(file_name) = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
         else {
             continue;
         };
@@ -1248,7 +1262,9 @@ fn save_mod_update_rollback_record(
         .records
         .retain(|item| item.old_backup_file_name != record.old_backup_file_name);
     store.records.push(record);
-    store.records.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+    store
+        .records
+        .sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
     save_mod_update_rollback_store(game_root, safe_name, &store)
 }
 
@@ -1274,7 +1290,9 @@ fn remove_cached_update_plans(
     save_mod_update_rollback_store(game_root, safe_name, &store)
 }
 
-fn cached_plan_to_download_plan(plan: &CachedUpdateDownloadPlan) -> Result<UpdateDownloadPlan, String> {
+fn cached_plan_to_download_plan(
+    plan: &CachedUpdateDownloadPlan,
+) -> Result<UpdateDownloadPlan, String> {
     let mut urls = plan.downloads.clone();
     if let Some(file_id) = plan.curseforge_file_id {
         let file_name = plan
@@ -1300,10 +1318,7 @@ fn cached_plan_to_download_plan(plan: &CachedUpdateDownloadPlan) -> Result<Updat
     })
 }
 
-fn load_mod_update_rollback_store(
-    game_root: &Path,
-    safe_name: &str,
-) -> ModUpdateRollbackStore {
+fn load_mod_update_rollback_store(game_root: &Path, safe_name: &str) -> ModUpdateRollbackStore {
     let Some(data) = std::fs::read_to_string(mod_update_rollback_path(game_root, safe_name)).ok()
     else {
         return ModUpdateRollbackStore {
@@ -1448,7 +1463,9 @@ fn scan_local_mod_files(
         if !path.is_file() || !is_mod_file(&path) {
             continue;
         }
-        let Some(file_name) = path.file_name().map(|value| value.to_string_lossy().to_string())
+        let Some(file_name) = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
         else {
             continue;
         };
@@ -1472,14 +1489,10 @@ fn scan_local_mod_files(
         }
         let modrinth_checked = !changed
             && (sources.modrinth.is_some()
-                || cached
-                    .map(|item| item.modrinth_checked)
-                    .unwrap_or(false));
+                || cached.map(|item| item.modrinth_checked).unwrap_or(false));
         let curseforge_checked = !changed
             && (sources.curseforge.is_some()
-                || cached
-                    .map(|item| item.curseforge_checked)
-                    .unwrap_or(false));
+                || cached.map(|item| item.curseforge_checked).unwrap_or(false));
         let sha1 = if changed {
             None
         } else {
@@ -1609,15 +1622,7 @@ fn cache_to_view(
     message: String,
 ) -> ModUpdateCacheView {
     cache_to_view_with_changed_filter(
-        name,
-        mc_version,
-        loader,
-        cache,
-        files,
-        stale,
-        refreshing,
-        message,
-        true,
+        name, mc_version, loader, cache, files, stale, refreshing, message, true,
     )
 }
 
@@ -1632,15 +1637,7 @@ fn cache_to_view_without_changed_filter(
     message: String,
 ) -> ModUpdateCacheView {
     cache_to_view_with_changed_filter(
-        name,
-        mc_version,
-        loader,
-        cache,
-        files,
-        stale,
-        refreshing,
-        message,
-        false,
+        name, mc_version, loader, cache, files, stale, refreshing, message, false,
     )
 }
 
@@ -1655,9 +1652,9 @@ fn cache_to_view_with_changed_filter(
     message: String,
     filter_changed: bool,
 ) -> ModUpdateCacheView {
-    let valid_cache = cache
-        .as_ref()
-        .filter(|item| item.version == UPDATE_CACHE_VERSION && cache_runtime_matches(item, mc_version, loader));
+    let valid_cache = cache.as_ref().filter(|item| {
+        item.version == UPDATE_CACHE_VERSION && cache_runtime_matches(item, mc_version, loader)
+    });
     let updates = valid_cache
         .map(|item| filter_cached_updates(&item.updates, files, filter_changed))
         .unwrap_or_default();
@@ -1885,7 +1882,6 @@ fn local_cache_changed(cache: &ModUpdateCache, files: &[LocalModFile]) -> bool {
     })
 }
 
-
 fn inherit_cached_updates(
     cache: Option<&ModUpdateCache>,
     files: &[LocalModFile],
@@ -2000,8 +1996,7 @@ fn detected_sources_from_cache(file: &CachedModFile) -> DetectedSources {
             version_id: version_id.to_string(),
         });
     }
-    if let (Some(project_id), Some(file_id)) =
-        (file.curseforge_project_id, file.curseforge_file_id)
+    if let (Some(project_id), Some(file_id)) = (file.curseforge_project_id, file.curseforge_file_id)
     {
         sources.curseforge = Some(CurseForgeSource {
             project_id,
@@ -2100,8 +2095,14 @@ fn mod_api_http_client_builder() -> reqwest::blocking::ClientBuilder {
 }
 
 fn mod_api_url(url: &str) -> String {
-    url.replace("https://api.modrinth.com", "https://mod.mcimirror.top/modrinth")
-        .replace("https://api.curseforge.com", "https://mod.mcimirror.top/curseforge")
+    url.replace(
+        "https://api.modrinth.com",
+        "https://mod.mcimirror.top/modrinth",
+    )
+    .replace(
+        "https://api.curseforge.com",
+        "https://mod.mcimirror.top/curseforge",
+    )
 }
 
 fn curseforge_fingerprint_timeout(item_count: usize) -> Duration {
@@ -2184,8 +2185,7 @@ fn resolve_curseforge_mirror_system_addrs() -> Vec<SocketAddr> {
         Err(err) => {
             eprintln!(
                 "[mod-update][cf] 镜像系统 DNS 解析失败: host={} error={}",
-                CURSEFORGE_MIRROR_HOST,
-                err
+                CURSEFORGE_MIRROR_HOST, err
             );
             return Vec::new();
         }
@@ -2333,7 +2333,13 @@ fn select_curseforge_mirror_addr() -> Option<SocketAddr> {
     *entry -= 0.01;
     let summary = addrs
         .iter()
-        .map(|addr| format!("{}:{:.3}", addr.ip(), scores.get(&addr.ip()).copied().unwrap_or(0.0)))
+        .map(|addr| {
+            format!(
+                "{}:{:.3}",
+                addr.ip(),
+                scores.get(&addr.ip()).copied().unwrap_or(0.0)
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
     eprintln!(
@@ -2390,7 +2396,11 @@ fn mod_api_candidate_kind(url: &str) -> &'static str {
 fn mod_api_body_items(body: &serde_json::Value) -> usize {
     ["fingerprints", "fileIds", "modIds", "hashes"]
         .iter()
-        .find_map(|key| body.get(*key).and_then(|value| value.as_array()).map(|items| items.len()))
+        .find_map(|key| {
+            body.get(*key)
+                .and_then(|value| value.as_array())
+                .map(|items| items.len())
+        })
         .unwrap_or_default()
 }
 
@@ -2460,7 +2470,9 @@ fn mod_api_read_json_body(
             "[mod-update][cf] {}接口响应体下载完成: url={} expected={} downloaded={} elapsed={}ms",
             candidate_kind,
             candidate,
-            expected.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
+            expected
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             body.len(),
             started.elapsed().as_millis()
         );
@@ -2648,14 +2660,12 @@ fn mod_api_post_json_prefer_non_empty_array(
         if empty_result.is_some() {
             eprintln!(
                 "[mod-update][cf] 所有候选接口都返回空结果: api={} items={}",
-                url,
-                request_items
+                url, request_items
             );
         } else {
             eprintln!(
                 "[mod-update][cf] 所有候选接口都失败: api={} items={}",
-                url,
-                request_items
+                url, request_items
             );
         }
     }
@@ -2936,10 +2946,7 @@ fn refresh_online_mod_data_parallel(
     let _ = cf_handle.join();
 
     dedupe_update_lookup_plans(&mut plans);
-    Ok(plans
-        .into_iter()
-        .map(cached_update_download_plan)
-        .collect())
+    Ok(plans.into_iter().map(cached_update_download_plan).collect())
 }
 
 fn apply_online_refresh_event(
@@ -3199,7 +3206,9 @@ fn lookup_modrinth_update_plans(
             let Some(source) = file.modrinth.as_ref() else {
                 continue;
             };
-            if latest.info.version_id == source.version_id || latest.sha1.as_deref() == file.sha1.as_deref() {
+            if latest.info.version_id == source.version_id
+                || latest.sha1.as_deref() == file.sha1.as_deref()
+            {
                 continue;
             }
             let update = update_info(
@@ -3307,7 +3316,9 @@ fn lookup_curseforge_update_plans(
             .iter()
             .filter(|item| curseforge_index_matches(item, mc_version, loader))
             .filter_map(|item| {
-                let id = item["fileId"].as_u64().and_then(|value| u32::try_from(value).ok())?;
+                let id = item["fileId"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())?;
                 Some(id)
             })
             .max();
@@ -3317,7 +3328,10 @@ fn lookup_curseforge_update_plans(
         if latest_file_id <= source.file_id {
             continue;
         }
-        update_file_ids.entry(latest_file_id).or_default().push(file);
+        update_file_ids
+            .entry(latest_file_id)
+            .or_default()
+            .push(file);
     }
     if update_file_ids.is_empty() {
         return Vec::new();
@@ -3389,7 +3403,10 @@ fn lookup_curseforge_files_chunk(
         return out;
     };
     for item in items {
-        let Some(file_id) = item["id"].as_u64().and_then(|value| u32::try_from(value).ok()) else {
+        let Some(file_id) = item["id"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+        else {
             continue;
         };
         let Some(info) = curseforge_file_to_download_info(item) else {
@@ -3408,7 +3425,10 @@ fn merge_update_lookup_plan(
     match by_file.get_mut(&key) {
         Some(existing) => {
             let mut downloads = existing.downloads.clone();
-            crate::modpack::download_mirror::append_unique_urls(&mut downloads, plan.downloads.clone());
+            crate::modpack::download_mirror::append_unique_urls(
+                &mut downloads,
+                plan.downloads.clone(),
+            );
             let curseforge_file_id = existing.curseforge_file_id.or(plan.curseforge_file_id);
             let curseforge_file_name = existing
                 .curseforge_file_name
@@ -3578,12 +3598,16 @@ fn modrinth_version_to_download_info(
     Some(VersionDownloadInfo {
         info,
         downloads,
-        sha1: file["hashes"]["sha1"].as_str().map(|value| value.to_string()),
+        sha1: file["hashes"]["sha1"]
+            .as_str()
+            .map(|value| value.to_string()),
     })
 }
 
 fn curseforge_file_to_download_info(file: &serde_json::Value) -> Option<VersionDownloadInfo> {
-    let file_id = file["id"].as_u64().and_then(|value| u32::try_from(value).ok())?;
+    let file_id = file["id"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())?;
     let file_name = file["fileName"]
         .as_str()
         .or_else(|| file["file_name"].as_str())
@@ -3610,7 +3634,10 @@ fn curseforge_file_to_download_info(file: &serde_json::Value) -> Option<VersionD
             loader: String::new(),
             file_name,
             file_size: file["fileLength"].as_u64().unwrap_or(0),
-            date: file["fileDate"].as_str().map(short_date).unwrap_or_default(),
+            date: file["fileDate"]
+                .as_str()
+                .map(short_date)
+                .unwrap_or_default(),
             source: "curseforge".to_string(),
         },
         downloads,
@@ -3722,7 +3749,11 @@ fn dedupe_update_entries(updates: &mut Vec<ModUpdateInfo>) {
 
 fn sort_update_entries(updates: &mut Vec<ModUpdateInfo>) {
     dedupe_update_entries(updates);
-    updates.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    updates.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
 }
 
 fn prefer_update(existing: &ModUpdateInfo, candidate: &ModUpdateInfo) -> bool {
@@ -3826,7 +3857,8 @@ fn lookup_curseforge_mods_by_fingerprints_fast(
         candidates.len(),
         fingerprints.len()
     );
-    let Some(items) = lookup_curseforge_fingerprints_chunk(http, fingerprints.clone(), fp_to_sha) else {
+    let Some(items) = lookup_curseforge_fingerprints_chunk(http, fingerprints.clone(), fp_to_sha)
+    else {
         eprintln!(
             "[mod-update][cf] 指纹查询失败: fingerprints={}",
             fingerprints.len()
@@ -3876,7 +3908,9 @@ fn lookup_curseforge_fingerprints_chunk(
     };
     for item in matches {
         let file = &item["file"];
-        let sha1 = if let Some(sha1) = crate::modpack_sources::sha1_from_curseforge_hashes(&file["hashes"]) {
+        let sha1 = if let Some(sha1) =
+            crate::modpack_sources::sha1_from_curseforge_hashes(&file["hashes"])
+        {
             sha1
         } else {
             let Some(fingerprint) = file["fileFingerprint"]

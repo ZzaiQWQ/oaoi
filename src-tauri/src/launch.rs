@@ -5,13 +5,12 @@ use crate::installer::{
     safe_maven_path,
 };
 use crate::instance::{
-    assets_dir, detect_loader, libraries_dir, natives_dir as version_natives_dir,
-    resolve_game_dir, safe_path_name, version_dir, version_jar_path,
-    version_json_path as instance_version_json_path,
+    assets_dir, detect_loader, libraries_dir, natives_dir as version_natives_dir, resolve_game_dir,
+    safe_path_name, version_dir, version_jar_path, version_json_path as instance_version_json_path,
 };
+use std::collections::HashSet;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
@@ -115,6 +114,17 @@ fn wait_for_game_window(
         }
 
         std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn launch_log_preview(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    // 中文路径不能用字节下标截断，否则正式版会直接 panic。
+    if chars.next().is_some() {
+        format!("{}... (truncated)", preview)
+    } else {
+        preview
     }
 }
 
@@ -537,12 +547,22 @@ fn do_launch_minecraft(
 
     // 读取实例 JSON
     let version_json_path = instance_version_json_path(&ver_dir, &version_name);
-    let json_str = std::fs::read_to_string(&version_json_path)
-        .map_err(|e| format!("读取版本配置失败: {}", e))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&json_str).map_err(|e| format!("解析版本 JSON 失败: {}", e))?;
+    let json_str = match std::fs::read_to_string(&version_json_path) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(format!("读取版本配置失败: {}", err));
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(format!("解析版本 JSON 失败: {}", err));
+        }
+    };
 
-    repair_launch_files(&app_handle, &version_name, &game_dir, &ver_dir, &json)?;
+    if let Err(err) = repair_launch_files(&app_handle, &version_name, &game_dir, &ver_dir, &json) {
+        return Err(err);
+    }
 
     // 获取主类
     let main_class = json["mainClass"]
@@ -677,7 +697,11 @@ fn do_launch_minecraft(
                                 .get("url")
                                 .and_then(|value| value.as_str())
                                 .unwrap_or_else(|| default_library_maven_base(name, true));
-                            Some(format!("{}/{}", base.trim_end_matches('/'), native_path_text))
+                            Some(format!(
+                                "{}/{}",
+                                base.trim_end_matches('/'),
+                                native_path_text
+                            ))
                         });
                     if let Some(url) = native_url {
                         if let Some(parent) = native_jar_path.parent() {
@@ -949,8 +973,14 @@ fn do_launch_minecraft(
                 "${auth_access_token}",
                 options.access_token.as_deref().unwrap_or("0"),
             )
-            .replace("${auth_session}", options.access_token.as_deref().unwrap_or("0"))
-            .replace("${access_token}", options.access_token.as_deref().unwrap_or("0"))
+            .replace(
+                "${auth_session}",
+                options.access_token.as_deref().unwrap_or("0"),
+            )
+            .replace(
+                "${access_token}",
+                options.access_token.as_deref().unwrap_or("0"),
+            )
             .replace(
                 "${user_type}",
                 if options.access_token.is_some() {
@@ -1053,7 +1083,7 @@ fn do_launch_minecraft(
         if i > 0 && args.get(i - 1).map(|s| s.as_str()) == Some("--accessToken") && arg != "0" {
             eprintln!("[launch] arg[{}]: *****(已隐藏)", i);
         } else if arg.len() > 200 {
-            eprintln!("[launch] arg[{}]: {}... (truncated)", i, &arg[..200]);
+            eprintln!("[launch] arg[{}]: {}", i, launch_log_preview(arg, 200));
         } else {
             eprintln!("[launch] arg[{}]: {}", i, arg);
         }
@@ -1086,7 +1116,10 @@ fn do_launch_minecraft(
     {
         cmd.creation_flags(0x08000000);
     } // CREATE_NO_WINDOW
-    let mut child = cmd.spawn().map_err(|e| format!("启动游戏失败: {}", e))?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => return Err(format!("启动游戏失败: {}", err)),
+    };
 
     let pid = child.id();
     let _ = app_handle.emit(
@@ -1097,7 +1130,9 @@ fn do_launch_minecraft(
             "timeout_seconds": LAUNCH_WINDOW_WAIT_TIMEOUT.as_secs()
         }),
     );
-    wait_for_game_window(&mut child, pid, &log_path, &ver_dir)?;
+    if let Err(err) = wait_for_game_window(&mut child, pid, &log_path, &ver_dir) {
+        return Err(err);
+    }
     let _ = app_handle.emit(
         "launch-window-ready",
         serde_json::json!({

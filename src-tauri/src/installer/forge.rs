@@ -1,9 +1,9 @@
 use super::{
-    build_data_map, default_library_maven_base, download_file_with_progress,
-    get_jar_main_class, installer_generated_client_library, library_allowed, make_emitter,
-    maven_name_to_path, maven_name_to_path_with_classifier, merge_libraries,
-    native_classifier_for_current_os, parallel_download, resolve_data_arg,
-    run_java_process_cancelable, safe_maven_path, wait_for_install_file, FORGE_LOCK,
+    build_data_map, default_library_maven_base, download_file_with_progress, get_jar_main_class,
+    installer_generated_client_library, library_allowed, make_emitter, maven_name_to_path,
+    maven_name_to_path_with_classifier, merge_libraries, native_classifier_for_current_os,
+    parallel_download, resolve_data_arg, run_java_process_cancelable, safe_maven_path,
+    wait_for_install_file, FORGE_LOCK,
 };
 use crate::instance::{libraries_dir, safe_join, version_jar_path};
 use tauri::Emitter;
@@ -215,12 +215,9 @@ pub fn install_forge_with_names(
                 } else {
                     maven_name_to_path(lib_name)
                 };
-                let url_base = lib
-                    .get("url")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or_else(|| {
-                        default_library_maven_base(lib_name, native_classifier.is_some())
-                    });
+                let url_base = lib.get("url").and_then(|u| u.as_str()).unwrap_or_else(|| {
+                    default_library_maven_base(lib_name, native_classifier.is_some())
+                });
                 let url = format!("{}/{}", url_base.trim_end_matches('/'), path);
                 let sha1 = lib
                     .get("sha1")

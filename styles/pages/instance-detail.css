@@ -52,8 +52,9 @@
 .instance-info-card {
   flex: 1;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   background: var(--surface-white-55, rgba(255, 255, 255, 0.55));
   backdrop-filter: blur(var(--blur-radius, 16px));
   border: 1px solid color-mix(in srgb, var(--pink-300) calc(0.3 * 100%), transparent);
@@ -67,12 +68,17 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  white-space: nowrap;
 }
 
 .instance-info-card .info-value {
   font-size: 15px;
   font-weight: 700;
   color: var(--pink-700);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 章节标题 */
@@ -87,11 +93,15 @@
 .instance-folder-row {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   margin-bottom: 16px;
+  /* 固定单行，宽度不够时由 JS 整行缩放。 */
+  transform: scale(var(--quick-access-scale, 1));
+  transform-origin: left top;
 }
 
 .instance-folder-btn {
+  flex: 0 0 auto;
   padding: 6px 14px;
   background: var(--surface-white-50, rgba(255, 255, 255, 0.5));
   backdrop-filter: blur(var(--blur-radius, 10px));
@@ -102,6 +112,7 @@
   color: var(--pink-700);
   cursor: pointer;
   transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .instance-folder-btn:hover {
@@ -110,16 +121,22 @@
   transform: translateY(-1px);
 }
 
+.instance-config-btn,
+.instance-analyze-btn,
 .instance-export-btn {
   color: #fff;
-  border-color: transparent;
+  border: none;
   background: var(--rose-gradient);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--pink-500) calc(0.22 * 100%), transparent);
 }
 
-.instance-analyze-btn {
-  color: var(--theme-accent-strong, var(--pink-700));
-  border-color: var(--theme-accent-border, rgba(255, 95, 145, 0.32));
-  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
+.instance-config-btn:hover,
+.instance-analyze-btn:hover,
+.instance-export-btn:hover {
+  color: #fff;
+  border: none;
+  background: var(--rose-gradient);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--pink-500) calc(0.3 * 100%), transparent);
 }
 
 .instance-analyze-btn:disabled {
@@ -684,6 +701,7 @@
 .mod-tabs {
   display: flex;
   gap: 4px;
+  flex-wrap: wrap;
 }
 
 .mod-tab {
@@ -1708,6 +1726,27 @@
   font-weight: 700;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.instance-action-btn[hidden] {
+  display: none;
+}
+
+.instance-action-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+  transform: none;
+}
+
+.instance-action-fabric-update {
+  background: var(--surface-white-72, rgba(255, 255, 255, 0.72));
+  border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.32));
+  color: var(--theme-accent-strong, var(--pink-700));
+}
+
+.instance-action-fabric-update:hover {
+  background: var(--surface-pink-200-70, color-mix(in srgb, var(--pink-200) calc(0.7 * 100%), transparent));
+  transform: translateY(-1px);
 }
 
 .instance-action-launch {

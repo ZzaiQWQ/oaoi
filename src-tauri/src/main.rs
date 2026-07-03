@@ -8,7 +8,91 @@ fn main() {
         return;
     }
 
+    let Some(_single_instance_guard) = acquire_single_instance() else {
+        return;
+    };
+
     oaoi_lib::run();
+}
+
+#[cfg(windows)]
+struct SingleInstanceGuard {
+    handle: Option<*mut std::ffi::c_void>,
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+
+    let mutex_name = wide_null("Local\\OAOI_LAUNCHER_SINGLE_INSTANCE");
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr()) };
+    if handle.is_null() {
+        return Some(SingleInstanceGuard { handle: None });
+    }
+
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        bring_existing_window_to_front();
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        return None;
+    }
+
+    Some(SingleInstanceGuard {
+        handle: Some(handle),
+    })
+}
+
+#[cfg(not(windows))]
+struct SingleInstanceGuard;
+
+#[cfg(not(windows))]
+fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+    Some(SingleInstanceGuard)
+}
+
+#[cfg(windows)]
+fn bring_existing_window_to_front() {
+    let title = wide_null("oaoi - Minecraft启动器");
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd.is_null() {
+            return;
+        }
+        // 已有窗口可能被最小化，先恢复窗口，再把它放到前台。
+        let _ = ShowWindow(hwnd, 9);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+extern "system" {
+    fn CreateMutexW(
+        lpMutexAttributes: *mut std::ffi::c_void,
+        bInitialOwner: i32,
+        lpName: *const u16,
+    ) -> *mut std::ffi::c_void;
+    fn GetLastError() -> u32;
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> *mut std::ffi::c_void;
+    fn ShowWindow(hWnd: *mut std::ffi::c_void, nCmdShow: i32) -> i32;
+    fn SetForegroundWindow(hWnd: *mut std::ffi::c_void) -> i32;
 }
 
 fn apply_update(args: &[String]) {

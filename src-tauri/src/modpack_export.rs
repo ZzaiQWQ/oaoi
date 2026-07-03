@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
+use crate::mod_update::{load_cached_mrpack_downloads, MrpackDownloadCacheEntry};
 use crate::modpack::{sanitize_name, strip_modpack_archive_suffix};
 use crate::modpack_sources::safe_index_name;
-use crate::mod_update::{load_cached_mrpack_downloads, MrpackDownloadCacheEntry};
 
 const MOD_UPDATE_CACHE_DIR: &str = "launcher-data";
 const MOD_UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
@@ -314,8 +314,11 @@ fn export_modpack_blocking(
                 "Reading cached file sources...",
             );
             let package_files = collect_package_paths(&inst_dir, &selected_paths)?;
-            let mut cf_matches =
-                load_cached_curseforge_matches_for_packages(&game_root, &safe_name, &package_files)?;
+            let mut cf_matches = load_cached_curseforge_matches_for_packages(
+                &game_root,
+                &safe_name,
+                &package_files,
+            )?;
             let fallback_paths: Vec<PackageFile> = package_files
                 .iter()
                 .filter(|item| !cf_matches.contains_key(&item.rel))

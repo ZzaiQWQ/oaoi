@@ -9,6 +9,7 @@ macro_rules! eprintln {
 // ===== 模块声明 =====
 mod auth;
 mod downloader;
+mod fabric_upgrade;
 mod installer;
 mod instance;
 mod java_detect;
@@ -496,6 +497,7 @@ pub fn run() {
             auth::start_ms_login,
             auth::cancel_ms_login,
             auth::refresh_ms_login,
+            fabric_upgrade::upgrade_fabric_loader,
             installer::create_instance,
             versions::fabric::get_fabric_versions,
             versions::forge::get_forge_versions,
@@ -521,6 +523,7 @@ pub fn run() {
             mod_update::delete_old_mod_backups,
             mod_update::list_mod_update_rollbacks,
             mod_update::rollback_mod_updates,
+            java_detect::java_path_exists,
             java_download::download_java,
             java_download::cancel_java_download,
             modpack::import_modpack,

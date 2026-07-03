@@ -13,14 +13,14 @@
 }
 
 #modpackVersionModal .modal-header {
-  padding: 22px 24px 18px;
+  padding: 16px 22px 10px;
   background: transparent;
-  border-bottom: 1px solid rgba(38, 42, 55, 0.08);
+  border-bottom: none;
 }
 
 #modpackVersionModal .modal-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.2;
   font-weight: 800;
   color: #202330;
@@ -31,19 +31,48 @@
   flex: 1;
   overflow-y: auto;
   min-height: 0;
-  padding: 18px 24px 14px;
+  padding: 10px 22px 8px;
 }
 
 #modpackVersionModal .modal-footer {
-  padding: 14px 24px 20px;
+  padding: 8px 22px 14px;
   background: transparent;
-  border-top: 1px solid rgba(38, 42, 55, 0.06);
+  border-top: none;
+}
+
+#modpackVersionModal .dl-item {
+  gap: 10px;
+  padding: 9px 14px;
+  border-radius: 10px;
+}
+
+#modpackVersionModal .dl-item-name {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+#modpackVersionModal .dl-item-meta {
+  font-size: 9px;
+  margin-top: 1px;
+}
+
+#modpackVersionModal .dl-item-type {
+  padding: 1px 5px;
+  font-size: 8px;
+  margin-right: 4px;
+}
+
+#modpackVersionModal .dl-install-btn {
+  min-width: 54px;
+  padding: 5px 13px;
+  border-radius: 7px;
+  font-size: 10px;
 }
 
 #modpackVersionModal .btn-secondary {
-  min-width: 92px;
-  height: 40px;
-  border-radius: 10px;
+  min-width: 86px;
+  height: 34px;
+  border-radius: 9px;
   background: var(--modal-surface-white-92, rgba(255, 255, 255, 0.92));
   color: var(--theme-accent-strong, #f04480);
   border: 1px solid var(--theme-accent-border, rgba(255, 95, 145, 0.34));

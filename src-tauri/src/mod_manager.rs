@@ -1,16 +1,22 @@
 use crate::instance::{resolve_game_dir, safe_path_name, version_dir};
 use crate::modcn::{contains_chinese, load_modcn};
+use crate::modpack_sources::safe_index_name;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::Emitter;
 use zip::ZipArchive;
 
 const MAX_MOD_ICON_BYTES: u64 = 256 * 1024;
+const MOD_UPDATE_CACHE_DIR: &str = "launcher-data";
+const MOD_UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
+const MODRINTH_PROJECTS_API: &str = "https://mod.mcimirror.top/modrinth/v2/projects";
+const CURSEFORGE_MODS_API: &str = "https://mod.mcimirror.top/curseforge/v1/mods";
 
 #[derive(Serialize, Clone)]
 pub struct ModInfo {
@@ -19,12 +25,14 @@ pub struct ModInfo {
     pub enabled: bool,
     pub size_kb: u64,
     pub icon_url: String,
+    pub icon_urls: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
 struct ModIconPatch {
     file_name: String,
     icon_url: String,
+    icon_urls: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -35,6 +43,38 @@ struct ModListStreamEvent {
     mods: Vec<ModInfo>,
     icons: Vec<ModIconPatch>,
     message: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModIconCache {
+    #[serde(default)]
+    files: HashMap<String, ModIconCacheFile>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModIconCacheFile {
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    rel: String,
+    #[serde(default)]
+    modrinth_project_id: Option<String>,
+    #[serde(default)]
+    curseforge_project_id: Option<u32>,
+}
+
+#[derive(Clone, Default)]
+struct ModIconSource {
+    modrinth_project_id: Option<String>,
+    curseforge_project_id: Option<u32>,
+}
+
+#[derive(Clone)]
+struct OnlineIconRequest {
+    file_name: String,
+    source: ModIconSource,
 }
 
 /// 列出实例的所有 mod（.jar 和 .jar.disabled）
@@ -72,6 +112,7 @@ fn stream_mods_blocking(
     request_id: &str,
 ) -> Result<(), String> {
     let (mods_dir, mods) = collect_mod_infos(game_dir, name)?;
+    let icon_sources = load_mod_icon_sources(game_dir, name).unwrap_or_default();
     for chunk in mods.chunks(80) {
         emit_mod_list_stream(
             app_handle,
@@ -85,12 +126,17 @@ fn stream_mods_blocking(
     }
 
     let mut icon_batch = Vec::new();
+    let mut online_requests = Vec::new();
     for item in &mods {
         let path = mods_dir.join(&item.file_name);
         if let Some(icon_url) = read_mod_icon_url(&path) {
-            icon_batch.push(ModIconPatch {
+            if let Some(patch) = build_icon_patch(&item.file_name, vec![icon_url]) {
+                icon_batch.push(patch);
+            }
+        } else if let Some(source) = icon_source_for_file(&icon_sources, &item.file_name) {
+            online_requests.push(OnlineIconRequest {
                 file_name: item.file_name.clone(),
-                icon_url,
+                source,
             });
         }
         if icon_batch.len() >= 24 {
@@ -115,6 +161,15 @@ fn stream_mods_blocking(
             icon_batch,
             "",
         );
+    }
+    for chunk in online_requests.chunks(80) {
+        let icons = lookup_online_mod_icon_urls(chunk)
+            .into_iter()
+            .filter_map(|(file_name, urls)| build_icon_patch(&file_name, urls))
+            .collect::<Vec<_>>();
+        if !icons.is_empty() {
+            emit_mod_list_stream(app_handle, request_id, name, "icon", Vec::new(), icons, "");
+        }
     }
     emit_mod_list_stream(
         app_handle,
@@ -205,6 +260,7 @@ fn collect_mod_infos(game_dir: &str, name: &str) -> Result<(PathBuf, Vec<ModInfo
                     enabled,
                     size_kb,
                     icon_url: String::new(),
+                    icon_urls: Vec::new(),
                 });
             }
         }
@@ -229,6 +285,259 @@ fn read_mod_icon_url(path: &Path) -> Option<String> {
         return None;
     }
     Some(format!("data:{};base64,{}", mime, base64_encode(&bytes)))
+}
+
+fn build_icon_patch(file_name: &str, urls: Vec<String>) -> Option<ModIconPatch> {
+    let icon_urls = unique_icon_urls(urls);
+    let icon_url = icon_urls.first()?.clone();
+    Some(ModIconPatch {
+        file_name: file_name.to_string(),
+        icon_url,
+        icon_urls,
+    })
+}
+
+fn load_mod_icon_sources(
+    game_dir: &str,
+    name: &str,
+) -> Result<HashMap<String, ModIconSource>, String> {
+    let game_root = resolve_game_dir(game_dir);
+    let safe_name = safe_path_name(name, "版本名")?;
+    let path = game_root
+        .join(MOD_UPDATE_CACHE_DIR)
+        .join(MOD_UPDATE_CACHE_SUBDIR)
+        .join(format!("{}.json", safe_index_name(&safe_name)));
+    let data = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let cache: ModIconCache = serde_json::from_str(&data).map_err(|err| err.to_string())?;
+    let mut out = HashMap::new();
+    for file in cache.files.into_values() {
+        let source = ModIconSource {
+            modrinth_project_id: file
+                .modrinth_project_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            curseforge_project_id: file.curseforge_project_id,
+        };
+        if source.modrinth_project_id.is_none() && source.curseforge_project_id.is_none() {
+            continue;
+        }
+        let rel = file.rel.replace('\\', "/");
+        if !rel.is_empty() {
+            insert_icon_source_key(&mut out, rel, source.clone());
+        }
+        if !file.file_name.is_empty() {
+            insert_icon_source_key(&mut out, format!("mods/{}", file.file_name), source);
+        }
+    }
+    Ok(out)
+}
+
+fn insert_icon_source_key(
+    out: &mut HashMap<String, ModIconSource>,
+    key: String,
+    source: ModIconSource,
+) {
+    out.insert(key.clone(), source.clone());
+    if let Some(enabled) = key.strip_suffix(".disabled") {
+        out.entry(enabled.to_string()).or_insert(source);
+    } else {
+        out.entry(format!("{}.disabled", key)).or_insert(source);
+    }
+}
+
+fn icon_source_for_file(
+    sources: &HashMap<String, ModIconSource>,
+    file_name: &str,
+) -> Option<ModIconSource> {
+    let rel = format!("mods/{}", file_name);
+    sources.get(&rel).cloned().or_else(|| {
+        rel.strip_suffix(".disabled")
+            .and_then(|enabled| sources.get(enabled).cloned())
+    })
+}
+
+fn lookup_online_mod_icon_urls(requests: &[OnlineIconRequest]) -> HashMap<String, Vec<String>> {
+    if requests.is_empty() {
+        return HashMap::new();
+    }
+    let http = match reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) oaoi-launcher/1.0")
+        .build()
+    {
+        Ok(http) => http,
+        Err(_) => return HashMap::new(),
+    };
+
+    let modrinth_ids = requests
+        .iter()
+        .filter_map(|item| item.source.modrinth_project_id.clone())
+        .collect::<HashSet<_>>();
+    let curseforge_ids = requests
+        .iter()
+        .filter_map(|item| item.source.curseforge_project_id)
+        .collect::<HashSet<_>>();
+    let mr_icons = lookup_modrinth_project_icons(&http, &modrinth_ids);
+    let cf_icons = lookup_curseforge_project_icons(&http, &curseforge_ids);
+
+    let mut out = HashMap::new();
+    for item in requests {
+        let mut urls = Vec::new();
+        if let Some(project_id) = item.source.modrinth_project_id.as_deref() {
+            if let Some(icon) = mr_icons.get(project_id) {
+                urls.push(icon.clone());
+            }
+        }
+        if let Some(project_id) = item.source.curseforge_project_id {
+            if let Some(icons) = cf_icons.get(&project_id) {
+                urls.extend(icons.clone());
+            }
+        }
+        let urls = unique_icon_urls(urls);
+        if !urls.is_empty() {
+            out.insert(item.file_name.clone(), urls);
+        }
+    }
+    out
+}
+
+fn lookup_modrinth_project_icons(
+    http: &reqwest::blocking::Client,
+    ids: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let ids = ids.iter().cloned().collect::<Vec<_>>();
+    for chunk in ids.chunks(100) {
+        let Ok(ids_json) = serde_json::to_string(chunk) else {
+            continue;
+        };
+        let url = format!(
+            "{}?ids={}",
+            MODRINTH_PROJECTS_API,
+            urlencoding::encode(&ids_json)
+        );
+        let Ok(resp) = http.get(url).send() else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(json) = resp.json::<JsonValue>() else {
+            continue;
+        };
+        let Some(items) = json.as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(id) = item["id"].as_str() else {
+                continue;
+            };
+            let Some(icon_url) = item["icon_url"].as_str().and_then(non_empty_string) else {
+                continue;
+            };
+            out.insert(id.to_string(), icon_url);
+        }
+    }
+    out
+}
+
+fn lookup_curseforge_project_icons(
+    http: &reqwest::blocking::Client,
+    ids: &HashSet<u32>,
+) -> HashMap<u32, Vec<String>> {
+    let mut out = HashMap::new();
+    let ids = ids.iter().copied().collect::<Vec<_>>();
+    for chunk in ids.chunks(100) {
+        let body = serde_json::json!({ "modIds": chunk, "filterPcOnly": true });
+        let Ok(resp) = http
+            .post(CURSEFORGE_MODS_API)
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+        else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(json) = resp.json::<JsonValue>() else {
+            continue;
+        };
+        let Some(items) = json["data"].as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(id) = item["id"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                continue;
+            };
+            let mut urls = Vec::new();
+            if let Some(url) = item["logo"]["thumbnailUrl"]
+                .as_str()
+                .and_then(non_empty_string)
+            {
+                push_curseforge_icon_urls(&mut urls, &url);
+            }
+            if let Some(url) = item["logo"]["url"].as_str().and_then(non_empty_string) {
+                push_curseforge_icon_urls(&mut urls, &url);
+            }
+            let urls = unique_icon_urls(urls);
+            if !urls.is_empty() {
+                out.insert(id, urls);
+            }
+        }
+    }
+    out
+}
+
+fn push_curseforge_icon_urls(out: &mut Vec<String>, url: &str) {
+    let Some(path) = forgecdn_path(url) else {
+        out.push(url.to_string());
+        return;
+    };
+    // CF 图片有多个 CDN 域名，前端会按顺序失败切换。
+    for host in [
+        "media.forgecdn.net",
+        "edge.forgecdn.net",
+        "mediafilez.forgecdn.net",
+    ] {
+        out.push(format!("https://{}{}", host, path));
+    }
+}
+
+fn forgecdn_path(url: &str) -> Option<&str> {
+    for host in [
+        "https://media.forgecdn.net",
+        "https://edge.forgecdn.net",
+        "https://mediafilez.forgecdn.net",
+        "http://media.forgecdn.net",
+        "http://edge.forgecdn.net",
+        "http://mediafilez.forgecdn.net",
+    ] {
+        if let Some(path) = url.strip_prefix(host) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn unique_icon_urls(urls: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for url in urls {
+        let trimmed = url.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
 }
 
 fn find_mod_icon_path(archive: &mut ZipArchive<File>) -> Option<String> {
@@ -288,10 +597,10 @@ fn extract_icon_value(value: Option<&JsonValue>) -> Option<String> {
                 })
                 .collect::<Vec<_>>();
             sized.sort_by_key(|(size, _)| *size);
-            sized
-                .pop()
-                .map(|(_, path)| path)
-                .or_else(|| map.values().find_map(|value| value.as_str().map(str::to_string)))
+            sized.pop().map(|(_, path)| path).or_else(|| {
+                map.values()
+                    .find_map(|value| value.as_str().map(str::to_string))
+            })
         }
         _ => None,
     }
