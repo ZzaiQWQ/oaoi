@@ -4,7 +4,7 @@
 //! scheme + host + port，避免把不同 CDN 或镜像源混在一起。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
@@ -25,6 +25,14 @@ pub struct SourceCooldowns {
     entries: Mutex<HashMap<String, SourceCooldownEntry>>,
     // 入口地址可能会重定向到实际 CDN，这里只把入口映射到真实冷却源。
     aliases: Mutex<HashMap<String, String>>,
+}
+
+/// 正式运行时共享同一份源冷却状态，避免不同下载阶段反复撞击已限流的源。
+pub fn process_source_cooldowns() -> Arc<SourceCooldowns> {
+    static COOLDOWNS: OnceLock<Arc<SourceCooldowns>> = OnceLock::new();
+    COOLDOWNS
+        .get_or_init(|| Arc::new(SourceCooldowns::default()))
+        .clone()
 }
 
 impl SourceCooldowns {
@@ -127,8 +135,7 @@ pub fn source_key(url: &str) -> String {
 
 pub fn is_source_pressure_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    error.contains("429")
-        || error.contains("下载过慢")
+    error.contains("下载过慢")
         || error.contains("下载卡住")
         || error.contains("请求超时")
         || error.contains("超时")
@@ -140,8 +147,55 @@ pub fn is_source_pressure_error(error: &str) -> bool {
         || lower.contains("deadline")
         || lower.contains("connection reset")
         || lower.contains("connection closed")
-        || lower.contains("http status 408")
-        || lower.contains("http status 429")
-        || lower.contains("http status 503")
-        || lower.contains("http status 522")
+        || has_http_status(&lower, 408)
+        || has_http_status(&lower, 429)
+        || has_http_status(&lower, 503)
+        || has_http_status(&lower, 522)
+}
+
+fn has_http_status(error: &str, expected: u16) -> bool {
+    for marker in ["http status ", "http "] {
+        let mut remaining = error;
+        while let Some(offset) = remaining.find(marker) {
+            let value = &remaining[offset + marker.len()..];
+            let digits = value
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>();
+            if digits.parse::<u16>().ok() == Some(expected) {
+                return true;
+            }
+            remaining = value.get(digits.len()..).unwrap_or_default();
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_cooldowns_share_one_instance() {
+        let first = process_source_cooldowns();
+        let second = process_source_cooldowns();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn pressure_status_requires_http_status_context() {
+        assert!(is_source_pressure_error(
+            "http status 429 Too Many Requests"
+        ));
+        assert!(is_source_pressure_error(
+            "mirror HTTP 429 Too Many Requests"
+        ));
+        assert!(!is_source_pressure_error(
+            "sha1 mismatch: expected abc429def, got 001122"
+        ));
+        assert!(!is_source_pressure_error(
+            "https://example.invalid/files/429/archive.jar"
+        ));
+    }
 }

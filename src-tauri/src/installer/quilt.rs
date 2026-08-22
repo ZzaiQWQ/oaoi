@@ -1,11 +1,15 @@
-use super::{make_emitter, merge_libraries, parallel_download, safe_maven_path};
+use super::{
+    fetch_json_cancelable, make_emitter, merge_libraries, parallel_download, safe_maven_path,
+    LoaderDownloadTask,
+};
 use crate::instance::libraries_dir;
 use tauri::Emitter;
 
-/// 安装 Quilt loader
-pub fn install_quilt(
+/// 安装 Quilt loader。
+pub fn install_quilt_with_cancel_name(
     app_handle: &tauri::AppHandle,
     name: &str,
+    cancel_name: &str,
     mc_version: &str,
     loader_version: &str,
     game_dir: &std::path::Path,
@@ -27,17 +31,18 @@ pub fn install_quilt(
         "https://meta.quiltmc.org/v3/versions/loader/{}/{}/profile/json",
         mc_version, loader_version
     );
-    let profile_resp = http
-        .get(&profile_url)
-        .send()
-        .map_err(|e| format!("获取 Quilt 配置失败: {}", e))?;
-    let quilt_profile: serde_json::Value = profile_resp
-        .json()
-        .map_err(|e| format!("解析 Quilt 配置失败: {}", e))?;
+    let quilt_profile = fetch_json_cancelable(
+        http,
+        &profile_url,
+        cancel_name,
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| format!("获取 Quilt 配置失败: {}", e))?;
+    validate_loader_profile(&quilt_profile, "Quilt")?;
 
     // 下载 Quilt 库
     if let Some(quilt_libs) = quilt_profile["libraries"].as_array() {
-        let mut quilt_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
+        let mut quilt_tasks: Vec<LoaderDownloadTask> = Vec::new();
 
         for lib in quilt_libs {
             let name_str = lib["name"].as_str().unwrap_or("");
@@ -45,13 +50,14 @@ pub fn install_quilt(
                 .as_str()
                 .unwrap_or("https://maven.quiltmc.org/repository/release/");
             let sha1 = lib["sha1"].as_str();
+            let size = lib["size"].as_u64();
 
             if name_str.is_empty() {
-                continue;
+                return Err("Quilt 配置中的依赖库缺少 name".to_string());
             }
             let parts: Vec<&str> = name_str.split(':').collect();
             if parts.len() < 3 {
-                continue;
+                return Err(format!("Quilt 依赖库坐标无效: {}", name_str));
             }
             let group_path = parts[0].replace('.', "/");
             let artifact = parts[1];
@@ -62,12 +68,11 @@ pub fn install_quilt(
                 format!("{}-{}.jar", artifact, version)
             };
             let relative_path = format!("{}/{}/{}/{}", group_path, artifact, version, jar_name);
-            let url = format!("{}{}", maven_url, relative_path);
-            let Ok(relative_path) = safe_maven_path(&relative_path) else {
-                continue;
-            };
+            let url = format!("{}/{}", maven_url.trim_end_matches('/'), relative_path);
+            let relative_path = safe_maven_path(&relative_path)
+                .map_err(|e| format!("Quilt 依赖库路径无效 {}: {}", name_str, e))?;
             let dest = libraries_dir(game_dir).join(relative_path);
-            quilt_tasks.push((url, dest, sha1.map(|s| s.to_string())));
+            quilt_tasks.push((url, dest, sha1.map(|s| s.to_string()), size));
         }
         let total = quilt_tasks.len();
         emit("quilt", 0, total, &format!("下载 Quilt 库 0/{}", total));
@@ -94,7 +99,7 @@ pub fn install_quilt(
             std::thread::sleep(std::time::Duration::from_millis(300));
         });
         let download_result =
-            parallel_download(http, quilt_tasks, &done, 32, use_mirror, Some(name));
+            parallel_download(http, quilt_tasks, &done, 32, use_mirror, Some(cancel_name));
         let _ = reporter.join();
         download_result.map_err(|e| format!("Quilt libraries failed: {}", e))?;
         emit("quilt", total, total, "Quilt 库下载完成");
@@ -142,5 +147,26 @@ pub fn install_quilt(
         "version": loader_version
     });
     emit("quilt", 1, 1, "Quilt 配置完成");
+    Ok(())
+}
+
+fn validate_loader_profile(profile: &serde_json::Value, loader: &str) -> Result<(), String> {
+    if !profile.is_object() {
+        return Err(format!("{} 配置格式错误", loader));
+    }
+    if profile
+        .get("mainClass")
+        .and_then(|value| value.as_str())
+        .map_or(true, |value| value.trim().is_empty())
+    {
+        return Err(format!("{} 配置缺少 mainClass", loader));
+    }
+    if profile
+        .get("libraries")
+        .and_then(|value| value.as_array())
+        .is_none()
+    {
+        return Err(format!("{} 配置缺少 libraries", loader));
+    }
     Ok(())
 }

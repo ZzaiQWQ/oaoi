@@ -35,19 +35,6 @@ function syncFrontend() {
   }
 }
 
-function syncReleaseExtras() {
-  const modcnSource = path.join(rootDir, 'src-tauri', 'modcn.txt');
-  if (!fs.existsSync(modcnSource)) return;
-
-  const releaseDir = path.join(rootDir, 'src-tauri', 'target', 'release');
-  fs.mkdirSync(releaseDir, { recursive: true });
-  fs.copyFileSync(modcnSource, path.join(releaseDir, 'modcn.txt'));
-}
-
 syncFrontend();
-
-if (process.argv.includes('--release')) {
-  syncReleaseExtras();
-}
 
 console.log(`[sync-dist] frontend copied to ${path.relative(rootDir, distDir)}`);

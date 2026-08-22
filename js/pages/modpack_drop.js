@@ -31,12 +31,14 @@ async function initModpackDrop() {
       clearTimeout(receiveTimer);
       receiveTimer = null;
     }
-    overlay.classList.toggle('is-received', mode === 'received');
+    overlay.classList.toggle('is-received', mode === 'received' || mode === 'blocked');
     overlay.classList.add('is-visible');
     overlay.style.visibility = 'visible';
     overlay.style.opacity = '1';
     if (mode === 'received') {
       setOverlayText('正在导入整合包', fileName || '后台开始处理整合包', '✓');
+    } else if (mode === 'blocked') {
+      setOverlayText('请先选择游戏目录', '整合包尚未开始导入', '!');
     } else {
       setOverlayText('松开以导入整合包', '支持 CurseForge (.zip) 和 Modrinth (.mrpack)', '📦');
     }
@@ -74,13 +76,25 @@ async function initModpackDrop() {
         pill.innerHTML = '';
       }, 300);
       if (hideModal) {
-        const modal = document.getElementById('dlDetailModal');
-        if (modal) modal.classList.add('hidden');
+        closeDownloadDetail(dropId);
       }
     }, delay);
   }
 
   const tauri = await waitForTauri();
+  const pageEventUnlisteners = [];
+  const listenPageEvent = async (eventName, handler) => {
+    try {
+      const unlisten = await tauri.event.listen(eventName, handler);
+      pageEventUnlisteners.push(unlisten);
+      return unlisten;
+    } catch (error) {
+      pageEventUnlisteners.splice(0).forEach(unlisten => {
+        try { unlisten(); } catch (cleanupError) { console.warn('[modpack-drop] 清理页面监听器失败:', cleanupError); }
+      });
+      throw error;
+    }
+  };
   let dragDepth = 0;
   let dragHoverTimer = null;
 
@@ -103,7 +117,7 @@ async function initModpackDrop() {
       clearTimeout(dragHoverTimer);
       dragHoverTimer = null;
     }
-    showDropOverlay('ready');
+    showDropOverlay(localStorage.getItem('gameDir') ? 'ready' : 'blocked');
     scheduleDragOverlayHide(420);
   }
 
@@ -136,28 +150,32 @@ async function initModpackDrop() {
   }, true);
 
   // 显示/隐藏拖拽蒙层（由 Rust 端的 DragDropEvent 触发）
-  await tauri.event.listen('modpack-drag-enter', () => {
+  await listenPageEvent('modpack-drag-enter', () => {
     dragDepth = Math.max(1, dragDepth);
     keepDragOverlayVisible();
   });
-  await tauri.event.listen('modpack-drag-leave', () => {
+  await listenPageEvent('modpack-drag-leave', () => {
     dragDepth = 0;
     scheduleDragOverlayHide(220);
   });
 
-  // 处理文件路径，执行安装
-  await tauri.event.listen('modpack-drop', async (evt) => {
-    const filePath = evt.payload?.path;
-    if (!filePath) {
-      hideDropOverlay();
+  const dropQueue = [];
+  let dropQueueRunning = false;
+
+  async function processDroppedModpack(job) {
+    const { filePath, gameDir, javaPath, useMirror } = job;
+    const displayName = filePath.split(/[/\\]/).pop() || '整合包';
+    if (!String(gameDir || '').trim()) {
+      showDropOverlay('blocked');
+      hideDropOverlay(2200);
+      showToast('请先选择游戏目录，再导入整合包', 'warn');
       return;
     }
-
-    const gameDir = localStorage.getItem('gameDir') || '';
-    const javaPath = localStorage.getItem('selectedJavaPath') || '';
-    const useMirror = (localStorage.getItem('downloadSource') || 'official') === 'bmcl';
-    const displayName = filePath.split(/[/\\]/).pop() || '整合包';
-    const dlId = 'droppill-' + Date.now();
+    if (!acquireInstallEventName(displayName)) {
+      showToast(`同名安装任务正在进行: ${displayName}`, 'warn');
+      return;
+    }
+    const dlId = createUiTaskId('droppill');
     dragDepth = 0;
     if (dragHoverTimer) {
       clearTimeout(dragHoverTimer);
@@ -180,6 +198,7 @@ async function initModpackDrop() {
           <span class="drop-pill-icon">📦</span>
           <span id="${dlId}-name">${escapeHtml(displayName)}</span>
         </div>
+        <button class="dl-cancel-btn" id="${dlId}-cancel" type="button" title="取消安装" disabled>✕</button>
         <span class="drop-pill-expand">点击查看详情 ›</span>
       </div>
       <div class="drop-pill-status" id="${dlId}-status">准备中...</div>
@@ -195,136 +214,173 @@ async function initModpackDrop() {
     stagesData.style.display = 'none';
     pill.appendChild(stagesData);
 
-    // 2. 点击胶囊打开详情弹窗（复用下载页的 dlDetailModal）
+    // 2. 点击胶囊打开详情弹窗
     pill.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
-      let modal = document.getElementById('dlDetailModal');
-      if (!modal) {
-        document.body.insertAdjacentHTML('beforeend', `
-          <div class="dl-detail-modal hidden" id="dlDetailModal">
-            <div class="dl-detail-content">
-              <div class="dl-detail-header">
-                <span class="dl-detail-title">安装详情</span>
-                <button class="dl-detail-close" id="dlDetailClose">✕</button>
-              </div>
-              <div class="dl-detail-stages" id="dlDetailStages"></div>
-            </div>
-          </div>
-        `);
-        modal = document.getElementById('dlDetailModal');
-        document.getElementById('dlDetailClose').addEventListener('click', () => {
-          modal.classList.add('hidden');
-        });
-        modal.addEventListener('click', (e) => {
-          if (e.target === modal) modal.classList.add('hidden');
-        });
-      }
-      const title = modal.querySelector('.dl-detail-title');
-      if (title) title.textContent = `📦 ${displayName}`;
-      const modalStages = document.getElementById('dlDetailStages');
-      if (modalStages && stagesData) {
-        modalStages.innerHTML = stagesData.innerHTML;
-      }
-      modal.classList.remove('hidden');
+      openDownloadDetail(dlId, displayName, stagesData);
     };
 
     // 3. 监听安装进度
-    const STAGE_LABELS2 = (typeof STAGE_LABELS !== 'undefined') ? STAGE_LABELS : {};
     const statusEl = document.getElementById(`${dlId}-status`);
     const barEl = document.getElementById(`${dlId}-bar`);
-
+    const cancelBtn = document.getElementById(`${dlId}-cancel`);
     let unlisten = null;
+    let terminalSettled = false;
+    let terminalWatchdog = null;
+    let resolveTerminal = null;
+    const terminalPromise = new Promise(resolve => {
+      resolveTerminal = resolve;
+    });
+
+    const cancelController = createInstallCancelController({
+      tauri,
+      fileName: displayName,
+      gameDir,
+      getCancelButton: () => cancelBtn,
+      getStatusElement: () => statusEl,
+      requireBackendReady: true,
+      logPrefix: 'modpack-drop',
+    });
+
+    cancelBtn?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await cancelController.requestCancel();
+    });
+
+    const finishTask = (stage) => {
+      if (terminalSettled) return;
+      terminalSettled = true;
+      if (terminalWatchdog) {
+        clearTimeout(terminalWatchdog);
+        terminalWatchdog = null;
+      }
+      cancelController.settle();
+      releaseInstallEventName(displayName);
+      try {
+        if (unlisten) unlisten();
+      } catch (err) {
+        console.warn('[modpack-drop] 清理进度监听失败:', err);
+      }
+      resolveTerminal(stage);
+    };
+
+    const resetTerminalWatchdog = () => {
+      if (terminalWatchdog) clearTimeout(terminalWatchdog);
+      terminalWatchdog = setTimeout(async () => {
+        if (terminalSettled) return;
+        try {
+          await cancelController.requestCancel();
+        } catch (cancelError) {
+          console.warn('[modpack-drop] 超时取消安装失败:', cancelError);
+        }
+        if (terminalSettled) return;
+        const detail = '安装进度长时间没有更新，已结束当前队列等待';
+        renderInstallTerminal({ taskId: dlId, stage: 'error', detail, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData, cancelButton: cancelBtn });
+        pill.classList.add('error');
+        hidePillLater(dlId, 5000, false);
+        finishTask('timeout');
+      }, 300000);
+    };
+
     try {
       unlisten = await tauri.event.listen('install-progress', (event) => {
-        const { name: evtName, stage, current, total, detail } = event.payload;
+        const { name: evtName, stage, current, total, detail } = event.payload || {};
         // 拖拽导入后端统一用 displayName 发进度，必须精确匹配，避免同名前缀任务串进度。
         if (evtName !== displayName) return;
+        resetTerminalWatchdog();
+        cancelController.markBackendReady();
         if (stage === 'done') {
-          if (statusEl) statusEl.textContent = '✅ 安装完成！';
-          if (barEl) { barEl.style.width = '100%'; barEl.style.opacity = '0.5'; }
+          renderInstallTerminal({ taskId: dlId, stage, detail, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData, cancelButton: cancelBtn });
           pill.classList.add('done');
-          stagesData.innerHTML = '<div class="dl-stage-row"><span class="dl-stage-label">✅ 安装完成！</span></div>';
-          // 更新弹窗
-          const modalStages = document.getElementById('dlDetailStages');
-          if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
           if (typeof loadInstalledVersions === 'function') loadInstalledVersions();
           hidePillLater(dlId, 2500, true);
-          if (unlisten) unlisten();
+          finishTask(stage);
         } else if (stage === 'error' || stage === 'cancelled') {
-          const icon = stage === 'cancelled' ? '🚫' : '❌';
-          const msg = stage === 'cancelled' ? '已取消' : detail;
-          if (statusEl) statusEl.textContent = `${icon} ${msg}`;
+          renderInstallTerminal({ taskId: dlId, stage, detail, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData, cancelButton: cancelBtn });
           pill.classList.add('error');
-          stagesData.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
-          const modalStages = document.getElementById('dlDetailStages');
-          if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
           hidePillLater(dlId, 3000, false);
-          if (unlisten) unlisten();
+          finishTask(stage);
         } else {
-          // 正常进度更新
-          const label = STAGE_LABELS2[stage] || stage;
-          if (total > 0) {
-            const progressText = formatStageProgress(current, total, stage);
-            if (statusEl) statusEl.textContent = `${label} ${progressText}`;
-            if (barEl) barEl.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
-          } else {
-            if (statusEl) statusEl.textContent = label;
-          }
-
-          // 更新隐藏的 stages 容器
-          const stageElId = `${dlId}-stage-${stage}`;
-          let row = document.getElementById(stageElId);
-          if (!row) {
-            stagesData.insertAdjacentHTML('beforeend', `
-              <div class="dl-stage-row" id="${stageElId}">
-                <div class="dl-stage-head">
-                  <span class="dl-stage-label">${label}</span>
-                  <span class="dl-stage-count" id="${stageElId}-count"></span>
-                </div>
-                <div class="dl-progress-bar-wrap" style="height:4px;">
-                  <div class="dl-progress-bar" id="${stageElId}-bar" style="width:0%"></div>
-                </div>
-              </div>
-            `);
-            row = document.getElementById(stageElId);
-          }
-          const countEl = document.getElementById(`${stageElId}-count`);
-          const stageBarEl = document.getElementById(`${stageElId}-bar`);
-          if (total > 0) {
-            const pct = Math.min(100, Math.round((current / total) * 100));
-            if (countEl) {
-              countEl.textContent = formatStageProgress(current, total, stage);
-            }
-            if (stageBarEl) stageBarEl.style.width = pct + '%';
-            if (pct >= 100 && stageBarEl) stageBarEl.style.opacity = '0.5';
-          } else {
-            if (countEl) countEl.textContent = detail;
-          }
-
-          // 如果弹窗打开着，实时同步
-          const modal = document.getElementById('dlDetailModal');
-          if (modal && !modal.classList.contains('hidden')) {
-            const modalStages = document.getElementById('dlDetailStages');
-            if (modalStages) modalStages.innerHTML = stagesData.innerHTML;
-          }
+          renderInstallProgress({ taskId: dlId, stage, current, total, detail, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData });
         }
       });
 
       // 4. 发起安装
-      await tauri.core.invoke('import_modpack', {
-        zipPath: filePath,
-        gameDir,
-        javaPath,
-        useMirror,
-        displayName,
-      });
+      try {
+        resetTerminalWatchdog();
+        await tauri.core.invoke('import_modpack', {
+          zipPath: filePath,
+          gameDir,
+          javaPath,
+          useMirror,
+          displayName,
+        });
+      } catch (err) {
+        if (!terminalSettled) {
+          renderInstallTerminal({ taskId: dlId, stage: 'error', detail: `导入失败: ${err}`, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData, cancelButton: cancelBtn });
+          pill.classList.add('error');
+          console.error('[modpack-drop]', err);
+          hidePillLater(dlId, 4000, false);
+          finishTask('invoke-error');
+        }
+      }
     } catch (err) {
-      if (unlisten) unlisten();
-      if (statusEl) statusEl.textContent = `❌ 导入失败: ${err}`;
-      pill.classList.add('error');
-      console.error('[modpack-drop]', err);
-      hidePillLater(dlId, 4000, false);
+      if (!terminalSettled) {
+        renderInstallTerminal({ taskId: dlId, stage: 'error', detail: `导入失败: ${err}`, statusElement: statusEl, mainBar: barEl, stagesContainer: stagesData, cancelButton: cancelBtn });
+        pill.classList.add('error');
+        console.error('[modpack-drop]', err);
+        hidePillLater(dlId, 4000, false);
+        finishTask('setup-error');
+      }
     }
+    await terminalPromise;
+  }
+
+  async function processDropQueue() {
+    if (dropQueueRunning) return;
+    dropQueueRunning = true;
+    try {
+      while (dropQueue.length > 0) {
+        const job = dropQueue.shift();
+        try {
+          await processDroppedModpack(job);
+        } catch (err) {
+          console.error('[modpack-drop] 处理队列失败:', err);
+        }
+      }
+    } finally {
+      dropQueueRunning = false;
+      if (dropQueue.length > 0) processDropQueue();
+    }
+  }
+
+  // 单个浮动条按顺序处理任务，避免多个拖拽任务互相覆盖状态。
+  await listenPageEvent('modpack-drop', (evt) => {
+    const filePath = evt.payload?.path;
+    if (!filePath) {
+      hideDropOverlay();
+      return;
+    }
+    const displayName = filePath.split(/[/\\]/).pop() || '整合包';
+    const gameDir = localStorage.getItem('gameDir') || '';
+    if (!String(gameDir).trim()) {
+      // 首次目录尚未确认时绝不把空目录交给后端，避免回退到系统默认目录。
+      showDropOverlay('blocked');
+      hideDropOverlay(2200);
+      showToast('请先选择游戏目录，再导入整合包', 'warn');
+      return;
+    }
+    showDropOverlay('received', displayName);
+    hideDropOverlay(900);
+    // 排队任务必须保留拖入瞬间的目标目录，切换设置不能改变已入队任务。
+    dropQueue.push({
+      filePath,
+      gameDir,
+      javaPath: localStorage.getItem('selectedJavaPath') || '',
+      useMirror: (localStorage.getItem('downloadSource') || 'official') === 'bmcl',
+    });
+    processDropQueue();
   });
 }

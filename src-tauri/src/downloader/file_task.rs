@@ -22,14 +22,14 @@ use crate::downloader::segment::{
 use crate::downloader::source_cooldown::{is_source_pressure_error, SourceCooldowns};
 use crate::downloader::source_selector;
 use crate::downloader::throttle::GlobalThrottle;
-use reqwest::header::{HeaderValue, CONTENT_RANGE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_RANGE, ETAG, LAST_MODIFIED};
 use reqwest::{Method, StatusCode};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,10 +40,67 @@ struct CandidateAttemptError {
     kind: CandidateAttemptErrorKind,
 }
 
+struct StreamingPartCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StreamingPartCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StreamingPartCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            // 只清理本轮已经成功创建的流式临时文件，不碰尚未由本轮接管的旧断点。
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandidateAttemptErrorKind {
     Ordinary,
     ResumeUnavailable,
+}
+
+#[derive(Clone, Debug)]
+enum RangeIdentityValidator {
+    StrongEtag(String),
+    LastModified(String),
+}
+
+impl RangeIdentityValidator {
+    fn value(&self) -> &str {
+        match self {
+            Self::StrongEtag(value) | Self::LastModified(value) => value,
+        }
+    }
+
+    fn validate_response(&self, headers: &HeaderMap) -> Result<(), String> {
+        let (name, expected) = match self {
+            Self::StrongEtag(expected) => (ETAG, expected),
+            Self::LastModified(expected) => (LAST_MODIFIED, expected),
+        };
+        let Some(actual) = headers.get(name) else {
+            return Ok(());
+        };
+        let actual = actual
+            .to_str()
+            .map_err(|e| format!("invalid range identity header: {e}"))?;
+        if actual != expected {
+            return Err(format!(
+                "range identity changed: expected {expected}, got {actual}"
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl CandidateAttemptError {
@@ -195,6 +252,8 @@ impl FileTask {
 
     fn try_run(&self, request: &DownloadRequest) -> Result<FileTaskResult, String> {
         validate_request(request)?;
+        // 流式兜底文件不可续传，新任务开始时直接清理上次异常退出的残留。
+        let _ = fs::remove_file(download_fs::streaming_fallback_path(&request.dest));
 
         if download_fs::existing_file_ok(
             &request.dest,
@@ -225,14 +284,13 @@ impl FileTask {
         let mut failures = Vec::new();
         let mut defer_wait = None;
         let mut defer_reasons = Vec::new();
-        let resume_artifacts_present = request.allow_resume && has_resume_artifacts(&request.dest);
-        let mut resume_unavailable_failures = 0_usize;
+        let mut streaming_fallbacks = Vec::new();
 
         for (candidate_index, candidate) in candidates.iter().enumerate() {
             let has_next_candidate = candidate_index + 1 < candidates.len();
             let mut attempt = self.retry_attempt_offset;
 
-            loop {
+            'candidate_attempt: {
                 if self.cancel.load(Ordering::Relaxed) {
                     return Err("cancelled".to_string());
                 }
@@ -258,7 +316,7 @@ impl FileTask {
                         reason.clone(),
                     );
                     failures.push(format!("{}: {}", candidate.url, reason));
-                    break;
+                    break 'candidate_attempt;
                 }
 
                 (self.on_event)(DownloadEvent::CandidateStarted {
@@ -298,9 +356,7 @@ impl FileTask {
                             pressure_wait = Some(cooldown.remaining);
                         }
 
-                        if !has_next_candidate
-                            && self.should_retry_candidate(&error_message, attempt)
-                        {
+                        if self.should_retry_candidate(&error_message, attempt) {
                             attempt += 1;
                             self.emit_candidate_retrying(
                                 request,
@@ -335,10 +391,19 @@ impl FileTask {
                             );
                         }
                         if error_kind == CandidateAttemptErrorKind::ResumeUnavailable {
-                            resume_unavailable_failures += 1;
+                            if !streaming_fallbacks
+                                .iter()
+                                .any(|(index, _, _)| *index == candidate_index)
+                            {
+                                streaming_fallbacks.push((
+                                    candidate_index,
+                                    error.cooldown_url.clone(),
+                                    error_message.clone(),
+                                ));
+                            }
                         }
                         failures.push(format!("{}: {}", candidate.url, error_message));
-                        break;
+                        break 'candidate_attempt;
                     }
                 }
             }
@@ -351,14 +416,99 @@ impl FileTask {
             });
         }
 
-        if resume_artifacts_present && resume_unavailable_failures == candidates.len() {
-            self.discard_resume_artifacts(&request.dest);
-            let mut fresh_request = request.clone();
-            fresh_request.allow_resume = false;
-            return self.try_run(&fresh_request);
+        if !streaming_fallbacks.is_empty() {
+            // 有可续传数据时使用独立临时文件；禁用续传时直接从零流式重试。
+            return self.try_streaming_fallbacks(request, &candidates, &streaming_fallbacks);
         }
 
         Err(format!("all candidates failed: {}", failures.join(" | ")))
+    }
+
+    fn try_streaming_fallbacks(
+        &self,
+        request: &DownloadRequest,
+        candidates: &[crate::downloader::request::DownloadCandidate],
+        fallbacks: &[(usize, String, String)],
+    ) -> Result<FileTaskResult, String> {
+        let mut failures = Vec::new();
+        let mut defer_wait = None;
+        let mut defer_reasons = Vec::new();
+        let preserve_resume_artifacts = request.allow_resume && has_resume_artifacts(&request.dest);
+        for (fallback_index, (candidate_index, url, range_error)) in fallbacks.iter().enumerate() {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".to_string());
+            }
+
+            (self.on_event)(DownloadEvent::CandidateStarted {
+                request_id: request.id.clone(),
+                candidate_index: *candidate_index,
+                candidate_total: candidates.len(),
+                url: url.clone(),
+            });
+            let has_next_candidate = fallback_index + 1 < fallbacks.len();
+            match self.download_streaming(
+                request,
+                url,
+                request.expected_size,
+                false,
+                *candidate_index,
+                candidates.len(),
+                has_next_candidate,
+                preserve_resume_artifacts,
+            ) {
+                Ok(result) => return Ok(FileTaskResult::Finished(result)),
+                Err(stream_error) if stream_error == "cancelled" => return Err(stream_error),
+                Err(stream_error) => {
+                    let error = format!(
+                        "ranged download failed: {}; streaming fallback failed: {}",
+                        range_error, stream_error
+                    );
+                    self.emit_candidate_failed(
+                        request,
+                        *candidate_index,
+                        candidates.len(),
+                        url,
+                        &error,
+                    );
+                    if is_source_pressure_error(&stream_error) {
+                        let cooldown = self.cooldowns.mark_url(
+                            url,
+                            stream_error.clone(),
+                            self.options.source_cooldown_duration,
+                        );
+                        self.emit_source_cooling_down(
+                            request,
+                            url,
+                            &cooldown.key,
+                            cooldown.remaining,
+                            &cooldown.reason,
+                        );
+                        if let Some(candidate) = candidates.get(*candidate_index) {
+                            self.cooldowns.mark_alias(&candidate.url, url);
+                        }
+                        remember_defer(
+                            &mut defer_wait,
+                            &mut defer_reasons,
+                            cooldown.remaining,
+                            error.clone(),
+                        );
+                    }
+                    failures.push(format!("{}: {}", url, error));
+                }
+            }
+        }
+
+        if let Some(wait) = defer_wait {
+            return Ok(FileTaskResult::Deferred {
+                wait,
+                reason: summarize_defer_reasons(&defer_reasons, &failures),
+            });
+        }
+
+        Err(format!(
+            "all streaming fallbacks failed: {}",
+            failures.join(" | ")
+        ))
     }
 
     fn try_candidate(
@@ -386,6 +536,7 @@ impl FileTask {
                     candidate_index,
                     candidate_total,
                     has_next_candidate,
+                    false,
                 )
                 .map_err(|error| CandidateAttemptError::new(error, url));
         }
@@ -427,6 +578,7 @@ impl FileTask {
                         candidate_index,
                         candidate_total,
                         has_next_candidate,
+                        false,
                     )
                     .map_err(|stream_error| {
                         CandidateAttemptError::new(
@@ -457,26 +609,10 @@ impl FileTask {
                 Err(error) if error == "cancelled" => {
                     Err(CandidateAttemptError::new(error, &probe.url))
                 }
-                Err(error) if wants_resume => Err(CandidateAttemptError::new(error, &probe.url)),
-                Err(range_error) => self
-                    .download_streaming(
-                        request,
-                        &probe.url,
-                        Some(total),
-                        false,
-                        candidate_index,
-                        candidate_total,
-                        has_next_candidate,
-                    )
-                    .map_err(|stream_error| {
-                        CandidateAttemptError::new(
-                            format!(
-                                "ranged download failed: {}; streaming fallback failed: {}",
-                                range_error, stream_error
-                            ),
-                            &probe.url,
-                        )
-                    }),
+                Err(error) => {
+                    // 分片过程留下的断点先交给后续候选和下一轮重试，不能在当前源立即清掉。
+                    Err(CandidateAttemptError::resume_unavailable(error, &probe.url))
+                }
             }
         } else if wants_resume {
             Err(CandidateAttemptError::resume_unavailable(
@@ -492,6 +628,7 @@ impl FileTask {
                 candidate_index,
                 candidate_total,
                 has_next_candidate,
+                false,
             )
             .map_err(|error| CandidateAttemptError::new(error, &probe.url))
         }
@@ -539,6 +676,7 @@ impl FileTask {
             last_modified: probe.last_modified.clone(),
             allow_cross_source_resume: request.expected_sha1.is_some(),
         };
+        let range_validator = range_identity_validator(probe);
         let segments = if request.allow_resume && resume_existing {
             load_resume_state(&resume, &part, &identity).unwrap_or_else(|| {
                 let _ = fs::remove_file(&resume);
@@ -552,6 +690,7 @@ impl FileTask {
         download_fs::ensure_part_file(&part, total)?;
 
         let abort = Arc::new(AtomicBool::new(false));
+        let durability_lock = Arc::new(Mutex::new(()));
         let state = Arc::new(FileRuntimeState::new(request.id.clone(), total, segments));
         let mut handles = Vec::new();
         let mut target_connections = 1_usize;
@@ -574,14 +713,28 @@ impl FileTask {
             if self.cancel.load(Ordering::Relaxed) {
                 abort.store(true, Ordering::Relaxed);
                 join_handles(handles);
-                self.save_resume_checkpoint(request, &resume, &state, &identity);
+                self.save_resume_checkpoint(
+                    request,
+                    &part,
+                    &resume,
+                    &state,
+                    &identity,
+                    &durability_lock,
+                );
                 return Err("cancelled".to_string());
             }
 
             if let Some(error) = first_segment_error(&state) {
                 abort.store(true, Ordering::Relaxed);
                 join_handles(handles);
-                self.save_resume_checkpoint(request, &resume, &state, &identity);
+                self.save_resume_checkpoint(
+                    request,
+                    &part,
+                    &resume,
+                    &state,
+                    &identity,
+                    &durability_lock,
+                );
                 return Err(error);
             }
 
@@ -604,6 +757,8 @@ impl FileTask {
                 &part,
                 &state,
                 &abort,
+                &durability_lock,
+                range_validator.as_ref(),
                 target_connections,
             );
 
@@ -624,12 +779,21 @@ impl FileTask {
                     segment,
                     state.clone(),
                     abort.clone(),
+                    durability_lock.clone(),
+                    range_validator.clone(),
                     permit,
                 );
             }
 
             if last_resume_flush.elapsed() >= self.options.resume_flush_tick {
-                self.save_resume_checkpoint(request, &resume, &state, &identity);
+                self.save_resume_checkpoint(
+                    request,
+                    &part,
+                    &resume,
+                    &state,
+                    &identity,
+                    &durability_lock,
+                );
                 last_resume_flush = Instant::now();
             }
 
@@ -670,7 +834,14 @@ impl FileTask {
                 ) {
                     abort.store(true, Ordering::Relaxed);
                     join_handles(handles);
-                    self.save_resume_checkpoint(request, &resume, &state, &identity);
+                    self.save_resume_checkpoint(
+                        request,
+                        &part,
+                        &resume,
+                        &state,
+                        &identity,
+                        &durability_lock,
+                    );
                     return Err(candidate_health_error(action));
                 }
             }
@@ -711,13 +882,20 @@ impl FileTask {
         candidate_index: usize,
         candidate_total: usize,
         has_next_candidate: bool,
+        preserve_resume_artifacts: bool,
     ) -> Result<DownloadResult, String> {
         let _permit = self.pool.acquire(&self.cancel)?;
         download_fs::prepare_parent(&request.dest)?;
-        let part = download_fs::partial_path(&request.dest);
+        let part = if preserve_resume_artifacts {
+            download_fs::streaming_fallback_path(&request.dest)
+        } else {
+            download_fs::partial_path(&request.dest)
+        };
         let resume = download_fs::resume_path(&request.dest);
         let _ = fs::remove_file(&part);
-        let _ = fs::remove_file(&resume);
+        if !preserve_resume_artifacts {
+            let _ = fs::remove_file(&resume);
+        }
         let idle_timeout = effective_idle_timeout(
             self.options.read_timeout,
             self.options.candidate_no_progress_timeout,
@@ -743,6 +921,7 @@ impl FileTask {
             let total = resolve_total(response.content_length(), total)?;
             let mut file =
                 File::create(&part).map_err(|e| format!("create part file failed: {}", e))?;
+            let mut part_cleanup = StreamingPartCleanup::new(part.clone());
             let mut downloaded = 0_u64;
             let mut last_progress = Instant::now();
             let mut last_bytes = 0_u64;
@@ -807,6 +986,10 @@ impl FileTask {
                 total,
                 request.expected_sha1.as_deref(),
             )?;
+            part_cleanup.disarm();
+            if preserve_resume_artifacts {
+                self.discard_resume_artifacts(&request.dest);
+            }
 
             Ok(DownloadResult {
                 request_id: request.id.clone(),
@@ -828,6 +1011,8 @@ impl FileTask {
         part: &Path,
         state: &Arc<FileRuntimeState>,
         abort: &Arc<AtomicBool>,
+        durability_lock: &Arc<Mutex<()>>,
+        range_validator: Option<&RangeIdentityValidator>,
         target_connections: usize,
     ) {
         loop {
@@ -849,6 +1034,8 @@ impl FileTask {
                 segment,
                 state.clone(),
                 abort.clone(),
+                durability_lock.clone(),
+                range_validator.cloned(),
                 permit,
             );
         }
@@ -863,6 +1050,8 @@ impl FileTask {
         segment: Arc<Segment>,
         state: Arc<FileRuntimeState>,
         abort: Arc<AtomicBool>,
+        durability_lock: Arc<Mutex<()>>,
+        range_validator: Option<RangeIdentityValidator>,
         permit: ConnectionPermit,
     ) {
         update_max_connections_seen(&state);
@@ -884,6 +1073,8 @@ impl FileTask {
                 abort.clone(),
                 cancel.clone(),
                 throttle,
+                durability_lock,
+                range_validator,
                 options,
             );
             match result {
@@ -1069,12 +1260,15 @@ impl FileTask {
     fn save_resume_checkpoint(
         &self,
         request: &DownloadRequest,
+        part: &Path,
         resume: &Path,
         state: &Arc<FileRuntimeState>,
         identity: &ResumeIdentity,
+        durability_lock: &Arc<Mutex<()>>,
     ) {
         // 断点保存失败不直接中断下载，但必须通知上层。
-        if let Err(error) = save_resume_state(resume, state, identity) {
+        let result = persist_resume_checkpoint(part, resume, state, identity, durability_lock);
+        if let Err(error) = result {
             (self.on_event)(DownloadEvent::ResumeSaveFailed {
                 request_id: request.id.clone(),
                 dest: request.dest.clone(),
@@ -1082,6 +1276,21 @@ impl FileTask {
             });
         }
     }
+}
+
+fn persist_resume_checkpoint(
+    part: &Path,
+    resume: &Path,
+    state: &Arc<FileRuntimeState>,
+    identity: &ResumeIdentity,
+    durability_lock: &Mutex<()>,
+) -> Result<(), String> {
+    let _guard = durability_lock
+        .lock()
+        .map_err(|_| "resume durability lock poisoned".to_string())?;
+    // 游标只能在同一把锁内推进，先同步数据再发布对应的续传元数据。
+    download_fs::sync_file_data(part)?;
+    save_resume_state(resume, state, identity)
 }
 
 fn run_segment_worker(
@@ -1095,6 +1304,8 @@ fn run_segment_worker(
     abort: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     throttle: Arc<GlobalThrottle>,
+    durability_lock: Arc<Mutex<()>>,
+    range_validator: Option<RangeIdentityValidator>,
     options: DownloadEngineOptions,
 ) -> Result<(), String> {
     for attempt in 0..=options.segment_retries {
@@ -1117,6 +1328,8 @@ fn run_segment_worker(
             &abort,
             &cancel,
             &throttle,
+            &durability_lock,
+            range_validator.as_ref(),
             options.buffer_size,
             options.read_timeout,
         ) {
@@ -1145,6 +1358,8 @@ fn download_segment_once(
     abort: &AtomicBool,
     cancel: &AtomicBool,
     throttle: &GlobalThrottle,
+    durability_lock: &Mutex<()>,
+    range_validator: Option<&RangeIdentityValidator>,
     buffer_size: usize,
     read_timeout: Duration,
 ) -> Result<(), String> {
@@ -1158,11 +1373,12 @@ fn download_segment_once(
 
     runtime.block_on(async {
         let label = format!("segment {}", segment.id);
-        let mut response = async_http::send_request(
+        let mut response = async_http::send_range_request(
             http,
             request,
             url,
-            Some((start, end)),
+            (start, end),
+            range_validator.map(RangeIdentityValidator::value),
             read_timeout,
             cancel,
             Some(abort),
@@ -1175,6 +1391,9 @@ fn download_segment_once(
         }
         validate_segment_content_range(response.headers().get(CONTENT_RANGE), start, end, total)
             .map_err(|error| format!("range not supported: {}", error))?;
+        if let Some(range_validator) = range_validator {
+            range_validator.validate_response(response.headers())?;
+        }
 
         let file = OpenOptions::new()
             .write(true)
@@ -1220,6 +1439,9 @@ fn download_segment_once(
                 let allowed = (current_end - cursor + 1).min(piece.len() as u64) as usize;
                 if allowed > 0 {
                     throttle.wait_for(allowed, cancel)?;
+                    let _durability_guard = durability_lock
+                        .lock()
+                        .map_err(|_| "resume durability lock poisoned".to_string())?;
                     download_fs::write_all_at(&file, &piece[..allowed], cursor)
                         .map_err(|e| format!("segment {} write failed: {}", segment.id, e))?;
                     segment.record_write(allowed as u64);
@@ -1301,6 +1523,25 @@ fn is_resume_probe_unavailable(error: &str) -> bool {
     error.contains("range probe did not return usable metadata")
 }
 
+fn range_identity_validator(probe: &RangeProbe) -> Option<RangeIdentityValidator> {
+    if let Some(etag) = probe.etag.as_deref().filter(|value| is_strong_etag(value)) {
+        return Some(RangeIdentityValidator::StrongEtag(etag.to_string()));
+    }
+    probe
+        .last_modified
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| RangeIdentityValidator::LastModified(value.to_string()))
+}
+
+fn is_strong_etag(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !value
+            .get(..2)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("w/"))
+}
+
 fn has_resume_artifacts(dest: &Path) -> bool {
     download_fs::partial_path(dest).exists() || download_fs::resume_path(dest).exists()
 }
@@ -1349,6 +1590,12 @@ fn validate_request(request: &DownloadRequest) -> Result<(), String> {
     if request.dest.as_os_str().is_empty() {
         return Err("empty destination path".to_string());
     }
+    if request.dest.is_dir() {
+        return Err(format!(
+            "destination path is a directory: {}",
+            request.dest.display()
+        ));
+    }
     Ok(())
 }
 
@@ -1395,4 +1642,61 @@ fn effective_idle_timeout(read_timeout: Duration, no_progress_timeout: Duration)
         return no_progress_timeout;
     }
     read_timeout.min(no_progress_timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resume_metadata_is_not_published_before_part_sync() {
+        let root = std::env::temp_dir().join(format!(
+            "oaoi-resume-order-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let part = root.join("missing.oaoi.part");
+        let resume = root.join("file.oaoi.dl");
+        let state = Arc::new(FileRuntimeState::new(
+            "resume-order".to_string(),
+            10,
+            fresh_segments(10),
+        ));
+        let identity = ResumeIdentity {
+            source_url: "https://example.com/file".to_string(),
+            final_url: "https://example.com/file".to_string(),
+            total: 10,
+            expected_sha1: Some("0123456789012345678901234567890123456789".to_string()),
+            etag: None,
+            last_modified: None,
+            allow_cross_source_resume: true,
+        };
+
+        assert!(
+            persist_resume_checkpoint(&part, &resume, &state, &identity, &Mutex::new(())).is_err()
+        );
+        assert!(!resume.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn range_validator_uses_last_modified_when_etag_is_weak() {
+        let probe = RangeProbe {
+            source_url: "https://example.com/file".to_string(),
+            url: "https://example.com/file".to_string(),
+            total: Some(10),
+            accepts_range: true,
+            etag: Some("W/\"weak\"".to_string()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+        };
+
+        assert!(matches!(
+            range_identity_validator(&probe),
+            Some(RangeIdentityValidator::LastModified(_))
+        ));
+    }
 }

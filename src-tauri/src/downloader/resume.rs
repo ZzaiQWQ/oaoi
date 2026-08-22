@@ -6,6 +6,7 @@
 use crate::downloader::segment::{FileRuntimeState, Segment};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -71,7 +72,12 @@ pub fn save_resume_state(
     let bytes =
         serde_json::to_vec(&state).map_err(|e| format!("serialize resume failed: {}", e))?;
     let tmp = resume_path.with_extension("oaoi.dl.tmp");
-    fs::write(&tmp, bytes).map_err(|e| format!("write resume failed: {}", e))?;
+    let mut file = fs::File::create(&tmp).map_err(|e| format!("write resume failed: {}", e))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("write resume failed: {}", e))?;
+    file.sync_all()
+        .map_err(|e| format!("sync resume failed: {}", e))?;
+    drop(file);
     replace_resume_file(&tmp, resume_path)
 }
 
@@ -104,6 +110,11 @@ fn resume_identity_matches(state: &ResumeState, identity: &ResumeIdentity) -> bo
         return true;
     }
 
+    // 弱 ETag 不能用于 If-Range；没有内容哈希时必须有强 ETag 或 Last-Modified。
+    if !has_reliable_remote_validator(identity) {
+        return false;
+    }
+
     if state.source_url == identity.source_url
         && state.final_url == identity.final_url
         && state.etag == identity.etag
@@ -113,6 +124,22 @@ fn resume_identity_matches(state: &ResumeState, identity: &ResumeIdentity) -> bo
     }
 
     identity.allow_cross_source_resume
+}
+
+fn has_reliable_remote_validator(identity: &ResumeIdentity) -> bool {
+    identity.etag.as_deref().is_some_and(is_strong_etag)
+        || identity
+            .last_modified
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn is_strong_etag(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !value
+            .get(..2)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("w/"))
 }
 
 fn restore_segments(mut saved: Vec<ResumeSegment>, total: u64) -> Option<Vec<Arc<Segment>>> {
@@ -300,6 +327,111 @@ mod tests {
         );
         assert!(load_resume_state(&resume, &part, &identity).is_none());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_resume_state_rejects_missing_remote_validators_without_sha1() {
+        let dir = unique_test_dir("missing-validators");
+        fs::create_dir_all(&dir).unwrap();
+        let resume = dir.join("file.bin.oaoi.dl");
+        let part = dir.join("file.bin.oaoi.part");
+        fs::File::create(&part).unwrap().set_len(10).unwrap();
+        let identity = ResumeIdentity {
+            source_url: "https://example.com/file.bin".to_string(),
+            final_url: "https://example.com/file.bin".to_string(),
+            total: 10,
+            expected_sha1: None,
+            etag: None,
+            last_modified: None,
+            allow_cross_source_resume: false,
+        };
+
+        write_resume_segments(&resume, valid_resume_segments());
+
+        assert!(load_resume_state(&resume, &part, &identity).is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_resume_state_accepts_matching_etag_without_sha1() {
+        let dir = unique_test_dir("matching-etag");
+        fs::create_dir_all(&dir).unwrap();
+        let resume = dir.join("file.bin.oaoi.dl");
+        let part = dir.join("file.bin.oaoi.part");
+        fs::File::create(&part).unwrap().set_len(10).unwrap();
+        let identity = ResumeIdentity {
+            source_url: "https://example.com/file.bin".to_string(),
+            final_url: "https://example.com/file.bin".to_string(),
+            total: 10,
+            expected_sha1: None,
+            etag: Some("\"file-v1\"".to_string()),
+            last_modified: None,
+            allow_cross_source_resume: false,
+        };
+        let state = ResumeState {
+            version: 2,
+            total: 10,
+            expected_sha1: None,
+            source_url: identity.source_url.clone(),
+            final_url: identity.final_url.clone(),
+            etag: identity.etag.clone(),
+            last_modified: None,
+            segments: valid_resume_segments(),
+        };
+        fs::write(&resume, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        assert!(load_resume_state(&resume, &part, &identity).is_some());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_resume_state_rejects_weak_etag_without_last_modified() {
+        let dir = unique_test_dir("weak-etag");
+        fs::create_dir_all(&dir).unwrap();
+        let resume = dir.join("file.bin.oaoi.dl");
+        let part = dir.join("file.bin.oaoi.part");
+        fs::File::create(&part).unwrap().set_len(10).unwrap();
+        let identity = ResumeIdentity {
+            source_url: "https://example.com/file.bin".to_string(),
+            final_url: "https://example.com/file.bin".to_string(),
+            total: 10,
+            expected_sha1: None,
+            etag: Some("W/\"file-v1\"".to_string()),
+            last_modified: None,
+            allow_cross_source_resume: false,
+        };
+        let state = ResumeState {
+            version: 2,
+            total: 10,
+            expected_sha1: None,
+            source_url: identity.source_url.clone(),
+            final_url: identity.final_url.clone(),
+            etag: identity.etag.clone(),
+            last_modified: None,
+            segments: valid_resume_segments(),
+        };
+        fs::write(&resume, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        assert!(load_resume_state(&resume, &part, &identity).is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn valid_resume_segments() -> Vec<ResumeSegment> {
+        vec![ResumeSegment {
+            start: 0,
+            cursor: 5,
+            end: 9,
+        }]
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "oaoi-resume-{label}-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|time| time.as_nanos())
+                .unwrap_or(0)
+        ))
     }
 
     fn write_resume_segments(resume: &Path, segments: Vec<ResumeSegment>) {

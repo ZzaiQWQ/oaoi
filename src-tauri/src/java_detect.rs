@@ -31,7 +31,11 @@ pub async fn find_java(game_dir: Option<String>) -> Result<Vec<JavaInfo>, String
 
 #[tauri::command]
 pub fn java_path_exists(path: String) -> bool {
-    Path::new(path.trim()).is_file()
+    get_java_info(Path::new(path.trim())).is_some()
+}
+
+pub fn java_path_matches_major(path: &Path, expected_major: u32) -> bool {
+    get_java_info(path).is_some_and(|info| info.major == expected_major)
 }
 
 pub fn find_java_blocking(game_dir: Option<String>) -> Vec<JavaInfo> {
@@ -187,53 +191,45 @@ fn search_java_folder(
     candidate_dirs: &mut Vec<PathBuf>,
     seen_dirs: &mut HashSet<String>,
     visited_dirs: &mut HashSet<String>,
-    full_current_level: bool,
+    _full_current_level: bool,
 ) {
-    search_java_folder_inner(
-        start,
-        candidate_dirs,
-        seen_dirs,
-        visited_dirs,
-        full_current_level,
-    );
-}
+    let mut pending = vec![start.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if !visited_dirs.insert(normalize_key(&dir)) || !dir.is_dir() {
+            continue;
+        }
 
-fn search_java_folder_inner(
-    dir: &Path,
-    candidate_dirs: &mut Vec<PathBuf>,
-    seen_dirs: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-    full_current_level: bool,
-) {
-    if !visited.insert(normalize_key(dir)) || !dir.is_dir() {
-        return;
-    }
-
-    add_java_dir_if_valid(dir, candidate_dirs, seen_dirs);
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let parent_is_users = dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.eq_ignore_ascii_case("users"))
-        .unwrap_or(false);
-
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
+        add_java_dir_if_valid(&dir, candidate_dirs, seen_dirs);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        if !file_type.is_dir() || file_type.is_symlink() {
-            continue;
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if is_safe_scan_directory(&entry, &file_type) {
+                pending.push(entry.path());
+            }
         }
+    }
+}
 
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_lowercase();
-        if full_current_level || parent_is_users || should_scan_java_dir(&name) {
-            // 完整扫描只作用于当前层，下一层继续靠关键词控制，避免全盘无限扫。
-            search_java_folder_inner(&path, candidate_dirs, seen_dirs, visited, false);
-        }
+fn is_safe_scan_directory(entry: &std::fs::DirEntry, file_type: &std::fs::FileType) -> bool {
+    if !file_type.is_dir() || file_type.is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return entry
+            .metadata()
+            .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        true
     }
 }
 
@@ -274,80 +270,6 @@ fn javaw_exe_path(dir: &Path) -> PathBuf {
     {
         dir.join("java")
     }
-}
-
-fn should_scan_java_dir(name: &str) -> bool {
-    if name == "bin" || name.parse::<f64>().is_ok() {
-        return true;
-    }
-
-    const KEYWORDS: &[&str] = &[
-        "java",
-        "jdk",
-        "jre",
-        "jbr",
-        "runtime",
-        "env",
-        "sdk",
-        "candidate",
-        "current",
-        "software",
-        "program",
-        "programs",
-        "users",
-        "appdata",
-        "local",
-        "packages",
-        "cache",
-        "temp",
-        "mc",
-        "minecraft",
-        ".minecraft",
-        "craft",
-        "game",
-        "games",
-        "launcher",
-        "launch",
-        "pcl",
-        "hmcl",
-        "baka",
-        "zulu",
-        "oracle",
-        "eclipse",
-        "adoptium",
-        "microsoft",
-        "corretto",
-        "bellsoft",
-        "graal",
-        "hotspot",
-        "forge",
-        "fabric",
-        "neoforge",
-        "quilt",
-        "mod",
-        "download",
-        "version",
-        "versions",
-        "server",
-        "client",
-        "世界",
-        "游戏",
-        "启动",
-        "启动器",
-        "运行",
-        "环境",
-        "软件",
-        "整合",
-        "官方",
-        "原版",
-        "前置",
-        "服务",
-        "客户",
-        "新建文件夹",
-        "网易",
-    ];
-
-    KEYWORDS.iter().any(|keyword| name.contains(keyword))
 }
 
 fn parse_registry_java_home(line: &str) -> Option<String> {

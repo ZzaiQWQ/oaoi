@@ -2,20 +2,76 @@ use serde::Serialize;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 fn ms_client_id() -> String {
     crate::secrets::get_ms_client_id()
 }
 
-/// 登录取消标志
-static LOGIN_CANCEL: AtomicBool = AtomicBool::new(false);
+static LOGIN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn active_login() -> &'static Mutex<Option<(u64, Arc<AtomicBool>)>> {
+    static ACTIVE_LOGIN: OnceLock<Mutex<Option<(u64, Arc<AtomicBool>)>>> = OnceLock::new();
+    ACTIVE_LOGIN.get_or_init(|| Mutex::new(None))
+}
+
+struct LoginGuard {
+    id: u64,
+}
+
+impl Drop for LoginGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_login().lock() {
+            if active.as_ref().is_some_and(|(id, _)| *id == self.id) {
+                *active = None;
+            }
+        }
+    }
+}
+
+fn begin_login() -> Result<(u64, Arc<AtomicBool>), String> {
+    let id = LOGIN_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut active = active_login()
+        .lock()
+        .map_err(|_| "微软登录状态锁已损坏".to_string())?;
+    if let Some((_, previous)) = active.replace((id, Arc::clone(&cancelled))) {
+        previous.store(true, Ordering::Release);
+    }
+    Ok((id, cancelled))
+}
+
+fn check_login_cancelled(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("用户取消了登录".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn build_auth_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
+        .user_agent("OAOI-Launcher/1.0")
+        .build()
+        .map_err(|e| format!("创建认证客户端失败: {}", e))
+}
 
 #[tauri::command]
 pub fn cancel_ms_login() -> Result<String, String> {
-    LOGIN_CANCEL.store(true, Ordering::Relaxed);
-    eprintln!("[auth] 登录已被用户取消");
-    Ok("cancelled".to_string())
+    let active = active_login()
+        .lock()
+        .map_err(|_| "微软登录状态锁已损坏".to_string())?;
+    if let Some((_, cancelled)) = active.as_ref() {
+        cancelled.store(true, Ordering::Release);
+        eprintln!("[auth] 登录已被用户取消");
+        Ok("cancelled".to_string())
+    } else {
+        Ok("idle".to_string())
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -28,11 +84,11 @@ pub struct McProfile {
 
 #[tauri::command]
 pub async fn start_ms_login() -> Result<McProfile, String> {
-    // 重置取消标志
-    LOGIN_CANCEL.store(false, Ordering::Relaxed);
+    let (login_id, cancelled) = begin_login()?;
 
     // 在异步线程中执行整个登录流程，不阻塞 UI
     tauri::async_runtime::spawn_blocking(move || -> Result<McProfile, String> {
+        let _login_guard = LoginGuard { id: login_id };
         // 1. 动态分配端口
         let listener = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|e| format!("无法绑定端口: {}", e))?;
@@ -58,9 +114,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
         // 3. 等待回调（1秒轮询，最长2分钟，支持取消）
         let mut request = None;
         for _ in 0..120 {
-            if LOGIN_CANCEL.load(Ordering::Relaxed) {
-                return Err("用户取消了登录".to_string());
-            }
+            check_login_cancelled(&cancelled)?;
             match server.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(Some(req)) => { request = Some(req); break; }
                 Ok(None) => continue, // 超时，继续等
@@ -68,6 +122,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
             }
         }
         let request = request.ok_or("登录超时（2分钟）")?;
+        check_login_cancelled(&cancelled)?;
 
         let request_url = format!("http://localhost{}", request.url());
         let parsed = url::Url::parse(&request_url)
@@ -91,7 +146,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
         let _ = request.respond(resp);
 
         // 4. 换取 Token
-        let client = reqwest::blocking::Client::new();
+        let client = build_auth_client()?;
         let client_id = ms_client_id();
         let token_resp = client
             .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
@@ -104,6 +159,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
             ])
             .send()
             .map_err(|e| format!("换取Token失败: {}", e))?;
+        check_login_cancelled(&cancelled)?;
         let token_json: serde_json::Value = token_resp.json()
             .map_err(|e| format!("Token解析失败: {}", e))?;
         let ms_token = token_json["access_token"].as_str()
@@ -111,7 +167,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
         let refresh_token = token_json["refresh_token"].as_str().map(|s| s.to_string());
 
         // 5-8. Xbox → XSTS → MC → Profile（共用流程）
-        let profile = exchange_to_mc_profile(&client, ms_token, refresh_token)?;
+        let profile = exchange_to_mc_profile(&client, ms_token, refresh_token, Some(&cancelled))?;
         Ok(profile)
     })
     .await
@@ -122,7 +178,7 @@ pub async fn start_ms_login() -> Result<McProfile, String> {
 #[tauri::command]
 pub async fn refresh_ms_login(refresh_token: String) -> Result<McProfile, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<McProfile, String> {
-        let client = reqwest::blocking::Client::new();
+        let client = build_auth_client()?;
 
         // 1. 用 refresh_token 换新 token
         let client_id = ms_client_id();
@@ -145,7 +201,7 @@ pub async fn refresh_ms_login(refresh_token: String) -> Result<McProfile, String
         let new_refresh = token_json["refresh_token"].as_str().map(|s| s.to_string());
 
         // 2-5. Xbox → XSTS → MC → Profile（共用流程）
-        let profile = exchange_to_mc_profile(&client, ms_token, new_refresh)?;
+        let profile = exchange_to_mc_profile(&client, ms_token, new_refresh, None)?;
         Ok(profile)
     })
     .await
@@ -188,7 +244,11 @@ fn exchange_to_mc_profile(
     client: &reqwest::blocking::Client,
     ms_token: &str,
     refresh_token: Option<String>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<McProfile, String> {
+    if let Some(cancelled) = cancelled {
+        check_login_cancelled(cancelled)?;
+    }
     // Xbox Live
     let xbox_resp = client.post("https://user.auth.xboxlive.com/user/authenticate")
         .header("Content-Type", "application/json")
@@ -199,6 +259,9 @@ fn exchange_to_mc_profile(
     let xbox_json: serde_json::Value = xbox_resp
         .json()
         .map_err(|e| format!("Xbox解析失败: {}", e))?;
+    if let Some(cancelled) = cancelled {
+        check_login_cancelled(cancelled)?;
+    }
     let xbox_token = xbox_json["Token"]
         .as_str()
         .ok_or(format!("Xbox Token空: {}", xbox_json))?;
@@ -219,6 +282,9 @@ fn exchange_to_mc_profile(
     let xsts_json: serde_json::Value = xsts_resp
         .json()
         .map_err(|e| format!("XSTS解析失败: {}", e))?;
+    if let Some(cancelled) = cancelled {
+        check_login_cancelled(cancelled)?;
+    }
     let xsts_token = xsts_json["Token"]
         .as_str()
         .ok_or_else(|| friendly_xsts_error(&xsts_json))?;
@@ -230,6 +296,9 @@ fn exchange_to_mc_profile(
         .send().map_err(|e| format!("MC认证失败: {}", e))?;
     let mc_status = mc_resp.status().as_u16();
     let mc_json: serde_json::Value = mc_resp.json().map_err(|e| format!("MC解析失败: {}", e))?;
+    if let Some(cancelled) = cancelled {
+        check_login_cancelled(cancelled)?;
+    }
     if mc_status != 200 {
         return Err(minecraft_service_error(
             "Minecraft 认证",
@@ -251,6 +320,9 @@ fn exchange_to_mc_profile(
     let profile_json: serde_json::Value = profile_resp
         .json()
         .map_err(|e| format!("档案解析失败: {}", e))?;
+    if let Some(cancelled) = cancelled {
+        check_login_cancelled(cancelled)?;
+    }
     if profile_status != 200 {
         if profile_status == 404 {
             return Err(no_minecraft_profile_message());
@@ -267,6 +339,8 @@ fn exchange_to_mc_profile(
     let uuid = profile_json["id"]
         .as_str()
         .ok_or_else(|| "Minecraft 档案信息不完整：没有 UUID。请稍后重试。".to_string())?;
+
+    crate::offline_policy::mark_online_account_verified(uuid, mc_token);
 
     Ok(McProfile {
         name: name.to_string(),

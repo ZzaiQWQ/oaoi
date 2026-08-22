@@ -1,16 +1,18 @@
 use crate::installer::{
-    default_library_maven_base, download_file_mirror_then_official,
-    download_file_mirror_then_official_with_progress, library_rules_value_allowed,
-    maven_name_to_path, maven_name_to_path_with_classifier, parallel_download_mirror_then_official,
-    safe_maven_path,
+    default_library_maven_base, download_file_if_needed_cancelable, download_file_with_progress,
+    library_rules_value_allowed, maven_name_to_path, maven_name_to_path_with_classifier,
+    parallel_download, safe_maven_path,
 };
 use crate::instance::{
-    assets_dir, detect_loader, libraries_dir, natives_dir as version_natives_dir, resolve_game_dir,
-    safe_path_name, version_dir, version_jar_path, version_json_path as instance_version_json_path,
+    assets_dir, detect_loader, libraries_dir, load_merged_version_json,
+    natives_dir as version_natives_dir, resolve_game_dir, safe_path_name, scoped_task_key,
+    version_dir, version_jar_path,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
@@ -25,16 +27,78 @@ pub struct LaunchOptions {
     pub server_port: Option<u16>,
     pub access_token: Option<String>,
     pub uuid: Option<String>,
-    pub has_online_account: Option<bool>,
+    pub online_account_access_token: Option<String>,
+    pub online_account_uuid: Option<String>,
     pub custom_jvm_args: Option<String>,
+    pub launch_task_id: Option<u64>,
 }
 
+#[derive(Clone)]
 struct OfflineSkinProfile {
     uuid: String,
     user_properties: String,
+    cached_at_unix: u64,
+}
+
+struct OfflineSkinLookup {
+    cached: Option<OfflineSkinProfile>,
+    receiver: Option<std::sync::mpsc::Receiver<Option<OfflineSkinProfile>>>,
 }
 
 const LAUNCH_WINDOW_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const OFFLINE_SKIN_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+static NATIVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn running_games() -> &'static Mutex<HashMap<String, HashSet<u32>>> {
+    static RUNNING: OnceLock<Mutex<HashMap<String, HashSet<u32>>>> = OnceLock::new();
+    RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn offline_skin_cache() -> &'static Mutex<HashMap<String, OfflineSkinProfile>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, OfflineSkinProfile>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct RunningGameRegistration {
+    task_key: String,
+    pid: u32,
+}
+
+impl Drop for RunningGameRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut games) = running_games().lock() {
+            if let Some(processes) = games.get_mut(&self.task_key) {
+                processes.remove(&self.pid);
+                if processes.is_empty() {
+                    games.remove(&self.task_key);
+                }
+            }
+        }
+    }
+}
+
+fn register_running_game(
+    game_dir: &str,
+    version_name: &str,
+    pid: u32,
+) -> Result<RunningGameRegistration, String> {
+    let task_key = scoped_task_key(game_dir, version_name);
+    let mut games = running_games()
+        .lock()
+        .map_err(|_| "游戏运行状态锁已损坏".to_string())?;
+    games.entry(task_key.clone()).or_default().insert(pid);
+    Ok(RunningGameRegistration { task_key, pid })
+}
+
+pub fn is_instance_running(game_dir: &str, version_name: &str) -> Result<bool, String> {
+    let task_key = scoped_task_key(game_dir, version_name);
+    let games = running_games()
+        .lock()
+        .map_err(|_| "游戏运行状态锁已损坏".to_string())?;
+    Ok(games
+        .get(&task_key)
+        .is_some_and(|processes| !processes.is_empty()))
+}
 
 #[cfg(windows)]
 type Hwnd = isize;
@@ -128,14 +192,45 @@ fn launch_log_preview(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn is_sensitive_launch_argument_name(argument: &str) -> bool {
+    let name = argument
+        .split_once('=')
+        .map(|(name, _)| name)
+        .unwrap_or(argument)
+        .to_ascii_lowercase();
+    name.starts_with('-') && (name.contains("token") || name.contains("session"))
+}
+
+fn redact_launch_argument(args: &[String], index: usize, access_token: Option<&str>) -> String {
+    let argument = args.get(index).map(String::as_str).unwrap_or_default();
+    if index > 0
+        && !args[index - 1].contains('=')
+        && is_sensitive_launch_argument_name(&args[index - 1])
+    {
+        return "*****(已隐藏)".to_string();
+    }
+    if is_sensitive_launch_argument_name(argument) {
+        if let Some((name, _)) = argument.split_once('=') {
+            return format!("{}=*****(已隐藏)", name);
+        }
+    }
+
+    let Some(token) = access_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && *token != "0")
+    else {
+        return argument.to_string();
+    };
+    if argument.contains(token) {
+        argument.replace(token, "*****(已隐藏)")
+    } else {
+        argument.to_string()
+    }
+}
+
 fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
     let name = player_name.trim();
-    if name.len() < 3
-        || name.len() > 16
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
+    if !valid_offline_player_name(name) {
         return None;
     }
 
@@ -164,6 +259,7 @@ fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
         return Some(OfflineSkinProfile {
             uuid,
             user_properties: "{}".to_string(),
+            cached_at_unix: current_unix_seconds(),
         });
     }
     let texture_json: serde_json::Value = texture_resp.json().ok()?;
@@ -197,7 +293,101 @@ fn fetch_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
     Some(OfflineSkinProfile {
         uuid,
         user_properties,
+        cached_at_unix: current_unix_seconds(),
     })
+}
+
+fn valid_offline_player_name(name: &str) -> bool {
+    (3..=16).contains(&name.len())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn valid_cached_offline_skin(profile: &OfflineSkinProfile) -> bool {
+    profile.uuid.len() == 32
+        && profile.uuid.chars().all(|ch| ch.is_ascii_hexdigit())
+        && serde_json::from_str::<serde_json::Value>(&profile.user_properties)
+            .is_ok_and(|value| value.is_object())
+}
+
+fn load_offline_skin_profile(player_name: &str) -> Option<OfflineSkinProfile> {
+    if !valid_offline_player_name(player_name) {
+        return None;
+    }
+    let profile = offline_skin_cache()
+        .lock()
+        .ok()?
+        .get(&player_name.to_ascii_lowercase())
+        .cloned()?;
+    valid_cached_offline_skin(&profile).then_some(profile)
+}
+
+fn offline_skin_cache_is_fresh(profile: &OfflineSkinProfile) -> bool {
+    if profile.user_properties == "{}" {
+        return false;
+    }
+    let now = current_unix_seconds();
+    profile.cached_at_unix <= now.saturating_add(300)
+        && now.saturating_sub(profile.cached_at_unix) <= OFFLINE_SKIN_CACHE_TTL.as_secs()
+}
+
+fn save_offline_skin_profile(
+    player_name: &str,
+    profile: &OfflineSkinProfile,
+) -> Result<(), String> {
+    if !valid_offline_player_name(player_name) || !valid_cached_offline_skin(profile) {
+        return Err("离线皮肤缓存内容无效".to_string());
+    }
+    offline_skin_cache()
+        .lock()
+        .map_err(|_| "离线皮肤缓存锁已损坏".to_string())?
+        .insert(player_name.to_ascii_lowercase(), profile.clone());
+    Ok(())
+}
+
+fn begin_offline_skin_lookup(player_name: &str) -> OfflineSkinLookup {
+    let cached = load_offline_skin_profile(player_name);
+    if cached.as_ref().is_some_and(offline_skin_cache_is_fresh)
+        || !valid_offline_player_name(player_name)
+    {
+        return OfflineSkinLookup {
+            cached,
+            receiver: None,
+        };
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let player_name = player_name.to_string();
+    std::thread::spawn(move || {
+        let profile = fetch_offline_skin_profile(&player_name);
+        if let Some(profile) = profile.as_ref() {
+            if save_offline_skin_profile(&player_name, profile).is_ok() {
+                eprintln!("[launch] offline skin cache refreshed for {}", player_name);
+            }
+        }
+        let _ = sender.send(profile);
+    });
+    OfflineSkinLookup {
+        cached,
+        receiver: Some(receiver),
+    }
+}
+
+impl OfflineSkinLookup {
+    fn resolve_without_waiting(self) -> Option<OfflineSkinProfile> {
+        match self.receiver.and_then(|receiver| receiver.try_recv().ok()) {
+            Some(Some(profile)) => Some(profile),
+            _ => self.cached,
+        }
+    }
 }
 
 // 旧版 minecraftArguments 会带 Windows 路径，反斜杠必须原样保留。
@@ -246,6 +436,67 @@ fn split_command_args(input: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+fn is_manually_supplied_game_argument(argument: &str) -> bool {
+    matches!(
+        argument,
+        "--username"
+            | "--version"
+            | "--gameDir"
+            | "--assetsDir"
+            | "--assetIndex"
+            | "--uuid"
+            | "--accessToken"
+            | "--userType"
+            | "--versionType"
+    )
+}
+
+fn append_extra_game_arguments(
+    args: &mut Vec<String>,
+    game_args: &[serde_json::Value],
+    user_properties: &str,
+) {
+    let mut index = 0;
+    while index < game_args.len() {
+        let Some(argument) = game_args[index].as_str() else {
+            index += 1;
+            continue;
+        };
+
+        if is_manually_supplied_game_argument(argument) {
+            index += 1;
+            if game_args
+                .get(index)
+                .and_then(|value| value.as_str())
+                .is_some()
+            {
+                index += 1;
+            }
+            continue;
+        }
+
+        if argument.starts_with("--") {
+            if let Some(value) = game_args.get(index + 1).and_then(|value| value.as_str()) {
+                if value.contains("${") {
+                    let resolved = value.replace("${user_properties}", user_properties);
+                    if !resolved.contains("${") {
+                        args.push(argument.to_string());
+                        args.push(resolved);
+                    }
+                    // 无法解析占位值时，参数名必须与参数值一起丢弃，避免后续参数错位。
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+
+        if !argument.contains("${") {
+            args.push(argument.to_string());
+        }
+        index += 1;
+    }
+}
+
 fn launch_file_ok(path: &std::path::Path, expected_size: Option<u64>) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
@@ -260,11 +511,168 @@ fn sha1_like(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-fn repair_launch_files(
+fn md5_digest(input: &[u8]) -> [u8; 16] {
+    const SHIFT: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const TABLE: [u32; 64] = [
+        0xd76a_a478,
+        0xe8c7_b756,
+        0x2420_70db,
+        0xc1bd_ceee,
+        0xf57c_0faf,
+        0x4787_c62a,
+        0xa830_4613,
+        0xfd46_9501,
+        0x6980_98d8,
+        0x8b44_f7af,
+        0xffff_5bb1,
+        0x895c_d7be,
+        0x6b90_1122,
+        0xfd98_7193,
+        0xa679_438e,
+        0x49b4_0821,
+        0xf61e_2562,
+        0xc040_b340,
+        0x265e_5a51,
+        0xe9b6_c7aa,
+        0xd62f_105d,
+        0x0244_1453,
+        0xd8a1_e681,
+        0xe7d3_fbc8,
+        0x21e1_cde6,
+        0xc337_07d6,
+        0xf4d5_0d87,
+        0x455a_14ed,
+        0xa9e3_e905,
+        0xfcef_a3f8,
+        0x676f_02d9,
+        0x8d2a_4c8a,
+        0xfffa_3942,
+        0x8771_f681,
+        0x6d9d_6122,
+        0xfde5_380c,
+        0xa4be_ea44,
+        0x4bde_cfa9,
+        0xf6bb_4b60,
+        0xbebf_bc70,
+        0x289b_7ec6,
+        0xeaa1_27fa,
+        0xd4ef_3085,
+        0x0488_1d05,
+        0xd9d4_d039,
+        0xe6db_99e5,
+        0x1fa2_7cf8,
+        0xc4ac_5665,
+        0xf429_2244,
+        0x432a_ff97,
+        0xab94_23a7,
+        0xfc93_a039,
+        0x655b_59c3,
+        0x8f0c_cc92,
+        0xffef_f47d,
+        0x8584_5dd1,
+        0x6fa8_7e4f,
+        0xfe2c_e6e0,
+        0xa301_4314,
+        0x4e08_11a1,
+        0xf753_7e82,
+        0xbd3a_f235,
+        0x2ad7_d2bb,
+        0xeb86_d391,
+    ];
+
+    let mut padded = input.to_vec();
+    let bit_len = (padded.len() as u64).wrapping_mul(8);
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut state = [0x6745_2301_u32, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+    for chunk in padded.chunks_exact(64) {
+        let mut words = [0_u32; 16];
+        for (index, word) in words.iter_mut().enumerate() {
+            let offset = index * 4;
+            *word = u32::from_le_bytes([
+                chunk[offset],
+                chunk[offset + 1],
+                chunk[offset + 2],
+                chunk[offset + 3],
+            ]);
+        }
+
+        let [mut a, mut b, mut c, mut d] = state;
+        for index in 0..64 {
+            let (value, word_index) = match index {
+                0..=15 => ((b & c) | (!b & d), index),
+                16..=31 => ((d & b) | (!d & c), (5 * index + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * index + 5) % 16),
+                _ => (c ^ (b | !d), (7 * index) % 16),
+            };
+            let next = b.wrapping_add(
+                a.wrapping_add(value)
+                    .wrapping_add(TABLE[index])
+                    .wrapping_add(words[word_index])
+                    .rotate_left(SHIFT[index]),
+            );
+            a = d;
+            d = c;
+            c = b;
+            b = next;
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+    }
+
+    let mut digest = [0_u8; 16];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    digest
+}
+
+fn offline_player_uuid(player_name: &str) -> String {
+    let mut bytes = md5_digest(format!("OfflinePlayer:{}", player_name).as_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn read_valid_asset_index(
+    path: &std::path::Path,
+    expected_sha1: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let data = std::fs::read(path).map_err(|e| format!("读取资源索引失败: {}", e))?;
+    if let Some(expected) = expected_sha1.filter(|value| sha1_like(value)) {
+        let mut hasher = sha1_smol::Sha1::new();
+        hasher.update(&data);
+        let actual = hasher.digest().to_string();
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "资源索引校验失败: expected {}, got {}",
+                expected, actual
+            ));
+        }
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&data).map_err(|e| format!("解析资源索引失败: {}", e))?;
+    if !json.get("objects").is_some_and(|value| value.is_object()) {
+        return Err("资源索引缺少 objects".to_string());
+    }
+    Ok(json)
+}
+
+fn repair_required_launch_files(
     app_handle: &tauri::AppHandle,
     version_name: &str,
     game_dir: &std::path::Path,
-    ver_dir: &std::path::Path,
+    client_jar_path: &std::path::Path,
     json: &serde_json::Value,
 ) -> Result<(), String> {
     let http = reqwest::blocking::Client::builder()
@@ -292,109 +700,31 @@ fn repair_launch_files(
         if let Some(url) = client_info.get("url").and_then(|v| v.as_str()) {
             let sha1 = client_info.get("sha1").and_then(|v| v.as_str());
             let size = client_info.get("size").and_then(|v| v.as_u64());
-            let jar_path = version_jar_path(ver_dir, version_name);
-            if !launch_file_ok(&jar_path, size) {
+            if !launch_file_ok(client_jar_path, size) {
                 emit("client", 0, 1, "启动前修复版本 jar...");
-                download_file_mirror_then_official_with_progress(
-                    &http,
-                    url,
-                    &jar_path,
-                    sha1,
-                    None,
-                    |done, total| {
+                download_file_with_progress(&http, url, client_jar_path, sha1, size, true, None, {
+                    let app_handle = app_handle.clone();
+                    let version_name = version_name.to_string();
+                    move |done, total| {
                         let total = total.unwrap_or_else(|| done.max(1)).max(1);
                         let current = done.min(usize::MAX as u64) as usize;
                         let total = total.min(usize::MAX as u64) as usize;
-                        emit("client", current, total, "启动前修复版本 jar...");
-                    },
-                )
+                        let _ = app_handle.emit(
+                            "install-progress",
+                            serde_json::json!({
+                                "name": version_name,
+                                "stage": "client",
+                                "current": current,
+                                "total": total,
+                                "detail": "启动前修复版本 jar..."
+                            }),
+                        );
+                    }
+                })
                 .map_err(|e| format!("启动前修复版本 jar 失败: {}", e))?;
                 emit("client", 1, 1, "版本 jar 修复完成");
             }
         }
-    }
-
-    let libs_dir = libraries_dir(game_dir);
-    let mut lib_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
-    let mut seen_library_paths = HashSet::new();
-    if let Some(libs) = json.get("libraries").and_then(|v| v.as_array()) {
-        for lib in libs {
-            if !library_rules_value_allowed(lib.get("rules")) {
-                continue;
-            }
-            if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
-                if let (Some(path), Some(url)) = (
-                    artifact.get("path").and_then(|v| v.as_str()),
-                    artifact.get("url").and_then(|v| v.as_str()),
-                ) {
-                    let Ok(rel_path) = safe_maven_path(path) else {
-                        continue;
-                    };
-                    let dest = libs_dir.join(rel_path);
-                    let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
-                    let size = artifact.get("size").and_then(|v| v.as_u64());
-                    if !launch_file_ok(&dest, size) && seen_library_paths.insert(path.to_string()) {
-                        lib_tasks.push((url.to_string(), dest, sha1.map(|s| s.to_string())));
-                    }
-                    continue;
-                }
-            }
-
-            if lib.get("natives").and_then(|v| v.as_object()).is_some() {
-                continue;
-            }
-
-            if let Some(name) = lib.get("name").and_then(|v| v.as_str()) {
-                let rel_path = maven_name_to_path(name);
-                let Ok(rel_path_buf) = safe_maven_path(&rel_path) else {
-                    continue;
-                };
-                let maven_url = lib
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("https://libraries.minecraft.net/");
-                let url = format!("{}/{}", maven_url.trim_end_matches('/'), rel_path);
-                let dest = libs_dir.join(rel_path_buf);
-                let sha1 = lib.get("sha1").and_then(|v| v.as_str());
-                let size = lib.get("size").and_then(|v| v.as_u64());
-                if !launch_file_ok(&dest, size) && seen_library_paths.insert(rel_path.clone()) {
-                    lib_tasks.push((url, dest, sha1.map(|s| s.to_string())));
-                }
-            }
-        }
-    }
-    if !lib_tasks.is_empty() {
-        let total = lib_tasks.len();
-        emit(
-            "libraries",
-            0,
-            total,
-            &format!("启动前修复 {} 个依赖库...", total),
-        );
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let app_clone = app_handle.clone();
-        let done_reporter = done.clone();
-        let version_copy = version_name.to_string();
-        let reporter = std::thread::spawn(move || loop {
-            let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
-            let _ = app_clone.emit(
-                "install-progress",
-                serde_json::json!({
-                    "name": version_copy,
-                    "stage": "libraries",
-                    "current": finished,
-                    "total": total,
-                    "detail": format!("启动前修复依赖库 {}/{}", finished, total)
-                }),
-            );
-            if finished >= total {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        });
-        let result = parallel_download_mirror_then_official(&http, lib_tasks, &done, 32, None);
-        let _ = reporter.join();
-        result.map_err(|e| format!("启动前修复依赖库失败: {}", e))?;
     }
 
     if let Some(asset_index) = json.get("assetIndex") {
@@ -411,105 +741,237 @@ fn repair_launch_files(
             let index_path = assets_dir(game_dir)
                 .join("indexes")
                 .join(format!("{}.json", index_id));
-            // 资源索引存在就直接使用，避免版本 JSON 的索引 SHA 变动导致每次启动都修复。
-            if !index_path.exists() {
+            if read_valid_asset_index(&index_path, index_sha1).is_err() {
+                let _ = std::fs::remove_file(&index_path);
                 emit("assetIndex", 0, 0, "启动前修复资源索引...");
-                let mut index_urls = Vec::new();
-                if !index_id.is_empty() && index_id != "unknown" {
-                    index_urls.push(format!(
-                        "https://bmclapi2.bangbang93.com/indexes/{}.json",
-                        index_id
-                    ));
-                }
-                index_urls.push(index_url.to_string());
-                let mut last_index_err = String::new();
-                let mut index_done = false;
-                for url in index_urls {
-                    match download_file_mirror_then_official(
-                        &http,
-                        &url,
-                        &index_path,
-                        index_sha1,
-                        None,
-                    ) {
-                        Ok(_) => {
-                            index_done = true;
-                            break;
-                        }
-                        Err(e) => {
-                            last_index_err = format!("{} ({})", e, url);
-                            let _ = std::fs::remove_file(&index_path);
-                        }
-                    }
-                }
-                if !index_done {
-                    return Err(format!("启动前修复资源索引失败: {}", last_index_err));
-                }
+                download_file_if_needed_cancelable(
+                    &http,
+                    index_url,
+                    &index_path,
+                    index_sha1,
+                    asset_index.get("size").and_then(|value| value.as_u64()),
+                    true,
+                    None,
+                )
+                .map_err(|error| format!("启动前修复资源索引失败: {}", error))?;
+                read_valid_asset_index(&index_path, index_sha1)?;
                 emit("assetIndex", 1, 1, "资源索引修复完成");
-            }
-            let index_content = std::fs::read_to_string(&index_path)
-                .map_err(|e| format!("读取资源索引失败: {}", e))?;
-            let index_json: serde_json::Value = serde_json::from_str(&index_content)
-                .map_err(|e| format!("解析资源索引失败: {}", e))?;
-            if let Some(objects) = index_json.get("objects").and_then(|v| v.as_object()) {
-                let mut asset_tasks: Vec<(String, std::path::PathBuf, Option<String>)> = Vec::new();
-                for (_name, info) in objects {
-                    let hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                    if !sha1_like(hash) {
-                        continue;
-                    }
-                    let prefix = &hash[..2];
-                    let dest = assets_dir(game_dir).join("objects").join(prefix).join(hash);
-                    let size = info.get("size").and_then(|v| v.as_u64());
-                    // 启动时只做缺失和大小检查，完整哈希留给修复流程。
-                    if launch_file_ok(&dest, size) {
-                        continue;
-                    }
-                    let url = format!(
-                        "https://resources.download.minecraft.net/{}/{}",
-                        prefix, hash
-                    );
-                    asset_tasks.push((url, dest, Some(hash.to_string())));
-                }
-                if !asset_tasks.is_empty() {
-                    let total = asset_tasks.len();
-                    emit(
-                        "assets",
-                        0,
-                        total,
-                        &format!("启动前修复 {} 个资源文件...", total),
-                    );
-                    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                    let app_clone = app_handle.clone();
-                    let done_reporter = done.clone();
-                    let version_copy = version_name.to_string();
-                    let reporter = std::thread::spawn(move || loop {
-                        let finished = done_reporter.load(std::sync::atomic::Ordering::Relaxed);
-                        let _ = app_clone.emit(
-                            "install-progress",
-                            serde_json::json!({
-                                "name": version_copy,
-                                "stage": "assets",
-                                "current": finished,
-                                "total": total,
-                                "detail": format!("启动前修复资源 {}/{}", finished, total)
-                            }),
-                        );
-                        if finished >= total {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                    });
-                    let result =
-                        parallel_download_mirror_then_official(&http, asset_tasks, &done, 32, None);
-                    let _ = reporter.join();
-                    result.map_err(|e| format!("启动前修复资源文件失败: {}", e))?;
-                }
             }
         }
     }
 
     Ok(())
+}
+
+fn prepare_launch_libraries(
+    app_handle: &tauri::AppHandle,
+    version_name: &str,
+    game_dir: &std::path::Path,
+    json: &serde_json::Value,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let libs_dir = libraries_dir(game_dir);
+    let mut prepared = Vec::new();
+    let mut missing = Vec::new();
+    let mut queued_paths = HashSet::new();
+
+    if let Some(libs) = json.get("libraries").and_then(|value| value.as_array()) {
+        for lib in libs {
+            if !library_rules_value_allowed(lib.get("rules")) {
+                continue;
+            }
+            let library_name = lib.get("name").and_then(|value| value.as_str());
+            let dedup_key = library_name
+                .and_then(|name| {
+                    let parts = name.split(':').collect::<Vec<_>>();
+                    if parts.len() >= 4 {
+                        Some(format!("{}:{}:{}", parts[0], parts[1], parts[3]))
+                    } else if parts.len() >= 2 {
+                        Some(format!("{}:{}", parts[0], parts[1]))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+
+            let artifact = lib.get("downloads").and_then(|value| value.get("artifact"));
+            let (relative_path, url, sha1, size) = if let Some(path) = artifact
+                .and_then(|value| value.get("path"))
+                .and_then(|value| value.as_str())
+            {
+                let url = artifact
+                    .and_then(|value| value.get("url"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let base = lib
+                            .get("url")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("https://libraries.minecraft.net/");
+                        Some(format!("{}/{}", base.trim_end_matches('/'), path))
+                    });
+                (
+                    path.to_string(),
+                    url,
+                    artifact
+                        .and_then(|value| value.get("sha1"))
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    artifact
+                        .and_then(|value| value.get("size"))
+                        .and_then(|value| value.as_u64()),
+                )
+            } else {
+                if lib
+                    .get("natives")
+                    .and_then(|value| value.as_object())
+                    .is_some()
+                {
+                    continue;
+                }
+                let Some(name) = library_name else {
+                    continue;
+                };
+                let path = maven_name_to_path(name);
+                let base = lib
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("https://libraries.minecraft.net/");
+                (
+                    path.clone(),
+                    Some(format!("{}/{}", base.trim_end_matches('/'), path)),
+                    lib.get("sha1")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    lib.get("size").and_then(|value| value.as_u64()),
+                )
+            };
+
+            let relative = safe_maven_path(&relative_path)
+                .map_err(|error| format!("非法依赖库路径 {}: {}", relative_path, error))?;
+            let destination = libs_dir.join(relative);
+            if !launch_file_ok(&destination, size) && queued_paths.insert(destination.clone()) {
+                let url = url.ok_or_else(|| format!("依赖库缺少下载地址: {}", relative_path))?;
+                missing.push((url, destination.clone(), sha1, size));
+            }
+            prepared.push((dedup_key, destination));
+        }
+    }
+
+    if !missing.is_empty() {
+        let total = missing.len();
+        let _ = app_handle.emit(
+            "install-progress",
+            serde_json::json!({
+                "name": version_name,
+                "stage": "libraries",
+                "current": 0,
+                "total": total,
+                "detail": format!("启动前修复 {} 个依赖库...", total)
+            }),
+        );
+        let http = reqwest::blocking::Client::builder()
+            .pool_max_idle_per_host(32)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(60))
+            .user_agent("OAOI-Launcher/1.0")
+            .build()
+            .map_err(|error| format!("创建依赖库下载客户端失败: {}", error))?;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        parallel_download(&http, missing, &done, 32, true, None)
+            .map_err(|error| format!("启动前修复依赖库失败: {}", error))?;
+        let _ = app_handle.emit(
+            "install-progress",
+            serde_json::json!({
+                "name": version_name,
+                "stage": "libraries",
+                "current": total,
+                "total": total,
+                "detail": "依赖库修复完成"
+            }),
+        );
+    }
+
+    if let Some((_, missing_path)) = prepared.iter().find(|(_, path)| !path.is_file()) {
+        return Err(format!("缺少必要的依赖库: {}", missing_path.display()));
+    }
+    Ok(prepared)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NativeExtractionManifest {
+    archive_size: u64,
+    archive_modified: u64,
+    files: Vec<NativeExtractionFile>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NativeExtractionFile {
+    name: String,
+    size: u64,
+}
+
+fn native_archive_stamp(path: &std::path::Path) -> Result<(u64, u64), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("读取 native 库信息失败 {}: {}", path.display(), error))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    Ok((metadata.len(), modified))
+}
+
+fn native_manifest_path(
+    natives_dir: &std::path::Path,
+    native_path_text: &str,
+) -> std::path::PathBuf {
+    let mut hasher = sha1_smol::Sha1::new();
+    hasher.update(native_path_text.as_bytes());
+    natives_dir.join(format!(".oaoi-native-{}.json", hasher.digest()))
+}
+
+fn native_manifest_is_ready(
+    marker: &std::path::Path,
+    native_jar_path: &std::path::Path,
+    natives_dir: &std::path::Path,
+) -> bool {
+    let Ok(data) = std::fs::read(marker) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<NativeExtractionManifest>(&data) else {
+        return false;
+    };
+    let Ok((archive_size, archive_modified)) = native_archive_stamp(native_jar_path) else {
+        return false;
+    };
+    if manifest.archive_size != archive_size || manifest.archive_modified != archive_modified {
+        return false;
+    }
+    manifest.files.iter().all(|file| {
+        safe_path_name(&file.name, "native文件名")
+            .ok()
+            .and_then(|name| std::fs::metadata(natives_dir.join(name)).ok())
+            .is_some_and(|metadata| metadata.is_file() && metadata.len() == file.size)
+    })
+}
+
+fn write_native_manifest(
+    marker: &std::path::Path,
+    native_jar_path: &std::path::Path,
+    files: Vec<NativeExtractionFile>,
+) -> Result<(), String> {
+    let (archive_size, archive_modified) = native_archive_stamp(native_jar_path)?;
+    let data = serde_json::to_vec(&NativeExtractionManifest {
+        archive_size,
+        archive_modified,
+        files,
+    })
+    .map_err(|error| format!("生成 native 完成清单失败: {}", error))?;
+    let temp = marker.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp, data).map_err(|error| format!("写入 native 完成清单失败: {}", error))?;
+    let _ = std::fs::remove_file(marker);
+    std::fs::rename(&temp, marker).map_err(|error| format!("提交 native 完成清单失败: {}", error))
 }
 
 #[tauri::command]
@@ -530,37 +992,51 @@ fn do_launch_minecraft(
     crate::offline_policy::ensure_launch_allowed(
         options.access_token.as_deref(),
         options.uuid.as_deref(),
-        options.has_online_account.unwrap_or(false),
+        options.online_account_access_token.as_deref(),
+        options.online_account_uuid.as_deref(),
     )?;
+
+    if options.memory_mb < 512 {
+        return Err("游戏内存不能低于 512 MB".to_string());
+    }
+    let system_memory = crate::java_detect::get_system_memory();
+    if system_memory >= 512 && u64::from(options.memory_mb) > system_memory {
+        return Err(format!("游戏内存不能超过当前物理内存 {} MB", system_memory));
+    }
 
     let game_dir = resolve_game_dir(&options.game_dir);
     if !game_dir.exists() {
         return Err("游戏目录不存在".to_string());
     }
+    let offline_skin_lookup = if options.access_token.is_none() && options.uuid.is_none() {
+        Some(begin_offline_skin_lookup(&options.player_name))
+    } else {
+        None
+    };
 
     // 实例目录
     let version_name = safe_path_name(&options.version_name, "版本名")?;
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(&options.game_dir, &version_name)?;
+    let launch_guard = mutation_lock
+        .lock()
+        .map_err(|_| "版本文件事务锁已损坏".to_string())?;
     let ver_dir = version_dir(&game_dir, &version_name);
     if !ver_dir.exists() {
         return Err(format!("版本 {} 未安装", version_name));
     }
 
-    // 读取实例 JSON
-    let version_json_path = instance_version_json_path(&ver_dir, &version_name);
-    let json_str = match std::fs::read_to_string(&version_json_path) {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(format!("读取版本配置失败: {}", err));
-        }
-    };
-    let json: serde_json::Value = match serde_json::from_str(&json_str) {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(format!("解析版本 JSON 失败: {}", err));
-        }
-    };
-
-    if let Err(err) = repair_launch_files(&app_handle, &version_name, &game_dir, &ver_dir, &json) {
+    // 外部实例可能通过 inheritsFrom 继承原版配置，启动前需先完成合并。
+    let merged_version = load_merged_version_json(&game_dir, &version_name)?;
+    let json = merged_version.json;
+    let client_jar_dir = version_dir(&game_dir, &merged_version.jar_version);
+    let client_jar_path = version_jar_path(&client_jar_dir, &merged_version.jar_version);
+    if let Err(err) = repair_required_launch_files(
+        &app_handle,
+        &version_name,
+        &game_dir,
+        &client_jar_path,
+        &json,
+    ) {
         return Err(err);
     }
 
@@ -573,75 +1049,28 @@ fn do_launch_minecraft(
     let asset_index = json["assetIndex"]["id"].as_str().unwrap_or("legacy");
     let assets_root = assets_dir(&game_dir);
 
-    // 构建 classpath（按 group:artifact 去重）
+    // 检查依赖与构建 classpath 共用同一遍清单，避免启动前重复遍历全部库。
     let libs_dir = libraries_dir(&game_dir);
     let mut classpath = Vec::new();
     let mut seen_keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-    if let Some(libs) = json["libraries"].as_array() {
-        for lib in libs {
-            if !library_rules_value_allowed(lib.get("rules")) {
-                continue;
-            }
-
-            // 解析库路径
-            let lib_path_opt = if let Some(artifact) = lib["downloads"]["artifact"]["path"].as_str()
-            {
-                safe_maven_path(artifact).ok().and_then(|path| {
-                    let p = libs_dir.join(path);
-                    if p.exists() {
-                        Some(p.to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else if let Some(name) = lib["name"].as_str() {
-                let rel_path = maven_name_to_path(name);
-                safe_maven_path(&rel_path).ok().and_then(|path| {
-                    let p = libs_dir.join(path);
-                    if p.exists() {
-                        Some(p.to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                })
+    for (dedup_key, path) in prepare_launch_libraries(&app_handle, &version_name, &game_dir, &json)?
+    {
+        let path = path.to_string_lossy().to_string();
+        if !dedup_key.is_empty() {
+            if let Some(&index) = seen_keys.get(&dedup_key) {
+                classpath[index] = path;
             } else {
-                None
-            };
-
-            if let Some(path) = lib_path_opt {
-                let dedup_key = lib["name"]
-                    .as_str()
-                    .and_then(|n| {
-                        let parts: Vec<&str> = n.split(':').collect();
-                        if parts.len() >= 4 {
-                            Some(format!("{}:{}:{}", parts[0], parts[1], parts[3]))
-                        } else if parts.len() >= 2 {
-                            Some(format!("{}:{}", parts[0], parts[1]))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default();
-
-                if !dedup_key.is_empty() {
-                    if let Some(&idx) = seen_keys.get(&dedup_key) {
-                        classpath[idx] = path;
-                    } else {
-                        seen_keys.insert(dedup_key, classpath.len());
-                        classpath.push(path);
-                    }
-                } else {
-                    classpath.push(path);
-                }
+                seen_keys.insert(dedup_key, classpath.len());
+                classpath.push(path);
             }
+        } else {
+            classpath.push(path);
         }
     }
 
     // 添加版本 jar
-    let version_jar = version_jar_path(&ver_dir, &version_name);
-    if version_jar.exists() {
-        classpath.push(version_jar.to_string_lossy().to_string());
+    if client_jar_path.exists() {
+        classpath.push(client_jar_path.to_string_lossy().to_string());
     }
 
     // 检查 classpath
@@ -657,106 +1086,156 @@ fn do_launch_minecraft(
     // natives 目录
     let natives_dir = version_natives_dir(&ver_dir, &version_name);
     if !natives_dir.exists() {
-        let _ = std::fs::create_dir_all(&natives_dir);
+        std::fs::create_dir_all(&natives_dir)
+            .map_err(|error| format!("创建 Native 目录失败: {}", error))?;
     }
 
-    // 自动解压 natives（老版本需要 LWJGL native dll）
-    let natives_empty = std::fs::read_dir(&natives_dir)
-        .map(|mut d| d.next().is_none())
-        .unwrap_or(true);
-    if natives_empty {
-        if let Some(libs) = json["libraries"].as_array() {
-            for lib in libs {
-                // 只处理有 natives.windows 的库
-                let classifier_key = match lib["natives"]["windows"].as_str() {
-                    Some(k) => k.to_string(),
-                    None => continue,
-                };
-                // 老版本没有 downloads.classifiers，需要从 name + natives.windows 推导路径。
-                let native_path_text = lib["downloads"]["classifiers"][&classifier_key]["path"]
-                    .as_str()
-                    .map(|path| path.to_string())
+    // 每次核对 native 清单，目录非空也可能缺少其中一部分文件。
+    if let Some(libs) = json["libraries"].as_array() {
+        let arch = if cfg!(target_pointer_width = "64") {
+            "64"
+        } else {
+            "32"
+        };
+        let http = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(60))
+            .user_agent("OAOI-Launcher/1.0")
+            .build()
+            .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
+
+        for lib in libs {
+            if !library_rules_value_allowed(lib.get("rules")) {
+                continue;
+            }
+            let Some(raw_classifier) = lib["natives"]["windows"].as_str() else {
+                continue;
+            };
+            let classifier_key = raw_classifier.replace("${arch}", arch);
+            let classifier_info = lib["downloads"]["classifiers"]
+                .get(&classifier_key)
+                .or_else(|| lib["downloads"]["classifiers"].get(raw_classifier));
+            let native_path_text = classifier_info
+                .and_then(|value| value.get("path"))
+                .and_then(|value| value.as_str())
+                .map(|path| path.replace("${arch}", arch))
+                .or_else(|| {
+                    let name = lib.get("name").and_then(|value| value.as_str())?;
+                    Some(maven_name_to_path_with_classifier(name, &classifier_key))
+                });
+            let Some(native_path_text) = native_path_text else {
+                continue;
+            };
+            let native_rel_path = safe_maven_path(&native_path_text)
+                .map_err(|e| format!("非法 native 路径 {}: {}", native_path_text, e))?;
+            let native_jar_path = libs_dir.join(&native_rel_path);
+            let native_size = classifier_info
+                .and_then(|value| value.get("size"))
+                .and_then(|value| value.as_u64());
+            if !launch_file_ok(&native_jar_path, native_size) {
+                let native_url = classifier_info
+                    .and_then(|value| value.get("url"))
+                    .and_then(|value| value.as_str())
+                    .map(|url| url.to_string())
                     .or_else(|| {
                         let name = lib.get("name").and_then(|value| value.as_str())?;
-                        Some(maven_name_to_path_with_classifier(name, &classifier_key))
+                        let base = lib
+                            .get("url")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_else(|| default_library_maven_base(name, true));
+                        Some(format!(
+                            "{}/{}",
+                            base.trim_end_matches('/'),
+                            native_path_text
+                        ))
                     });
-                let Some(native_path_text) = native_path_text else {
+                if let Some(url) = native_url {
+                    if let Some(parent) = native_jar_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("创建 native 库目录失败: {}", e))?;
+                    }
+                    eprintln!("[launch] 下载 native: {}", url);
+                    let sha1 = classifier_info
+                        .and_then(|value| value.get("sha1"))
+                        .and_then(|value| value.as_str());
+                    download_file_if_needed_cancelable(
+                        &http,
+                        &url,
+                        &native_jar_path,
+                        sha1,
+                        native_size,
+                        true,
+                        None,
+                    )
+                    .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
+                }
+            }
+
+            let native_marker = native_manifest_path(&natives_dir, &native_path_text);
+            if native_manifest_is_ready(&native_marker, &native_jar_path, &natives_dir) {
+                continue;
+            }
+
+            let file = std::fs::File::open(&native_jar_path)
+                .map_err(|e| format!("打开 native 库失败 {}: {}", native_jar_path.display(), e))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| format!("读取 native 库失败 {}: {}", native_jar_path.display(), e))?;
+            let mut extracted_files = Vec::new();
+            for index in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(index)
+                    .map_err(|e| format!("读取 native 文件失败: {}", e))?;
+                let name = entry.name().to_string();
+                if !name.ends_with(".dll") && !name.ends_with(".so") && !name.ends_with(".dylib") {
+                    continue;
+                }
+                let Some(filename) = name.rsplit('/').next() else {
                     continue;
                 };
-                let Ok(native_rel_path) = safe_maven_path(&native_path_text) else {
+                let filename = safe_path_name(filename, "native文件名")?;
+                let entry_size = entry.size();
+                extracted_files.push(NativeExtractionFile {
+                    name: filename.clone(),
+                    size: entry_size,
+                });
+                let out_path = natives_dir.join(&filename);
+                if launch_file_ok(&out_path, Some(entry_size)) {
                     continue;
-                };
-                let native_jar_path = libs_dir.join(&native_rel_path);
-                if !native_jar_path.exists() {
-                    let native_url = lib["downloads"]["classifiers"][&classifier_key]["url"]
-                        .as_str()
-                        .map(|url| url.to_string())
-                        .or_else(|| {
-                            let name = lib.get("name").and_then(|value| value.as_str())?;
-                            let base = lib
-                                .get("url")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or_else(|| default_library_maven_base(name, true));
-                            Some(format!(
-                                "{}/{}",
-                                base.trim_end_matches('/'),
-                                native_path_text
-                            ))
-                        });
-                    if let Some(url) = native_url {
-                        if let Some(parent) = native_jar_path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        eprintln!("[launch] 下载 native: {}", url);
-                        let sha1 =
-                            lib["downloads"]["classifiers"][&classifier_key]["sha1"].as_str();
-                        let http = reqwest::blocking::Client::builder()
-                            .connect_timeout(std::time::Duration::from_secs(15))
-                            .timeout(std::time::Duration::from_secs(60))
-                            .user_agent("OAOI-Launcher/1.0")
-                            .build()
-                            .map_err(|e| format!("创建 native 下载客户端失败: {}", e))?;
-                        download_file_mirror_then_official(
-                            &http,
-                            &url,
-                            &native_jar_path,
-                            sha1,
-                            None,
-                        )
-                        .map_err(|e| format!("下载 native 失败: {} -> {}", url, e))?;
-                    }
                 }
-                if native_jar_path.exists() {
-                    // 解压 dll 文件到 natives 目录
-                    if let Ok(file) = std::fs::File::open(&native_jar_path) {
-                        if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                            for i in 0..archive.len() {
-                                if let Ok(mut entry) = archive.by_index(i) {
-                                    let name = entry.name().to_string();
-                                    if name.ends_with(".dll")
-                                        || name.ends_with(".so")
-                                        || name.ends_with(".dylib")
-                                    {
-                                        let Some(filename) = name.rsplit('/').next() else {
-                                            continue;
-                                        };
-                                        let Ok(filename) = safe_path_name(filename, "native文件名")
-                                        else {
-                                            continue;
-                                        };
-                                        let out_path = natives_dir.join(filename);
-                                        if !out_path.exists() {
-                                            if let Ok(mut out) = std::fs::File::create(&out_path) {
-                                                let _ = std::io::copy(&mut entry, &mut out);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    eprintln!("[launch] 已解压 natives: {}", native_jar_path.display());
+                let tmp_counter = NATIVE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let tmp_path = out_path.with_file_name(format!(
+                    ".{}.{}.{}.oaoi_native_tmp",
+                    filename,
+                    std::process::id(),
+                    tmp_counter
+                ));
+                let mut out = std::fs::File::create(&tmp_path)
+                    .map_err(|e| format!("创建 native 临时文件失败: {}", e))?;
+                if let Err(error) = std::io::copy(&mut entry, &mut out) {
+                    drop(out);
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("解压 native 文件失败: {}", error));
                 }
+                if let Err(error) = std::io::Write::flush(&mut out) {
+                    drop(out);
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("写入 native 文件失败: {}", error));
+                }
+                drop(out);
+                if let Err(error) = crate::downloader::fs::finalize_part_file(
+                    &tmp_path,
+                    &out_path,
+                    Some(entry_size),
+                    None,
+                ) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("写入 native 文件失败: {}", error));
+                }
+            }
+            if let Err(error) =
+                write_native_manifest(&native_marker, &native_jar_path, extracted_files)
+            {
+                eprintln!("[launch] {}", error);
             }
         }
     }
@@ -799,28 +1278,11 @@ fn do_launch_minecraft(
         let _ = std::fs::write(&options_file, format!("lang:{}\n", mc_lang));
     }
 
-    // 生成离线 UUID（使用 "OfflinePlayer:" + 玩家名的 SHA1 前 128 bit，与官方离线模式一致）
-    let uuid = {
-        let digest = sha1_smol::Sha1::from(format!("OfflinePlayer:{}", options.player_name))
-            .digest()
-            .bytes();
-        // 取前16字节作为 UUID bytes
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&digest[..16]);
-        // 设置 version 3 (name-based) 和 variant bits
-        bytes[6] = (bytes[6] & 0x0f) | 0x30;
-        bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        format!("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15])
-    };
-    let offline_skin_profile = if options.access_token.is_none() && options.uuid.is_none() {
-        fetch_offline_skin_profile(&options.player_name)
-    } else {
-        None
-    };
+    // 离线 UUID 使用 Java UUID.nameUUIDFromBytes 对应的 MD5 算法。
+    let uuid = offline_player_uuid(&options.player_name);
+    // 只接收已经完成的后台结果；网络尚未返回时立即使用缓存或默认离线身份。
+    let offline_skin_profile =
+        offline_skin_lookup.and_then(|lookup| lookup.resolve_without_waiting());
     let launch_uuid = options
         .uuid
         .clone()
@@ -1026,23 +1488,7 @@ fn do_launch_minecraft(
 
         // 注入 game 参数
         if let Some(game_args) = json["arguments"]["game"].as_array() {
-            for arg in game_args {
-                if let Some(s) = arg.as_str() {
-                    if !s.contains("${")
-                        && !s.starts_with("--username")
-                        && !s.starts_with("--version")
-                        && !s.starts_with("--gameDir")
-                        && !s.starts_with("--assetsDir")
-                        && !s.starts_with("--assetIndex")
-                        && !s.starts_with("--uuid")
-                        && !s.starts_with("--accessToken")
-                        && !s.starts_with("--userType")
-                        && !s.starts_with("--versionType")
-                    {
-                        args.push(s.to_string());
-                    }
-                }
-            }
+            append_extra_game_arguments(&mut args, game_args, &user_properties);
         }
         let mut i = 0;
         while i < args.len() {
@@ -1072,20 +1518,23 @@ fn do_launch_minecraft(
 
     // 确保 mods 文件夹存在
     let mods_dir = ver_dir.join("mods");
-    let _ = std::fs::create_dir_all(&mods_dir);
+    std::fs::create_dir_all(&mods_dir).map_err(|error| format!("创建 Mod 目录失败: {}", error))?;
 
     // 调试日志
     eprintln!("\n[launch] ===== 启动命令 =====");
     eprintln!("[launch] Java: {}", options.java_path);
     eprintln!("[launch] MainClass: {}", main_class);
     eprintln!("[launch] Classpath entries: {}", classpath.len());
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 && args.get(i - 1).map(|s| s.as_str()) == Some("--accessToken") && arg != "0" {
-            eprintln!("[launch] arg[{}]: *****(已隐藏)", i);
-        } else if arg.len() > 200 {
-            eprintln!("[launch] arg[{}]: {}", i, launch_log_preview(arg, 200));
+    for (i, _) in args.iter().enumerate() {
+        let redacted = redact_launch_argument(&args, i, options.access_token.as_deref());
+        if redacted.len() > 200 {
+            eprintln!(
+                "[launch] arg[{}]: {}",
+                i,
+                launch_log_preview(&redacted, 200)
+            );
         } else {
-            eprintln!("[launch] arg[{}]: {}", i, arg);
+            eprintln!("[launch] arg[{}]: {}", i, redacted);
         }
     }
     eprintln!("[launch] ===== END =====\n");
@@ -1122,22 +1571,45 @@ fn do_launch_minecraft(
     };
 
     let pid = child.id();
+    let running_registration = match register_running_game(&options.game_dir, &version_name, pid) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    // 进程已经登记，后续删除由运行状态阻止，不再占用文件事务锁。
+    drop(launch_guard);
+    let launch_task_id = options.launch_task_id;
     let _ = app_handle.emit(
         "launch-window-waiting",
         serde_json::json!({
             "version": version_name,
             "pid": pid,
+            "launch_task_id": launch_task_id,
             "timeout_seconds": LAUNCH_WINDOW_WAIT_TIMEOUT.as_secs()
         }),
     );
     if let Err(err) = wait_for_game_window(&mut child, pid, &log_path, &ver_dir) {
+        let still_running = child
+            .try_wait()
+            .map(|status| status.is_none())
+            .unwrap_or(true);
+        if still_running {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+                drop(running_registration);
+            });
+        }
         return Err(err);
     }
     let _ = app_handle.emit(
         "launch-window-ready",
         serde_json::json!({
             "version": version_name,
-            "pid": pid
+            "pid": pid,
+            "launch_task_id": launch_task_id
         }),
     );
 
@@ -1149,6 +1621,7 @@ fn do_launch_minecraft(
 
     // 后台线程：等待游戏进程退出，崩溃时发送事件
     std::thread::spawn(move || {
+        let _running_registration = running_registration;
         match child.wait() {
             Ok(status) => {
                 let exit_code = status.code().unwrap_or(-1);
@@ -1172,6 +1645,7 @@ fn do_launch_minecraft(
                         "game-crashed",
                         serde_json::json!({
                             "version": version_for_log,
+                            "launch_task_id": launch_task_id,
                             "exit_code": exit_code,
                             "diagnosis": diagnosis,
                             "log_tail": log_tail,
@@ -1183,6 +1657,7 @@ fn do_launch_minecraft(
                         "game-exited",
                         serde_json::json!({
                             "version": version_for_log,
+                            "launch_task_id": launch_task_id,
                             "exit_code": exit_code
                         }),
                     );
@@ -1397,5 +1872,84 @@ fn analyze_crash_log(log: &str, exit_code: i32) -> String {
             result.push('\n');
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        append_extra_game_arguments, is_instance_running, load_offline_skin_profile, md5_digest,
+        offline_player_uuid, register_running_game, save_offline_skin_profile, OfflineSkinLookup,
+        OfflineSkinProfile,
+    };
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+    }
+
+    #[test]
+    fn md5_matches_standard_vectors() {
+        assert_eq!(hex(&md5_digest(b"")), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(hex(&md5_digest(b"abc")), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn offline_uuid_matches_minecraft_algorithm() {
+        assert_eq!(
+            offline_player_uuid("Notch"),
+            "b50ad385829d3141a2167e7d7539ba7f"
+        );
+    }
+
+    #[test]
+    fn 离线皮肤只使用进程内缓存且接收结果不等待() {
+        let player_name = format!("Skin{}", std::process::id());
+        let profile = OfflineSkinProfile {
+            uuid: "0123456789abcdef0123456789abcdef".to_string(),
+            user_properties: "{}".to_string(),
+            cached_at_unix: 1,
+        };
+        save_offline_skin_profile(&player_name, &profile).unwrap();
+        assert_eq!(
+            load_offline_skin_profile(&player_name).unwrap().uuid,
+            profile.uuid
+        );
+
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let lookup = OfflineSkinLookup {
+            cached: Some(profile.clone()),
+            receiver: Some(receiver),
+        };
+        assert_eq!(lookup.resolve_without_waiting().unwrap().uuid, profile.uuid);
+    }
+
+    #[test]
+    fn 游戏运行登记会在守卫释放后清除() {
+        let game_dir = std::env::temp_dir().join("oaoi-running-game-test");
+        let game_dir = game_dir.to_string_lossy();
+        let registration = register_running_game(&game_dir, "测试版本", 12345).unwrap();
+
+        assert!(is_instance_running(&game_dir, "测试版本").unwrap());
+        drop(registration);
+        assert!(!is_instance_running(&game_dir, "测试版本").unwrap());
+    }
+
+    #[test]
+    fn 缺失占位值时同时移除参数名() {
+        let game_args = serde_json::json!([
+            "--username",
+            "${auth_player_name}",
+            "--clientId",
+            "${clientid}",
+            "--xuid",
+            "${auth_xuid}",
+            "--userProperties",
+            "${user_properties}",
+            "--demo"
+        ]);
+        let mut args = Vec::new();
+        append_extra_game_arguments(&mut args, game_args.as_array().unwrap(), "{}");
+
+        assert_eq!(args, ["--userProperties", "{}", "--demo"]);
     }
 }

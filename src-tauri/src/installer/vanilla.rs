@@ -1,4 +1,7 @@
-use super::{library_allowed, make_emitter, mirror_url, safe_maven_path};
+use super::{
+    library_allowed, make_emitter, maven_name_to_path, maven_name_to_path_with_classifier,
+    mirror_url, native_classifier_for_current_os, safe_maven_path,
+};
 use crate::downloader::event::{DownloadEvent, DownloadOutcome};
 use crate::downloader::{
     DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
@@ -8,32 +11,18 @@ use crate::instance::{
     version_jar_path,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
 
-/// 安装 vanilla 基础（meta + 版本 jar + libraries + assets）
-pub fn install_vanilla(
-    app_handle: &tauri::AppHandle,
-    name: &str,
-    mc_version: &str,
-    meta_url: &str,
-    game_dir: &std::path::Path,
-    inst_dir: &std::path::Path,
-    http: &reqwest::blocking::Client,
-    use_mirror: bool,
-) -> Result<serde_json::Value, String> {
-    install_vanilla_with_names(
-        app_handle, name, name, mc_version, meta_url, game_dir, inst_dir, http, use_mirror,
-    )
-}
-
-pub fn install_vanilla_with_names(
+/// 安装 vanilla 基础，并将显示名称与内部取消键分离。
+pub fn install_vanilla_with_task_names(
     app_handle: &tauri::AppHandle,
     progress_name: &str,
     version_name: &str,
+    cancel_name: &str,
     mc_version: &str,
     meta_url: &str,
     game_dir: &std::path::Path,
@@ -45,12 +34,7 @@ pub fn install_vanilla_with_names(
 
     // 1. 下载版本 JSON
     emit("meta", 0, 1, &format!("下载 {} 元数据...", mc_version));
-    let mirrored_meta = if use_mirror {
-        format!(
-            "https://bmclapi2.bangbang93.com/version/{}/json",
-            mc_version
-        )
-    } else if meta_url.starts_with("https://bmclapi2.bangbang93.com/v1/packages/") {
+    let official_meta = if meta_url.starts_with("https://bmclapi2.bangbang93.com/v1/packages/") {
         meta_url.replacen(
             "https://bmclapi2.bangbang93.com",
             "https://piston-meta.mojang.com",
@@ -59,33 +43,34 @@ pub fn install_vanilla_with_names(
     } else {
         mirror_url(meta_url, false)
     };
-    let resp = http
-        .get(&mirrored_meta)
-        .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .send()
-        .map_err(|e| format!("获取版本信息失败: {}\n(请检查网络或代理)", e))?;
-    let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let body = resp
-        .text()
-        .map_err(|e| format!("读取版本信息失败: {} ({})", e, mirrored_meta))?;
-    if !status.is_success() {
-        let preview: String = body.chars().take(300).collect();
-        return Err(format!(
-            "获取版本信息失败: HTTP {} ({})\n{}",
-            status, mirrored_meta, preview
-        ));
+    let mirror_meta = format!(
+        "https://bmclapi2.bangbang93.com/version/{}/json",
+        mc_version
+    );
+    let mut meta_candidates = if use_mirror {
+        vec![mirror_meta, official_meta]
+    } else {
+        vec![official_meta, mirror_meta]
+    };
+    meta_candidates.dedup();
+    let mut meta_errors = Vec::new();
+    let mut ver_json = None;
+    for url in meta_candidates {
+        if crate::instance::is_cancelled(cancel_name) {
+            return Err("用户取消安装".to_string());
+        }
+        match fetch_version_metadata(http, &url, cancel_name) {
+            Ok(value) => {
+                ver_json = Some(value);
+                break;
+            }
+            Err(error) => meta_errors.push(format!("{} -> {}", url, error)),
+        }
     }
-    let mut ver_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        let preview: String = body.chars().take(300).collect();
+    let mut ver_json = ver_json.ok_or_else(|| {
         format!(
-            "解析版本信息失败: {}\nURL: {}\nContent-Type: {}\nBody: {}",
-            e, mirrored_meta, content_type, preview
+            "获取版本信息失败，所有来源均不可用: {}",
+            meta_errors.join(" | ")
         )
     })?;
     emit("meta", 1, 1, "元数据下载完成");
@@ -109,6 +94,7 @@ pub fn install_vanilla_with_names(
         std::thread::spawn({
             let app_handle = app_handle.clone();
             let progress_name = progress_name.to_string();
+            let cancel_name = cancel_name.to_string();
             let version_name = version_name.to_string();
             let inst_dir = inst_dir.to_path_buf();
             let http = http.clone();
@@ -116,6 +102,7 @@ pub fn install_vanilla_with_names(
                 download_client_stage(
                     &app_handle,
                     &progress_name,
+                    &cancel_name,
                     &version_name,
                     &inst_dir,
                     &http,
@@ -130,12 +117,14 @@ pub fn install_vanilla_with_names(
         std::thread::spawn({
             let app_handle = app_handle.clone();
             let progress_name = progress_name.to_string();
+            let cancel_name = cancel_name.to_string();
             let game_dir = game_dir.to_path_buf();
             let http = http.clone();
             move || {
                 download_libraries_stage(
                     &app_handle,
                     &progress_name,
+                    &cancel_name,
                     &game_dir,
                     &http,
                     use_mirror,
@@ -150,13 +139,17 @@ pub fn install_vanilla_with_names(
             std::thread::spawn({
                 let app_handle = app_handle.clone();
                 let progress_name = progress_name.to_string();
+                let cancel_name = cancel_name.to_string();
                 let game_dir = game_dir.to_path_buf();
+                let inst_dir = inst_dir.to_path_buf();
                 let http = http.clone();
                 move || {
                     download_assets_stage(
                         &app_handle,
                         &progress_name,
+                        &cancel_name,
                         &game_dir,
+                        &inst_dir,
                         &http,
                         use_mirror,
                         &asset_index,
@@ -165,7 +158,7 @@ pub fn install_vanilla_with_names(
             }),
         ));
     }
-    join_vanilla_stages(progress_name, handles)?;
+    join_vanilla_stages(cancel_name, handles)?;
 
     // 设置基础实例信息
     ver_json["id"] = serde_json::Value::String(version_name.to_string());
@@ -176,6 +169,44 @@ pub fn install_vanilla_with_names(
             serde_json::Value::String("net.minecraft.client.main.Main".to_string());
     }
     Ok(ver_json)
+}
+
+fn fetch_version_metadata(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    progress_name: &str,
+) -> Result<serde_json::Value, String> {
+    if crate::instance::is_cancelled(progress_name) {
+        return Err("用户取消安装".to_string());
+    }
+    let resp = http
+        .get(url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .map_err(|e| format!("请求失败: {}", e))?;
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = resp.text().map_err(|e| format!("读取响应失败: {}", e))?;
+    if crate::instance::is_cancelled(progress_name) {
+        return Err("用户取消安装".to_string());
+    }
+    if !status.is_success() {
+        let preview: String = body.chars().take(300).collect();
+        return Err(format!("HTTP {}: {}", status, preview));
+    }
+    serde_json::from_str(&body).map_err(|e| {
+        let preview: String = body.chars().take(300).collect();
+        format!(
+            "解析失败: {}，Content-Type: {}，Body: {}",
+            e, content_type, preview
+        )
+    })
 }
 
 fn join_vanilla_stages(
@@ -195,14 +226,14 @@ fn join_vanilla_stages(
                     Ok(Err(e)) => {
                         if first_error.is_none() {
                             eprintln!("[vanilla] {} 阶段失败，取消基础游戏下载: {}", stage, e);
-                            let _ = crate::instance::cancel_modpack_install(name.to_string());
+                            let _ = crate::instance::cancel_install_task(name);
                             first_error = Some(format!("{}: {}", stage, e));
                         }
                     }
                     Err(_) => {
                         if first_error.is_none() {
                             eprintln!("[vanilla] {} 阶段线程异常退出，取消基础游戏下载", stage);
-                            let _ = crate::instance::cancel_modpack_install(name.to_string());
+                            let _ = crate::instance::cancel_install_task(name);
                             first_error = Some(format!("{} 线程异常退出", stage));
                         }
                     }
@@ -254,12 +285,10 @@ fn vanilla_source_candidates(url: &str, use_mirror: bool) -> Vec<String> {
 }
 
 fn vanilla_download_options(
-    max_global_connections: usize,
     max_connections_per_file: usize,
     max_active_files: usize,
 ) -> DownloadEngineOptions {
     let mut options = DownloadEngineOptions::default();
-    options.max_global_connections = max_global_connections.max(1);
     options.max_connections_per_file = max_connections_per_file.max(1);
     options.max_active_files = max_active_files.max(1);
     options.candidate_no_progress_timeout = Duration::from_secs(15);
@@ -304,16 +333,16 @@ fn is_cancel_related_error(error: &str) -> bool {
 
 fn run_vanilla_downloads(
     app_handle: &tauri::AppHandle,
-    name: &str,
+    progress_name: &str,
+    cancel_name: &str,
     stage: &str,
     detail_label: &str,
     tasks: Vec<VanillaDownloadTask>,
-    max_global_connections: usize,
     max_connections_per_file: usize,
     max_active_files: usize,
     report_bytes: bool,
 ) -> Result<(), String> {
-    let emit = make_emitter(app_handle, name);
+    let emit = make_emitter(app_handle, progress_name);
     let total = tasks.len();
     if total == 0 {
         emit(stage, 0, 0, detail_label);
@@ -333,23 +362,16 @@ fn run_vanilla_downloads(
         requests.push(request);
     }
 
-    let options = vanilla_download_options(
-        max_global_connections,
-        max_connections_per_file,
-        max_active_files,
-    );
-    let pool = install_download_pool(
-        name,
-        DownloadEngineOptions::default_global_connection_limit(),
-    );
+    let options = vanilla_download_options(max_connections_per_file, max_active_files);
+    let pool = install_download_pool(cancel_name, options.max_global_connections);
     let manager = DownloadManager::with_options_and_pool(options, pool)?;
-    let _manager_registration = register_download_manager(name, &manager);
+    let _manager_registration = register_download_manager(cancel_name, &manager);
 
     let done = Arc::new(AtomicUsize::new(0));
     let completed = Arc::new(Mutex::new(HashSet::new()));
     let info_for_event = Arc::new(info_by_id.clone());
     let app_for_event = app_handle.clone();
-    let name_for_event = name.to_string();
+    let name_for_event = progress_name.to_string();
     let stage_for_event = stage.to_string();
     let detail_for_event = detail_label.to_string();
     let done_for_event = done.clone();
@@ -419,7 +441,7 @@ fn run_vanilla_downloads(
             errors.push(format!("{} -> {}", first_url, error));
         }
     }
-    let was_cancelled = crate::instance::is_cancelled(name);
+    let was_cancelled = crate::instance::is_cancelled(cancel_name);
     if errors.is_empty() {
         if was_cancelled {
             return Err("用户取消下载".to_string());
@@ -444,6 +466,7 @@ fn run_vanilla_downloads(
 fn download_client_stage(
     app_handle: &tauri::AppHandle,
     progress_name: &str,
+    cancel_name: &str,
     version_name: &str,
     inst_dir: &std::path::Path,
     _http: &reqwest::blocking::Client,
@@ -466,10 +489,10 @@ fn download_client_stage(
     run_vanilla_downloads(
         app_handle,
         progress_name,
+        cancel_name,
         "client",
         "下载版本 jar...",
         vec![task],
-        16,
         16,
         1,
         true,
@@ -481,39 +504,15 @@ fn download_client_stage(
 
 fn download_libraries_stage(
     app_handle: &tauri::AppHandle,
-    name: &str,
+    progress_name: &str,
+    cancel_name: &str,
     game_dir: &std::path::Path,
     _http: &reqwest::blocking::Client,
     use_mirror: bool,
     libs: Vec<serde_json::Value>,
 ) -> Result<(), String> {
-    let emit = make_emitter(app_handle, name);
-    let mut tasks = Vec::new();
-    let mut seen_library_paths = HashSet::new();
-    for lib in libs.iter() {
-        let rules = lib
-            .get("rules")
-            .map(|v| v.as_array().cloned().unwrap_or_default());
-        if !library_allowed(&rules) {
-            continue;
-        }
-        if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
-            let path = artifact.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let url = artifact.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
-            if !path.is_empty() && !url.is_empty() {
-                let rel_path = safe_maven_path(path)?;
-                let dest = libraries_dir(game_dir).join(rel_path);
-                if seen_library_paths.insert(path.to_string()) {
-                    tasks.push(VanillaDownloadTask {
-                        candidates: vanilla_source_candidates(url, use_mirror),
-                        dest,
-                        sha1: sha1.map(|s| s.to_string()),
-                    });
-                }
-            }
-        }
-    }
+    let emit = make_emitter(app_handle, progress_name);
+    let tasks = collect_library_download_tasks(game_dir, use_mirror, &libs)?;
     let total = tasks.len();
     emit(
         "libraries",
@@ -523,11 +522,11 @@ fn download_libraries_stage(
     );
     run_vanilla_downloads(
         app_handle,
-        name,
+        progress_name,
+        cancel_name,
         "libraries",
         "依赖库",
         tasks,
-        32,
         1,
         32,
         false,
@@ -537,15 +536,169 @@ fn download_libraries_stage(
     Ok(())
 }
 
+fn collect_library_download_tasks(
+    game_dir: &std::path::Path,
+    use_mirror: bool,
+    libs: &[serde_json::Value],
+) -> Result<Vec<VanillaDownloadTask>, String> {
+    let mut tasks = Vec::new();
+    let mut seen_library_paths = HashSet::new();
+    for lib in libs {
+        let rules = lib
+            .get("rules")
+            .map(|v| v.as_array().cloned().unwrap_or_default());
+        if !library_allowed(&rules) {
+            continue;
+        }
+
+        let lib_name = lib.get("name").and_then(|value| value.as_str());
+        let base_url = lib
+            .get("url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("https://libraries.minecraft.net")
+            .trim_end_matches('/');
+
+        if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
+            let path = artifact
+                .get("path")
+                .and_then(|value| value.as_str())
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .or_else(|| lib_name.map(maven_name_to_path));
+            let sha1 = artifact.get("sha1").and_then(|v| v.as_str());
+            if let Some(path) = path {
+                let url = artifact
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}/{}", base_url, path));
+                push_library_download_task(
+                    &mut tasks,
+                    &mut seen_library_paths,
+                    game_dir,
+                    use_mirror,
+                    &path,
+                    &url,
+                    sha1,
+                )?;
+            }
+        } else if lib
+            .get("natives")
+            .and_then(|value| value.as_object())
+            .is_none()
+        {
+            // 旧版元数据没有 downloads，普通库需由 Maven 坐标和可选 url 还原。
+            if let Some(name) = lib_name {
+                let path = maven_name_to_path(name);
+                let url = format!("{}/{}", base_url, path);
+                push_library_download_task(
+                    &mut tasks,
+                    &mut seen_library_paths,
+                    game_dir,
+                    use_mirror,
+                    &path,
+                    &url,
+                    lib.get("sha1").and_then(|value| value.as_str()),
+                )?;
+            }
+        }
+
+        let Some(raw_classifier) = lib
+            .get("natives")
+            .and_then(|natives| natives.get("windows"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let Some(classifier) = native_classifier_for_current_os(lib) else {
+            continue;
+        };
+        let classifier_info = lib
+            .get("downloads")
+            .and_then(|downloads| downloads.get("classifiers"))
+            .and_then(|classifiers| {
+                classifiers
+                    .get(&classifier)
+                    .or_else(|| classifiers.get(raw_classifier))
+            });
+        let path = classifier_info
+            .and_then(|value| value.get("path"))
+            .and_then(|value| value.as_str())
+            .map(|path| {
+                path.replace(
+                    "${arch}",
+                    if cfg!(target_pointer_width = "64") {
+                        "64"
+                    } else {
+                        "32"
+                    },
+                )
+            })
+            .or_else(|| lib_name.map(|name| maven_name_to_path_with_classifier(name, &classifier)));
+        if let Some(path) = path {
+            let url = classifier_info
+                .and_then(|value| value.get("url"))
+                .and_then(|value| value.as_str())
+                .filter(|url| !url.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{}/{}", base_url, path));
+            push_library_download_task(
+                &mut tasks,
+                &mut seen_library_paths,
+                game_dir,
+                use_mirror,
+                &path,
+                &url,
+                classifier_info
+                    .and_then(|value| value.get("sha1"))
+                    .and_then(|value| value.as_str()),
+            )?;
+        }
+    }
+    Ok(tasks)
+}
+
+fn push_library_download_task(
+    tasks: &mut Vec<VanillaDownloadTask>,
+    seen_library_paths: &mut HashSet<String>,
+    game_dir: &std::path::Path,
+    use_mirror: bool,
+    path: &str,
+    url: &str,
+    sha1: Option<&str>,
+) -> Result<(), String> {
+    let normalized_path = path.replace(
+        "${arch}",
+        if cfg!(target_pointer_width = "64") {
+            "64"
+        } else {
+            "32"
+        },
+    );
+    if !seen_library_paths.insert(normalized_path.clone()) {
+        return Ok(());
+    }
+    let rel_path = safe_maven_path(&normalized_path)?;
+    tasks.push(VanillaDownloadTask {
+        candidates: vanilla_source_candidates(url, use_mirror),
+        dest: libraries_dir(game_dir).join(rel_path),
+        sha1: sha1.map(str::to_string),
+    });
+    Ok(())
+}
+
 fn download_assets_stage(
     app_handle: &tauri::AppHandle,
-    name: &str,
+    progress_name: &str,
+    cancel_name: &str,
     game_dir: &std::path::Path,
+    inst_dir: &std::path::Path,
     _http: &reqwest::blocking::Client,
     use_mirror: bool,
     asset_index: &serde_json::Value,
 ) -> Result<(), String> {
-    let emit = make_emitter(app_handle, name);
+    let emit = make_emitter(app_handle, progress_name);
     let index_url = asset_index
         .get("url")
         .and_then(|v| v.as_str())
@@ -575,7 +728,8 @@ fn download_assets_stage(
     }
     run_vanilla_downloads(
         app_handle,
-        name,
+        progress_name,
+        cancel_name,
         "assetIndex",
         "资源索引",
         vec![VanillaDownloadTask {
@@ -583,7 +737,6 @@ fn download_assets_stage(
             dest: index_path.clone(),
             sha1: index_sha1.map(|sha1| sha1.to_string()),
         }],
-        1,
         1,
         1,
         false,
@@ -625,18 +778,98 @@ fn download_assets_stage(
     emit("assets", 0, total, &format!("下载 {} 个资源...", total));
     run_vanilla_downloads(
         app_handle,
-        name,
+        progress_name,
+        cancel_name,
         "assets",
         "资源",
         asset_tasks,
-        32,
         1,
         32,
         false,
     )
     .map_err(|e| format!("assets: {}", e))?;
+    materialize_legacy_assets(game_dir, inst_dir, &index_json, cancel_name)?;
     emit("assets", total, total, "资源下载完成");
     Ok(())
+}
+
+fn materialize_legacy_assets(
+    game_dir: &Path,
+    inst_dir: &Path,
+    index_json: &serde_json::Value,
+    cancel_name: &str,
+) -> Result<(), String> {
+    let map_virtual = index_json
+        .get("virtual")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let map_resources = index_json
+        .get("map_to_resources")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !map_virtual && !map_resources {
+        return Ok(());
+    }
+
+    let Some(objects) = index_json
+        .get("objects")
+        .and_then(|value| value.as_object())
+    else {
+        return Ok(());
+    };
+    let virtual_root = assets_dir(game_dir).join("virtual").join("legacy");
+    let resources_root = inst_dir.join("resources");
+
+    for (logical_name, info) in objects {
+        if crate::instance::is_cancelled(cancel_name) {
+            return Err("用户取消安装".to_string());
+        }
+        let hash = info
+            .get("hash")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if !is_valid_sha1(hash) {
+            continue;
+        }
+        let source = assets_dir(game_dir)
+            .join("objects")
+            .join(&hash[..2])
+            .join(hash);
+        if !source.is_file() {
+            return Err(format!("旧版资源源文件不存在: {}", source.display()));
+        }
+
+        if map_virtual {
+            let target = crate::instance::safe_join(&virtual_root, logical_name)?;
+            replace_asset_mapping(&source, &target)?;
+        }
+        if map_resources {
+            // 启动时 gameDir 指向实例目录，因此 resources 必须映射到实例内。
+            let target = crate::instance::safe_join(&resources_root, logical_name)?;
+            replace_asset_mapping(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_asset_mapping(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建旧版资源目录失败 {}: {}", parent.display(), error))?;
+    }
+    if target.exists() {
+        if !target.is_file() {
+            return Err(format!("旧版资源目标不是文件: {}", target.display()));
+        }
+        std::fs::remove_file(target)
+            .map_err(|error| format!("替换旧版资源失败 {}: {}", target.display(), error))?;
+    }
+    if std::fs::hard_link(source, target).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|error| format!("复制旧版资源失败 {}: {}", target.display(), error))
 }
 
 fn is_valid_sha1(value: &str) -> bool {
@@ -645,4 +878,62 @@ fn is_valid_sha1(value: &str) -> bool {
 
 fn progress_usize(value: u64) -> usize {
     value.min(usize::MAX as u64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{materialize_legacy_assets, vanilla_download_options};
+    use crate::downloader::DownloadEngineOptions;
+
+    #[test]
+    fn vanilla阶段限制不会覆盖全局连接上限() {
+        let options = vanilla_download_options(1, 32);
+        assert_eq!(
+            options.max_global_connections,
+            DownloadEngineOptions::default().max_global_connections
+        );
+        assert_eq!(options.max_connections_per_file, 1);
+        assert_eq!(options.max_active_files, 32);
+    }
+
+    #[test]
+    fn 旧版资源同时映射到_virtual_和实例_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "oaoi-legacy-assets-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let game_dir = root.join(".minecraft");
+        let inst_dir = game_dir.join("versions").join("legacy-test");
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        let object = game_dir
+            .join("assets")
+            .join("objects")
+            .join("01")
+            .join(hash);
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, b"legacy asset").unwrap();
+        let index = serde_json::json!({
+            "virtual": true,
+            "map_to_resources": true,
+            "objects": {
+                "sound/test.ogg": { "hash": hash, "size": 12 }
+            }
+        });
+
+        materialize_legacy_assets(&game_dir, &inst_dir, &index, "unused-test-task").unwrap();
+
+        assert_eq!(
+            std::fs::read(game_dir.join("assets/virtual/legacy/sound/test.ogg")).unwrap(),
+            b"legacy asset"
+        );
+        assert_eq!(
+            std::fs::read(inst_dir.join("resources/sound/test.ogg")).unwrap(),
+            b"legacy asset"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

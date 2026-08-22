@@ -1,6 +1,8 @@
 // ============ DIY 个性化页面逻辑 ============
 
 function initDiyPage() {
+  const MAX_CUSTOM_BG_BYTES = 2 * 1024 * 1024;
+  const CUSTOM_BG_VALUE = '__custom__';
   const defaults = {
     bgImage: 'assets/bg-1.webp',
     sakuraEnabled: true,
@@ -29,9 +31,16 @@ function initDiyPage() {
   function setSetting(key, val) {
     try {
       localStorage.setItem('diy_' + key, val);
+      return true;
     } catch (e) {
       console.warn('DIY 设置保存失败:', key, e);
+      return false;
     }
+  }
+
+  function showBackgroundError(message) {
+    if (typeof showToast === 'function') showToast(message, 'error', 5000);
+    else console.warn(message);
   }
 
   // 清理旧版残留字段，避免旧路径覆盖当前背景设置。
@@ -39,6 +48,10 @@ function initDiyPage() {
 
   function normalizeImageUrl(path) {
     const raw = String(path || '');
+    if (raw === CUSTOM_BG_VALUE) {
+      const custom = getSetting('customBgImage');
+      return isStoredCustomBg(custom) ? custom : defaults.bgImage;
+    }
     if (!raw || raw.startsWith('assets/') || raw.startsWith('data:image/')) return raw;
     return defaults.bgImage;
   }
@@ -66,9 +79,21 @@ function initDiyPage() {
   function clearBrokenCustomBg() {
     const saved = getSetting('customBgImage');
     if (saved && !isStoredCustomBg(saved)) localStorage.removeItem('diy_customBgImage');
-    if (currentBg && !isBuiltInBg(currentBg) && !isStoredCustomBg(currentBg)) {
+    // 旧版本把同一张 Base64 图片保存了两份，这里迁移为图片加轻量引用。
+    if (isStoredCustomBg(currentBg)) {
+      if (!isStoredCustomBg(saved)) setSetting('customBgImage', currentBg);
+      currentBg = CUSTOM_BG_VALUE;
+      setSetting('bgImage', CUSTOM_BG_VALUE);
+    }
+    if (currentBg === CUSTOM_BG_VALUE && !isStoredCustomBg(getSetting('customBgImage'))) {
       currentBg = defaults.bgImage;
       setSetting('bgImage', currentBg);
+    }
+    if (currentBg && !isBuiltInBg(currentBg) && !isStoredCustomBg(currentBg)) {
+      if (currentBg !== CUSTOM_BG_VALUE) {
+        currentBg = defaults.bgImage;
+        setSetting('bgImage', currentBg);
+      }
     }
   }
 
@@ -82,13 +107,17 @@ function initDiyPage() {
     else delete customBgBtn.dataset.bg;
   }
 
-  function selectBgItem(item, url) {
+  function selectBgItem(item, url, storedValue = url) {
     const resolved = normalizeImageUrl(url);
-    if (!item || !resolved) return;
+    if (!item || !resolved) return false;
+    if (!setSetting('bgImage', storedValue)) {
+      showBackgroundError('背景图片保存失败，请换一张更小的图片');
+      return false;
+    }
     bgItems.forEach(i => i.classList.remove('active'));
     item.classList.add('active');
-    setSetting('bgImage', resolved);
     applyBackground(resolved);
+    return true;
   }
 
   function chooseCustomBg() {
@@ -100,14 +129,34 @@ function initDiyPage() {
   customFileInput.addEventListener('change', () => {
     const file = customFileInput.files && customFileInput.files[0];
     if (!file || !file.type.startsWith('image/')) return;
+    if (file.size > MAX_CUSTOM_BG_BYTES) {
+      showBackgroundError('自定义背景不能超过 2 MB，请压缩图片后再选择');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const url = String(reader.result || '');
       if (!isStoredCustomBg(url)) return;
+      const previousCustomBg = localStorage.getItem('diy_customBgImage');
+      const previousBg = localStorage.getItem('diy_bgImage');
+      if (!setSetting('customBgImage', url)) {
+        showBackgroundError('背景图片保存失败，请换一张更小的图片');
+        return;
+      }
+      if (!selectBgItem(customBgBtn, url, CUSTOM_BG_VALUE)) {
+        try {
+          if (previousCustomBg === null) localStorage.removeItem('diy_customBgImage');
+          else localStorage.setItem('diy_customBgImage', previousCustomBg);
+          if (previousBg === null) localStorage.removeItem('diy_bgImage');
+          else localStorage.setItem('diy_bgImage', previousBg);
+        } catch (e) {
+          console.warn('恢复旧背景设置失败:', e);
+        }
+        return;
+      }
       setCustomBgPreview(url);
-      setSetting('customBgImage', url);
-      selectBgItem(customBgBtn, url);
     };
+    reader.onerror = () => showBackgroundError('读取背景图片失败');
     reader.readAsDataURL(file);
   });
 
@@ -128,7 +177,7 @@ function initDiyPage() {
         const customBg = isStoredCustomBg(getSetting('customBgImage')) ? getSetting('customBgImage') : '';
         if (customBg && !customBgBtn.classList.contains('active')) {
           setCustomBgPreview(customBg);
-          selectBgItem(customBgBtn, customBg);
+          selectBgItem(customBgBtn, customBg, CUSTOM_BG_VALUE);
           return;
         }
         chooseCustomBg();

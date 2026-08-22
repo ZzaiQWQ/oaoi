@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6,6 +7,11 @@ pub const OFFLINE_REGION_MESSAGE: &str = "当前地区暂不开放离线模式�
 const POLICY_CACHE_TTL: Duration = Duration::from_secs(15 * 24 * 60 * 60);
 const POLICY_CACHE_TTL_MS: u64 = 15 * 24 * 60 * 60 * 1000;
 static POLICY_CACHE: OnceLock<Mutex<Option<(Instant, OfflinePolicy)>>> = OnceLock::new();
+
+fn verified_online_accounts() -> &'static Mutex<HashSet<String>> {
+    static VERIFIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    VERIFIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct OfflinePolicy {
@@ -34,12 +40,92 @@ pub fn get_offline_policy() -> OfflinePolicy {
 pub fn ensure_launch_allowed(
     access_token: Option<&str>,
     uuid: Option<&str>,
-    has_online_account: bool,
+    online_account_access_token: Option<&str>,
+    online_account_uuid: Option<&str>,
 ) -> Result<(), String> {
-    if has_online_account || has_online_credentials(access_token, uuid) {
+    // 当前启动本身携带正版凭据时不属于离线模式。
+    if has_online_credentials(access_token, uuid) {
         return Ok(());
     }
+
+    // 离线启动只能使用后端已验证或现场验证成功的正版账号作为放行依据。
+    if let (Some(token), Some(uuid)) = (online_account_access_token, online_account_uuid) {
+        if is_online_account_verified(uuid, token) || verify_online_account(uuid, token).is_ok() {
+            return Ok(());
+        }
+    }
     ensure_offline_allowed()
+}
+
+pub fn mark_online_account_verified(uuid: &str, access_token: &str) {
+    let Some(key) = verified_account_key(uuid, access_token) else {
+        return;
+    };
+    if let Ok(mut verified) = verified_online_accounts().lock() {
+        verified.insert(key);
+    }
+}
+
+fn is_online_account_verified(uuid: &str, access_token: &str) -> bool {
+    let Some(key) = verified_account_key(uuid, access_token) else {
+        return false;
+    };
+    verified_online_accounts()
+        .lock()
+        .map(|verified| verified.contains(&key))
+        .unwrap_or(false)
+}
+
+fn verified_account_key(uuid: &str, access_token: &str) -> Option<String> {
+    let uuid = normalize_uuid(uuid);
+    let access_token = access_token.trim();
+    if uuid.len() != 32 || access_token.is_empty() || access_token == "0" {
+        return None;
+    }
+    let digest = sha1_smol::Sha1::from(access_token).digest().bytes();
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    Some(format!("{}:{}", uuid, fingerprint))
+}
+
+fn verify_online_account(uuid: &str, access_token: &str) -> Result<(), String> {
+    let expected_uuid = normalize_uuid(uuid);
+    if expected_uuid.len() != 32 || access_token.trim().is_empty() || access_token.trim() == "0" {
+        return Err("正版账号凭据不完整".to_string());
+    }
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .user_agent("OAOI-Launcher/1.0")
+        .build()
+        .map_err(|e| format!("创建正版账号验证客户端失败: {}", e))?;
+    let response = client
+        .get("https://api.minecraftservices.com/minecraft/profile")
+        .bearer_auth(access_token.trim())
+        .send()
+        .map_err(|e| format!("验证正版账号失败: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("验证正版账号失败: HTTP {}", response.status()));
+    }
+    let profile: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("解析正版账号信息失败: {}", e))?;
+    let actual_uuid = profile
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(normalize_uuid)
+        .ok_or_else(|| "正版账号信息缺少 UUID".to_string())?;
+    if actual_uuid != expected_uuid {
+        return Err("正版账号 UUID 与登录凭据不匹配".to_string());
+    }
+    mark_online_account_verified(&expected_uuid, access_token);
+    Ok(())
+}
+
+fn normalize_uuid(uuid: &str) -> String {
+    uuid.trim().replace('-', "").to_ascii_lowercase()
 }
 
 fn ensure_offline_allowed() -> Result<(), String> {

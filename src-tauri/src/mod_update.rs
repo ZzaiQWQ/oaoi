@@ -7,9 +7,10 @@ use crate::mod_download::OnlineModVersionInfo;
 use crate::modpack_sources::safe_index_name;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
@@ -17,18 +18,26 @@ use tauri::Emitter;
 const CACHE_DIR: &str = "launcher-data";
 const UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
 const UPDATE_ROLLBACK_SUBDIR: &str = "mod-update-rollback";
-const UPDATE_CACHE_VERSION: u32 = 7;
+const UPDATE_CACHE_VERSION: u32 = 9;
 // 更新检查缓存保留 8 小时，避免频繁重复查远端更新。
 const UPDATE_CACHE_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MOD_API_SHORT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOD_API_LONG_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_MOD_API_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const UPDATE_HASH_CONCURRENCY: usize = 64;
 const MOD_UPDATE_DOWNLOAD_WORKERS: usize = 64;
 const CURSEFORGE_MIRROR_HOST: &str = "mod.mcimirror.top";
 const CURSEFORGE_MIRROR_DNS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const OLD_MOD_SUFFIX: &str = ".oaoi-old";
+static MOD_UPDATE_STORE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static MOD_UPDATE_PLAN_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn mod_update_store_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +90,7 @@ pub struct ModUpdateCacheView {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ModUpdateCacheEvent {
+    game_dir: String,
     name: String,
     mc_version: String,
     loader: String,
@@ -197,6 +207,7 @@ pub struct ModBulkUpdateResult {
     pub view: ModUpdateCacheView,
     pub updated: usize,
     pub failed: Vec<String>,
+    pub warnings: Vec<String>,
     pub old_backups: Vec<OldModBackupInfo>,
     pub rollback_records: Vec<ModUpdateRollbackRecord>,
 }
@@ -221,6 +232,30 @@ pub struct ModUpdateRollbackRecord {
     pub updated_at_ms: u64,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModRollbackSuccess {
+    pub id: String,
+    pub display_name: String,
+    pub old_file_name: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModRollbackFailure {
+    pub id: String,
+    pub display_name: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModBulkRollbackResult {
+    pub remaining_records: Vec<ModUpdateRollbackRecord>,
+    pub succeeded: Vec<ModRollbackSuccess>,
+    pub failed: Vec<ModRollbackFailure>,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModUpdateRollbackStore {
@@ -229,6 +264,8 @@ struct ModUpdateRollbackStore {
     records: Vec<ModUpdateRollbackRecord>,
     #[serde(default)]
     update_plans: Vec<CachedUpdateDownloadPlan>,
+    #[serde(default)]
+    plan_generation: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -246,6 +283,8 @@ struct CachedUpdateDownloadPlan {
     source_project_id: String,
     source_version_id: String,
     source: String,
+    #[serde(default)]
+    published_at: String,
     checked_at_ms: u64,
 }
 
@@ -259,6 +298,7 @@ struct UpdateLookupPlan {
     source_project_id: String,
     source_version_id: String,
     source: String,
+    published_at: String,
 }
 
 #[derive(Clone)]
@@ -266,6 +306,7 @@ struct VersionDownloadInfo {
     info: OnlineModVersionInfo,
     downloads: Vec<String>,
     sha1: Option<String>,
+    published_at: String,
 }
 
 #[derive(Clone)]
@@ -318,10 +359,119 @@ struct PendingModUpdate {
     temp_path: PathBuf,
 }
 
+struct ModFileSwap {
+    destination: PathBuf,
+    backups: Vec<(PathBuf, PathBuf)>,
+    finished: bool,
+}
+
+struct StagedModUpdate {
+    swap: ModFileSwap,
+    rollback_record: Option<ModUpdateRollbackRecord>,
+    old_key: String,
+    new_key: String,
+    new_entry: CachedModFile,
+}
+
+impl StagedModUpdate {
+    fn commit(mut self, cache: &mut ModUpdateCache) {
+        cache.files.remove(&self.old_key);
+        cache.files.insert(self.new_key, self.new_entry);
+        self.swap.commit();
+    }
+}
+
+struct ModRollbackSwap {
+    backup_path: PathBuf,
+    restore_path: PathBuf,
+    displaced: Vec<(PathBuf, PathBuf)>,
+    finished: bool,
+}
+
+impl ModRollbackSwap {
+    fn commit(&mut self) {
+        self.finished = true;
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        let mut errors = Vec::new();
+        if self.restore_path.exists() {
+            if let Err(error) = std::fs::rename(&self.restore_path, &self.backup_path) {
+                errors.push(format!("撤销旧版恢复失败: {}", error));
+            }
+        } else {
+            errors.push("撤销旧版恢复失败: 已恢复的旧版文件不存在".to_string());
+        }
+        if errors.is_empty() {
+            if let Err(error) = restore_marked_old_mods(&self.displaced) {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for ModRollbackSwap {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            eprintln!("[mod-update] 自动撤销回档失败: {}", error);
+        }
+    }
+}
+
+impl ModFileSwap {
+    fn backups(&self) -> &[(PathBuf, PathBuf)] {
+        &self.backups
+    }
+
+    fn commit(&mut self) {
+        self.finished = true;
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        let mut errors = Vec::new();
+        if let Err(error) = std::fs::remove_file(&self.destination) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                errors.push(format!("移除新版 Mod 失败: {}", error));
+            }
+        }
+        if let Err(error) = restore_marked_old_mods(&self.backups) {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for ModFileSwap {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            eprintln!("[mod-update] 自动恢复旧版失败: {}", error);
+        }
+    }
+}
+
 #[derive(Default, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ModUpdateCache {
     version: u32,
+    #[serde(default)]
+    plan_generation: String,
     name: String,
     mc_version: String,
     loader: String,
@@ -408,9 +558,12 @@ pub async fn warm_mod_update_cache(
     let safe_name = safe_path_name(&name, "版本名")?;
     let task_key = update_task_key(&game_root, &safe_name, &mc_version, &loader);
     let view = read_mod_update_cache_view(&game_dir, &name, &mc_version, &loader)?;
-    if !view.stale || !begin_update_task(&task_key) {
+    let force_update = force_update.unwrap_or(false);
+    // 手动强制刷新必须绕过缓存新鲜度，但仍复用任务去重保护。
+    if (!view.stale && !force_update) || !begin_update_task(&task_key) {
         return Ok(());
     }
+    let event_game_dir = game_root.to_string_lossy().to_string();
 
     tokio::spawn(async move {
         let event_name = name.clone();
@@ -424,7 +577,7 @@ pub async fn warm_mod_update_cache(
                 &name,
                 &mc_version,
                 &loader,
-                force_update.unwrap_or(false),
+                force_update,
             )
         })
         .await
@@ -434,6 +587,7 @@ pub async fn warm_mod_update_cache(
         match result {
             Ok(view) => {
                 let event = ModUpdateCacheEvent {
+                    game_dir: event_game_dir,
                     name: event_name,
                     mc_version: event_mc_version,
                     loader: event_loader,
@@ -445,6 +599,7 @@ pub async fn warm_mod_update_cache(
             }
             Err(err) => {
                 let event = ModUpdateCacheEvent {
+                    game_dir: event_game_dir,
                     name: event_name,
                     mc_version: event_mc_version,
                     loader: event_loader,
@@ -518,7 +673,7 @@ pub async fn rollback_mod_updates(
     game_dir: String,
     name: String,
     record_ids: Vec<String>,
-) -> Result<Vec<ModUpdateRollbackRecord>, String> {
+) -> Result<ModBulkRollbackResult, String> {
     tokio::task::spawn_blocking(move || rollback_mod_updates_blocking(&game_dir, &name, record_ids))
         .await
         .map_err(|e| format!("任务失败: {}", e))?
@@ -534,15 +689,21 @@ fn refresh_mod_update_cache_blocking(
 ) -> Result<ModUpdateCacheView, String> {
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, name)?;
     let http = mod_api_http_client_builder()
         .build()
         .map_err(|e| e.to_string())?;
 
+    let initial_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let old_cache = load_update_cache(&game_root, &safe_name);
     let valid_old_cache = old_cache.as_ref().filter(|item| {
         item.version == UPDATE_CACHE_VERSION && cache_runtime_matches(item, mc_version, loader)
     });
     let mut files = scan_local_mod_files(&game_root, &safe_name, valid_old_cache)?;
+    let initial_snapshot = local_mod_snapshot(&files);
+    drop(initial_guard);
     let has_cache = valid_old_cache.is_some();
     let local_changed = valid_old_cache
         .map(|item| local_cache_changed(item, &files))
@@ -590,9 +751,21 @@ fn refresh_mod_update_cache_blocking(
         inherit_cached_updates(valid_old_cache, &files)
     };
     sort_update_entries(&mut updates);
-    if should_check_updates {
-        save_cached_update_plans(&game_root, &safe_name, update_plans)?;
+    let _final_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
+    let current_cache = load_update_cache(&game_root, &safe_name);
+    let current_files = scan_local_mod_files(&game_root, &safe_name, current_cache.as_ref())?;
+    if local_mod_snapshot(&current_files) != initial_snapshot {
+        return Err("检测期间 Mod 文件发生变化，本次结果已丢弃，请重新检测".to_string());
     }
+    let plan_generation = if should_check_updates {
+        let generation = new_plan_generation();
+        save_cached_update_plans(&game_root, &safe_name, update_plans, &generation)?;
+        Some(generation)
+    } else {
+        valid_old_cache.map(|cache| cache.plan_generation.clone())
+    };
     mark_files_reconciled(&mut files);
     save_update_cache_view(
         &game_root,
@@ -603,6 +776,7 @@ fn refresh_mod_update_cache_blocking(
         &files,
         &updates,
         checked_at_override,
+        plan_generation.as_deref(),
         false,
         "Mod 更新缓存已刷新".to_string(),
     )
@@ -617,6 +791,7 @@ fn save_update_cache_view(
     files: &[LocalModFile],
     updates: &[ModUpdateInfo],
     checked_at_override: Option<u64>,
+    plan_generation: Option<&str>,
     refreshing: bool,
     message: String,
 ) -> Result<ModUpdateCacheView, String> {
@@ -624,6 +799,7 @@ fn save_update_cache_view(
     if let Some(checked_at) = checked_at_override {
         cache.checked_at = checked_at;
     }
+    cache.plan_generation = plan_generation.unwrap_or_default().to_string();
     let stale = cache_is_stale(&cache, mc_version, loader, files);
     save_update_cache(game_root, safe_name, &cache)?;
     Ok(cache_to_view_without_changed_filter(
@@ -698,6 +874,10 @@ fn update_mods_from_cache_blocking(
     loader: &str,
     selected_file_names: Vec<String>,
 ) -> Result<ModBulkUpdateResult, String> {
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let inst_dir = version_dir(&game_root, &safe_name);
@@ -727,7 +907,10 @@ fn update_mods_from_cache_blocking(
     if updates.is_empty() {
         return Err("选择的 Mod 已不在更新缓存里".to_string());
     }
-    let store = load_mod_update_rollback_store(&game_root, &safe_name);
+    let store = load_mod_update_rollback_store(&game_root, &safe_name)?;
+    if cache.plan_generation.is_empty() || store.plan_generation != cache.plan_generation {
+        return Err("Mod 更新列表和下载计划不一致，请重新检测更新".to_string());
+    }
     let plans_by_key: HashMap<String, CachedUpdateDownloadPlan> = store
         .update_plans
         .into_iter()
@@ -736,8 +919,10 @@ fn update_mods_from_cache_blocking(
 
     let mut updated_keys = HashSet::new();
     let mut failed = Vec::new();
+    let mut warnings = Vec::new();
     let temp_dir = ModUpdateTempDir::create(&mods_dir)?;
     let mut pending = Vec::new();
+    let mut pending_targets = HashMap::<String, String>::new();
 
     for update in updates {
         let key = mod_cache_key(&update.file_name);
@@ -755,13 +940,25 @@ fn update_mods_from_cache_blocking(
             &update,
             cached_plan_to_download_plan(cached_plan)?,
         ) {
-            Ok(item) => pending.push(item),
+            Ok(item) => {
+                let target_key = item.target_file_name.to_ascii_lowercase();
+                if let Some(existing) = pending_targets.get(&target_key) {
+                    failed.push(format!(
+                        "{}: 目标文件名 {} 与 {} 冲突",
+                        update.file_name, item.target_file_name, existing
+                    ));
+                } else {
+                    pending_targets.insert(target_key, update.file_name.clone());
+                    pending.push(item);
+                }
+            }
             Err(err) => failed.push(format!("{}: {}", update.file_name, err)),
         }
     }
 
-    if !pending.is_empty() {
-        let cancel_name = format!("mod-update-{}", safe_name);
+    if failed.is_empty() && !pending.is_empty() {
+        let cancel_name =
+            crate::instance::scoped_task_key(game_dir, &format!("mod-update-{}", safe_name));
         let _cancel_guard = ModUpdateCancelGuard::register(&cancel_name)?;
         let outcomes = download_pending_mod_updates(&cancel_name, &pending)?;
         let pending_by_id: HashMap<String, &PendingModUpdate> = pending
@@ -769,18 +966,15 @@ fn update_mods_from_cache_blocking(
             .map(|item| (item.request_id.clone(), item))
             .collect();
 
+        let mut downloaded = Vec::new();
         for outcome in outcomes {
             match outcome {
                 DownloadOutcome::Finished(result) => {
                     let Some(item) = pending_by_id.get(&result.request_id) else {
+                        failed.push(format!("未知下载任务已完成: {}", result.request_id));
                         continue;
                     };
-                    match install_single_mod_update(&game_root, &safe_name, &mut cache, item) {
-                        Ok(()) => {
-                            updated_keys.insert(mod_cache_key(&item.update.file_name));
-                        }
-                        Err(err) => failed.push(format!("{}: {}", item.update.file_name, err)),
-                    }
+                    downloaded.push(*item);
                 }
                 DownloadOutcome::Failed {
                     request_id, error, ..
@@ -793,15 +987,58 @@ fn update_mods_from_cache_blocking(
                 }
             }
         }
+
+        if failed.is_empty() && downloaded.len() != pending.len() {
+            failed.push("部分 Mod 下载任务没有返回结果".to_string());
+        }
+
+        if failed.is_empty() {
+            let mut staged_updates = Vec::with_capacity(downloaded.len());
+            for item in downloaded {
+                match stage_single_mod_update(&cache, item) {
+                    Ok(staged) => staged_updates.push(staged),
+                    Err(error) => {
+                        failed.push(format!("{}: {}", item.update.file_name, error));
+                        break;
+                    }
+                }
+            }
+
+            if failed.is_empty() {
+                let records = staged_updates
+                    .iter()
+                    .filter_map(|staged| staged.rollback_record.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) =
+                    save_mod_update_rollback_records(&game_root, &safe_name, records)
+                {
+                    failed.push(format!("保存批量更新回档记录失败: {}", error));
+                } else {
+                    for staged in staged_updates {
+                        updated_keys.insert(staged.old_key.clone());
+                        staged.commit(&mut cache);
+                    }
+                }
+            }
+        }
     }
 
     cache
         .updates
         .retain(|update| !updated_keys.contains(&mod_cache_key(&update.file_name)));
     if !updated_keys.is_empty() {
-        remove_cached_update_plans(&game_root, &safe_name, &updated_keys)?;
+        if let Err(error) = remove_cached_update_plans(&game_root, &safe_name, &updated_keys) {
+            // 文件已经提交成功，缓存清理失败只能作为警告，不能把成功更新回报成失败。
+            warnings.push(format!("Mod 已更新，但清理更新缓存失败: {}", error));
+        }
     }
-    let files = scan_local_mod_files(&game_root, &safe_name, Some(&cache))?;
+    let files = match scan_local_mod_files(&game_root, &safe_name, Some(&cache)) {
+        Ok(files) => files,
+        Err(error) => {
+            warnings.push(format!("Mod 已更新，但刷新本地文件列表失败: {}", error));
+            Vec::new()
+        }
+    };
     let remaining_updates = cache.updates.clone();
     let mut next_cache = build_update_cache(name, mc_version, loader, &files, remaining_updates);
     // 更新安装不落盘重写检测缓存，下一次打开实例时让增删改检查重新接管。
@@ -817,12 +1054,28 @@ fn update_mods_from_cache_blocking(
         "Mod 已更新".to_string(),
     );
 
+    let old_backups = match list_old_mod_backups_blocking(game_dir, name) {
+        Ok(backups) => backups,
+        Err(error) => {
+            warnings.push(format!("Mod 已更新，但读取旧版备份失败: {}", error));
+            Vec::new()
+        }
+    };
+    let rollback_records = match list_mod_update_rollbacks_blocking(game_dir, name) {
+        Ok(records) => records,
+        Err(error) => {
+            warnings.push(format!("Mod 已更新，但读取回档记录失败: {}", error));
+            Vec::new()
+        }
+    };
+
     Ok(ModBulkUpdateResult {
         view,
         updated: updated_keys.len(),
         failed,
-        old_backups: list_old_mod_backups_blocking(game_dir, name)?,
-        rollback_records: list_mod_update_rollbacks_blocking(game_dir, name)?,
+        warnings,
+        old_backups,
+        rollback_records,
     })
 }
 
@@ -838,6 +1091,9 @@ fn prepare_single_mod_update(
     let old_file_name = safe_path_name(&update.file_name, "文件名")?;
     let old_path = mods_dir.join(&old_file_name);
     let target_path = mods_dir.join(&safe_target);
+    if target_path.exists() && !same_mod_path(&target_path, &old_path) {
+        return Err(format!("目标文件已存在，拒绝覆盖其他 Mod: {}", safe_target));
+    }
     let temp_path = temp_dir.join(format!("{}.download", safe_target));
     Ok(PendingModUpdate {
         request_id: format!("mod-update-file-{}", index),
@@ -848,6 +1104,18 @@ fn prepare_single_mod_update(
         target_path,
         temp_path,
     })
+}
+
+fn same_mod_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 fn mod_update_download_options() -> DownloadEngineOptions {
@@ -868,8 +1136,10 @@ fn build_mod_update_download_request(item: &PendingModUpdate) -> DownloadRequest
         .into_iter()
         .map(DownloadCandidate::new)
         .collect::<Vec<_>>();
-    let mut request =
-        DownloadRequest::new(item.request_id.clone(), candidates, &item.temp_path).without_resume();
+    let mut request = DownloadRequest::new(item.request_id.clone(), candidates, &item.temp_path);
+    if item.update.file_size > 0 {
+        request = request.with_expected_size(item.update.file_size);
+    }
     if let Some(sha1) = item
         .plan
         .sha1
@@ -903,12 +1173,10 @@ fn download_pending_mod_updates(
     }))
 }
 
-fn install_single_mod_update(
-    game_root: &Path,
-    safe_name: &str,
-    cache: &mut ModUpdateCache,
+fn stage_single_mod_update(
+    cache: &ModUpdateCache,
     item: &PendingModUpdate,
-) -> Result<(), String> {
+) -> Result<StagedModUpdate, String> {
     let (sha1, sha512, fingerprint, size) =
         crate::modpack_export::hash_update_candidate(&item.temp_path)?;
     if item
@@ -923,21 +1191,25 @@ fn install_single_mod_update(
             sha1
         ));
     }
-    let backups =
+    let metadata = std::fs::metadata(&item.temp_path).map_err(|e| e.to_string())?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .map(system_time_ms)
+        .unwrap_or_default();
+    let swap =
         replace_downloaded_file(&item.temp_path, &item.target_path, &[item.old_path.clone()])?;
-    if let Some((old_backup, _)) = backups
+    let rollback_record = swap
+        .backups()
         .iter()
         .find(|(_, original)| *original == item.old_path)
         .or_else(|| {
-            backups
+            swap.backups()
                 .iter()
                 .find(|(_, original)| *original == item.target_path)
         })
-    {
-        let updated_at_ms = now_ms();
-        save_mod_update_rollback_record(
-            game_root,
-            safe_name,
+        .map(|(old_backup, _)| {
+            let updated_at_ms = now_ms();
             ModUpdateRollbackRecord {
                 id: mod_update_rollback_id(
                     &item.update.file_name,
@@ -953,18 +1225,11 @@ fn install_single_mod_update(
                 new_file_name: item.target_file_name.clone(),
                 new_sha1: sha1.clone(),
                 updated_at_ms,
-            },
-        )?;
-    }
+            }
+        });
 
-    let metadata = std::fs::metadata(&item.target_path).map_err(|e| e.to_string())?;
-    let modified_ms = metadata
-        .modified()
-        .ok()
-        .map(system_time_ms)
-        .unwrap_or_default();
     let old_key = mod_cache_key(&item.update.file_name);
-    let old_entry = cache.files.remove(&old_key);
+    let old_entry = cache.files.get(&old_key);
     let new_entry = updated_cache_file(
         &item.update,
         &item.plan,
@@ -974,17 +1239,20 @@ fn install_single_mod_update(
         sha1,
         sha512,
         fingerprint,
-        old_entry.as_ref(),
+        old_entry,
     );
-    cache
-        .files
-        .insert(mod_cache_key(&item.target_file_name), new_entry.clone());
-
-    Ok(())
+    Ok(StagedModUpdate {
+        swap,
+        rollback_record,
+        old_key,
+        new_key: mod_cache_key(&item.target_file_name),
+        new_entry,
+    })
 }
 
 fn target_update_file_name(update: &ModUpdateInfo, latest_file_name: &str) -> String {
-    let base = latest_file_name.trim().trim_end_matches(".disabled");
+    let trimmed = latest_file_name.trim();
+    let base = strip_disabled_suffix_case_insensitive(trimmed).unwrap_or(trimmed);
     if update.enabled {
         base.to_string()
     } else {
@@ -996,28 +1264,30 @@ fn replace_downloaded_file(
     tmp: &Path,
     dest: &Path,
     old_paths: &[PathBuf],
-) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+) -> Result<ModFileSwap, String> {
     let mut backups = Vec::new();
     if dest.exists() {
         if let Err(err) = mark_old_mod_for_install(dest, &mut backups) {
-            restore_marked_old_mods(backups);
-            return Err(err);
+            return Err(restore_after_swap_failure(err, &backups));
         }
     }
     for old_path in old_paths {
         if old_path != dest && old_path.exists() {
             if let Err(err) = mark_old_mod_for_install(old_path, &mut backups) {
-                restore_marked_old_mods(backups);
-                return Err(err);
+                return Err(restore_after_swap_failure(err, &backups));
             }
         }
     }
     match std::fs::rename(tmp, dest) {
-        Ok(()) => Ok(backups),
-        Err(err) => {
-            restore_marked_old_mods(backups);
-            Err(format!("替换文件失败: {}", err))
-        }
+        Ok(()) => Ok(ModFileSwap {
+            destination: dest.to_path_buf(),
+            backups,
+            finished: false,
+        }),
+        Err(err) => Err(restore_after_swap_failure(
+            format!("替换文件失败: {}", err),
+            &backups,
+        )),
     }
 }
 
@@ -1031,11 +1301,28 @@ fn mark_old_mod_for_install(
     Ok(())
 }
 
-fn restore_marked_old_mods(backups: Vec<(PathBuf, PathBuf)>) {
-    for (backup, original) in backups.into_iter().rev() {
-        if !original.exists() {
-            let _ = std::fs::rename(backup, original);
+fn restore_after_swap_failure(error: String, backups: &[(PathBuf, PathBuf)]) -> String {
+    match restore_marked_old_mods(backups) {
+        Ok(()) => error,
+        Err(restore_error) => format!("{}; {}", error, restore_error),
+    }
+}
+
+fn restore_marked_old_mods(backups: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (backup, original) in backups.iter().rev() {
+        if original.exists() {
+            errors.push(format!("恢复目标已存在: {}", original.display()));
+            continue;
         }
+        if let Err(error) = std::fs::rename(backup, original) {
+            errors.push(format!("恢复 {} 失败: {}", original.display(), error));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -1118,6 +1405,10 @@ fn delete_old_mod_backups_blocking(
     name: &str,
     file_names: Vec<String>,
 ) -> Result<Vec<OldModBackupInfo>, String> {
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let mods_dir = version_dir(&game_root, &safe_name).join("mods");
@@ -1135,30 +1426,166 @@ fn delete_old_mod_backups_blocking(
     };
 
     let mut deleted_names = HashSet::new();
+    let mut staged_files = Vec::new();
     for file_name in targets {
-        let safe_file_name = safe_path_name(&file_name, "文件名")?;
+        let safe_file_name = match safe_path_name(&file_name, "文件名") {
+            Ok(file_name) => file_name,
+            Err(error) => {
+                let restore_error = restore_staged_deletions(&staged_files).err();
+                return Err(match restore_error {
+                    Some(restore_error) => format!(
+                        "{}; 撤销已暂存文件失败，当前状态需要重新刷新: {}",
+                        error, restore_error
+                    ),
+                    None => error,
+                });
+            }
+        };
         if !is_old_mod_backup_name(&safe_file_name) {
-            return Err(format!("拒绝删除非旧版 Mod 文件: {}", safe_file_name));
+            let restore_error = restore_staged_deletions(&staged_files).err();
+            return Err(match restore_error {
+                Some(restore_error) => format!(
+                    "拒绝删除非旧版 Mod 文件: {}; 撤销已暂存文件失败，当前状态需要重新刷新: {}",
+                    safe_file_name, restore_error
+                ),
+                None => format!("拒绝删除非旧版 Mod 文件: {}", safe_file_name),
+            });
         }
         let path = mods_dir.join(&safe_file_name);
         if path.is_file() {
-            std::fs::remove_file(&path).map_err(|e| format!("删除旧版 Mod 失败: {}", e))?;
+            let staged_path = mods_dir.join(format!(
+                ".oaoi-delete-{}-{}",
+                std::process::id(),
+                MOD_UPDATE_STORE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            if let Err(error) = std::fs::rename(&path, &staged_path) {
+                let restore_error = restore_staged_deletions(&staged_files).err();
+                return Err(match restore_error {
+                    Some(restore_error) => format!(
+                        "暂存旧版 Mod 失败: {}; 撤销已暂存文件失败: {}",
+                        error, restore_error
+                    ),
+                    None => format!("暂存旧版 Mod 失败: {}", error),
+                });
+            }
+            staged_files.push((staged_path, path));
         }
         deleted_names.insert(safe_file_name);
     }
 
-    if !deleted_names.is_empty() {
-        let mut store = load_mod_update_rollback_store(&game_root, &safe_name);
-        // 删除旧版文件后同步剔除回档记录，避免前端显示已不存在的备份。
-        store.records.retain(|record| {
-            !deleted_names.contains(&record.old_backup_file_name)
-                && is_old_mod_backup_name(&record.old_backup_file_name)
-                && mods_dir.join(&record.old_backup_file_name).is_file()
+    let removed_records = if deleted_names.is_empty() {
+        Vec::new()
+    } else {
+        match with_mod_update_rollback_store(&game_root, &safe_name, |store| {
+            let mut removed = Vec::new();
+            // 删除旧版文件后同步剔除回档记录，避免前端显示已不存在的备份。
+            store.records.retain(|record| {
+                let should_remove = deleted_names.contains(&record.old_backup_file_name);
+                if should_remove {
+                    removed.push(record.clone());
+                }
+                !should_remove
+                    && is_old_mod_backup_name(&record.old_backup_file_name)
+                    && mods_dir.join(&record.old_backup_file_name).is_file()
+            });
+            Ok(removed)
+        }) {
+            Ok(records) => records,
+            Err(error) => {
+                let restore_error = restore_staged_deletions(&staged_files).err();
+                return Err(match restore_error {
+                    Some(restore_error) => format!(
+                        "保存回档记录失败: {}; 文件撤销也失败，当前状态需要重新刷新: {}",
+                        error, restore_error
+                    ),
+                    None => format!("保存回档记录失败，已撤销文件删除: {}", error),
+                });
+            }
+        }
+    };
+
+    if let Err(delete_error) = finalize_staged_deletions(&staged_files) {
+        let restored_records = removed_records
+            .into_iter()
+            .filter(|record| mods_dir.join(&record.old_backup_file_name).is_file())
+            .collect::<Vec<_>>();
+        let record_error = if restored_records.is_empty() {
+            None
+        } else {
+            with_mod_update_rollback_store(&game_root, &safe_name, |store| {
+                for record in restored_records {
+                    store.records.retain(|item| item.id != record.id);
+                    store.records.push(record);
+                }
+                store
+                    .records
+                    .sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+                Ok(())
+            })
+            .err()
+        };
+        return Err(match record_error {
+            Some(record_error) => format!(
+                "{}; 恢复回档记录失败，当前状态需要重新刷新: {}",
+                delete_error, record_error
+            ),
+            None => delete_error,
         });
-        save_mod_update_rollback_store(&game_root, &safe_name, &store)?;
     }
 
     list_old_mod_backups_blocking(game_dir, name)
+}
+
+fn finalize_staged_deletions(staged_files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    finalize_staged_deletions_with(staged_files, |path| std::fs::remove_file(path))
+}
+
+fn finalize_staged_deletions_with(
+    staged_files: &[(PathBuf, PathBuf)],
+    remove: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let mut failed = Vec::new();
+    let mut errors = Vec::new();
+    for (staged_path, original_path) in staged_files {
+        if let Err(error) = remove(staged_path) {
+            errors.push(format!("{}: {}", original_path.display(), error));
+            failed.push((staged_path.clone(), original_path.clone()));
+        }
+    }
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    let restore_error = restore_staged_deletions(&failed).err();
+    Err(match restore_error {
+        Some(restore_error) => format!(
+            "永久删除旧版 Mod 失败: {}; 恢复暂存文件也失败: {}",
+            errors.join("; "),
+            restore_error
+        ),
+        None => format!(
+            "永久删除旧版 Mod 失败，未删除的文件已恢复: {}",
+            errors.join("; ")
+        ),
+    })
+}
+
+fn restore_staged_deletions(staged_files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (staged_path, original_path) in staged_files.iter().rev() {
+        if original_path.exists() {
+            errors.push(format!("恢复目标已存在: {}", original_path.display()));
+            continue;
+        }
+        if let Err(error) = std::fs::rename(staged_path, original_path) {
+            errors.push(format!("恢复 {} 失败: {}", original_path.display(), error));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn list_mod_update_rollbacks_blocking(
@@ -1168,57 +1595,110 @@ fn list_mod_update_rollbacks_blocking(
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let mods_dir = version_dir(&game_root, &safe_name).join("mods");
-    let mut store = load_mod_update_rollback_store(&game_root, &safe_name);
-    store.records.retain(|record| {
-        is_old_mod_backup_name(&record.old_backup_file_name)
-            && mods_dir.join(&record.old_backup_file_name).is_file()
-    });
-    save_mod_update_rollback_store(&game_root, &safe_name, &store)?;
-    Ok(store.records)
+    with_mod_update_rollback_store(&game_root, &safe_name, |store| {
+        store.records.retain(|record| {
+            is_old_mod_backup_name(&record.old_backup_file_name)
+                && mods_dir.join(&record.old_backup_file_name).is_file()
+        });
+        Ok(store.records.clone())
+    })
 }
 
 fn rollback_mod_updates_blocking(
     game_dir: &str,
     name: &str,
     record_ids: Vec<String>,
-) -> Result<Vec<ModUpdateRollbackRecord>, String> {
+) -> Result<ModBulkRollbackResult, String> {
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let mods_dir = version_dir(&game_root, &safe_name).join("mods");
     std::fs::create_dir_all(&mods_dir).map_err(|e| e.to_string())?;
 
     let selected: HashSet<String> = record_ids.into_iter().collect();
-    let mut store = load_mod_update_rollback_store(&game_root, &safe_name);
+    let store_guard = mod_update_store_lock()
+        .lock()
+        .map_err(|_| "Mod 更新回档存储锁已损坏".to_string())?;
+    let mut store = load_mod_update_rollback_store_unlocked(&game_root, &safe_name)?;
     let mut kept = Vec::new();
-    let mut errors = Vec::new();
-
-    for record in store.records.into_iter() {
+    let mut failed = Vec::new();
+    let mut seen_selected = HashSet::new();
+    let mut completed = Vec::new();
+    for record in std::mem::take(&mut store.records) {
         let should_restore = selected.is_empty() || selected.contains(&record.id);
         if !should_restore {
             kept.push(record);
             continue;
         }
+        seen_selected.insert(record.id.clone());
         match rollback_single_mod_update(&mods_dir, &record) {
-            Ok(()) => {}
+            Ok(swap) => completed.push((
+                swap,
+                ModRollbackSuccess {
+                    id: record.id.clone(),
+                    display_name: record.display_name.clone(),
+                    old_file_name: record.old_file_name.clone(),
+                },
+            )),
             Err(err) => {
-                errors.push(format!("{}: {}", record.display_name, err));
+                failed.push(ModRollbackFailure {
+                    id: record.id.clone(),
+                    display_name: record.display_name.clone(),
+                    error: err,
+                });
                 kept.push(record);
             }
         }
     }
-
-    store.records = kept;
-    save_mod_update_rollback_store(&game_root, &safe_name, &store)?;
-    if !errors.is_empty() {
-        return Err(errors.join("\n"));
+    for missing_id in selected.difference(&seen_selected) {
+        failed.push(ModRollbackFailure {
+            id: missing_id.clone(),
+            display_name: missing_id.clone(),
+            error: "回档记录不存在".to_string(),
+        });
     }
-    list_mod_update_rollbacks_blocking(game_dir, name)
+    kept.retain(|record| {
+        is_old_mod_backup_name(&record.old_backup_file_name)
+            && mods_dir.join(&record.old_backup_file_name).is_file()
+    });
+    store.records = kept;
+    if let Err(error) = save_mod_update_rollback_store_unlocked(&game_root, &safe_name, &store) {
+        let mut rollback_errors = Vec::new();
+        for (swap, _) in completed.iter_mut().rev() {
+            if let Err(rollback_error) = swap.rollback() {
+                rollback_errors.push(rollback_error);
+            }
+        }
+        return Err(if rollback_errors.is_empty() {
+            format!("保存回档记录失败，已撤销文件回档: {}", error)
+        } else {
+            format!(
+                "保存回档记录失败: {}; 文件撤销也失败，当前状态需要重新刷新: {}",
+                error,
+                rollback_errors.join("; ")
+            )
+        });
+    }
+    for (swap, _) in &mut completed {
+        swap.commit();
+    }
+    let succeeded = completed.into_iter().map(|(_, success)| success).collect();
+    let remaining_records = store.records;
+    drop(store_guard);
+    Ok(ModBulkRollbackResult {
+        remaining_records,
+        succeeded,
+        failed,
+    })
 }
 
 fn rollback_single_mod_update(
     mods_dir: &Path,
     record: &ModUpdateRollbackRecord,
-) -> Result<(), String> {
+) -> Result<ModRollbackSwap, String> {
     let old_file_name = safe_path_name(&record.old_file_name, "文件名")?;
     let old_backup_file_name = safe_path_name(&record.old_backup_file_name, "文件名")?;
     let new_file_name = safe_path_name(&record.new_file_name, "文件名")?;
@@ -1233,6 +1713,7 @@ fn rollback_single_mod_update(
         return Err("旧版备份不存在".to_string());
     }
 
+    let mut displaced = Vec::new();
     if new_path.is_file() {
         if !record.new_sha1.is_empty() {
             let (actual_sha1, _, _, _) = crate::modpack_export::hash_update_candidate(&new_path)?;
@@ -1240,42 +1721,73 @@ fn rollback_single_mod_update(
                 return Err("新版文件已被修改，已拒绝自动回档".to_string());
             }
         }
-        mark_old_mod_file(&new_path)?;
+        mark_old_mod_for_install(&new_path, &mut displaced)?;
     }
-    if old_restore_path.exists() {
-        mark_old_mod_file(&old_restore_path)?;
+    if old_restore_path != new_path && old_restore_path.exists() {
+        if let Err(error) = mark_old_mod_for_install(&old_restore_path, &mut displaced) {
+            return Err(restore_after_swap_failure(error, &displaced));
+        }
     }
-    std::fs::rename(&old_backup_path, &old_restore_path)
-        .map_err(|e| format!("恢复旧版 Mod 失败: {}", e))
+    if let Err(error) = std::fs::rename(&old_backup_path, &old_restore_path) {
+        return Err(restore_after_swap_failure(
+            format!("恢复旧版 Mod 失败: {}", error),
+            &displaced,
+        ));
+    }
+    Ok(ModRollbackSwap {
+        backup_path: old_backup_path,
+        restore_path: old_restore_path,
+        displaced,
+        finished: false,
+    })
 }
 
+#[cfg(test)]
 fn save_mod_update_rollback_record(
     game_root: &Path,
     safe_name: &str,
     record: ModUpdateRollbackRecord,
 ) -> Result<(), String> {
-    if record.old_backup_file_name.is_empty() {
+    save_mod_update_rollback_records(game_root, safe_name, vec![record])
+}
+
+fn save_mod_update_rollback_records(
+    game_root: &Path,
+    safe_name: &str,
+    records: Vec<ModUpdateRollbackRecord>,
+) -> Result<(), String> {
+    let records = records
+        .into_iter()
+        .filter(|record| !record.old_backup_file_name.is_empty())
+        .collect::<Vec<_>>();
+    if records.is_empty() {
         return Ok(());
     }
-    let mut store = load_mod_update_rollback_store(game_root, safe_name);
-    store
-        .records
-        .retain(|item| item.old_backup_file_name != record.old_backup_file_name);
-    store.records.push(record);
-    store
-        .records
-        .sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
-    save_mod_update_rollback_store(game_root, safe_name, &store)
+    with_mod_update_rollback_store(game_root, safe_name, |store| {
+        for record in records {
+            store
+                .records
+                .retain(|item| item.old_backup_file_name != record.old_backup_file_name);
+            store.records.push(record);
+        }
+        store
+            .records
+            .sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        Ok(())
+    })
 }
 
 fn save_cached_update_plans(
     game_root: &Path,
     safe_name: &str,
     plans: Vec<CachedUpdateDownloadPlan>,
+    generation: &str,
 ) -> Result<(), String> {
-    let mut store = load_mod_update_rollback_store(game_root, safe_name);
-    store.update_plans = plans;
-    save_mod_update_rollback_store(game_root, safe_name, &store)
+    with_mod_update_rollback_store(game_root, safe_name, |store| {
+        store.update_plans = plans;
+        store.plan_generation = generation.to_string();
+        Ok(())
+    })
 }
 
 fn remove_cached_update_plans(
@@ -1283,11 +1795,12 @@ fn remove_cached_update_plans(
     safe_name: &str,
     removed_keys: &HashSet<String>,
 ) -> Result<(), String> {
-    let mut store = load_mod_update_rollback_store(game_root, safe_name);
-    store
-        .update_plans
-        .retain(|plan| !removed_keys.contains(&plan.key));
-    save_mod_update_rollback_store(game_root, safe_name, &store)
+    with_mod_update_rollback_store(game_root, safe_name, |store| {
+        store
+            .update_plans
+            .retain(|plan| !removed_keys.contains(&plan.key));
+        Ok(())
+    })
 }
 
 fn cached_plan_to_download_plan(
@@ -1318,23 +1831,68 @@ fn cached_plan_to_download_plan(
     })
 }
 
-fn load_mod_update_rollback_store(game_root: &Path, safe_name: &str) -> ModUpdateRollbackStore {
-    let Some(data) = std::fs::read_to_string(mod_update_rollback_path(game_root, safe_name)).ok()
-    else {
-        return ModUpdateRollbackStore {
-            version: UPDATE_CACHE_VERSION,
-            records: Vec::new(),
-            update_plans: Vec::new(),
-        };
+fn load_mod_update_rollback_store(
+    game_root: &Path,
+    safe_name: &str,
+) -> Result<ModUpdateRollbackStore, String> {
+    let _guard = mod_update_store_lock()
+        .lock()
+        .map_err(|_| "Mod 更新回档存储锁已损坏".to_string())?;
+    load_mod_update_rollback_store_unlocked(game_root, safe_name)
+}
+
+fn load_mod_update_rollback_store_unlocked(
+    game_root: &Path,
+    safe_name: &str,
+) -> Result<ModUpdateRollbackStore, String> {
+    let path = mod_update_rollback_path(game_root, safe_name);
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(empty_mod_update_rollback_store());
+        }
+        Err(error) => return Err(format!("读取 Mod 更新回档失败: {}", error)),
     };
-    serde_json::from_str(&data).unwrap_or_else(|_| ModUpdateRollbackStore {
+    // JSON 损坏时绝不能按空数据继续保存，否则会把仍可手动恢复的记录覆盖掉。
+    let mut store: ModUpdateRollbackStore = serde_json::from_str(&data).map_err(|error| {
+        format!(
+            "Mod 更新回档数据损坏，原文件已保留，可修复或备份后重试: {}",
+            error
+        )
+    })?;
+    if store.version != UPDATE_CACHE_VERSION {
+        // 升级时只丢弃无法关联的下载计划，已有回档记录必须保留。
+        store.version = UPDATE_CACHE_VERSION;
+        store.update_plans.clear();
+        store.plan_generation.clear();
+    }
+    Ok(store)
+}
+
+fn empty_mod_update_rollback_store() -> ModUpdateRollbackStore {
+    ModUpdateRollbackStore {
         version: UPDATE_CACHE_VERSION,
         records: Vec::new(),
         update_plans: Vec::new(),
-    })
+        plan_generation: String::new(),
+    }
 }
 
-fn save_mod_update_rollback_store(
+fn with_mod_update_rollback_store<T>(
+    game_root: &Path,
+    safe_name: &str,
+    mutate: impl FnOnce(&mut ModUpdateRollbackStore) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = mod_update_store_lock()
+        .lock()
+        .map_err(|_| "Mod 更新回档存储锁已损坏".to_string())?;
+    let mut store = load_mod_update_rollback_store_unlocked(game_root, safe_name)?;
+    let result = mutate(&mut store)?;
+    save_mod_update_rollback_store_unlocked(game_root, safe_name, &store)?;
+    Ok(result)
+}
+
+fn save_mod_update_rollback_store_unlocked(
     game_root: &Path,
     safe_name: &str,
     store: &ModUpdateRollbackStore,
@@ -1344,7 +1902,83 @@ fn save_mod_update_rollback_store(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let data = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    std::fs::write(path, data).map_err(|e| e.to_string())
+    write_atomic_store_file(&path, data.as_bytes())
+}
+
+fn write_atomic_store_file(path: &Path, data: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "数据存储路径无效".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "数据存储文件名无效".to_string())?;
+    let counter = MOD_UPDATE_STORE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|e| format!("创建数据临时文件失败: {}", e))?;
+        file.write_all(data)
+            .map_err(|e| format!("写入数据临时文件失败: {}", e))?;
+        file.sync_all()
+            .map_err(|e| format!("同步数据临时文件失败: {}", e))?;
+        atomic_replace_store_file(&temp_path, path)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+#[cfg(windows)]
+fn atomic_replace_store_file(temp_path: &Path, target_path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, target: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let existing = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        MoveFileExW(
+            existing.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(format!(
+            "原子替换数据文件失败: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_store_file(temp_path: &Path, target_path: &Path) -> Result<(), String> {
+    std::fs::rename(temp_path, target_path).map_err(|e| format!("原子替换数据文件失败: {}", e))
 }
 
 fn mod_update_rollback_path(game_root: &Path, safe_name: &str) -> PathBuf {
@@ -1417,6 +2051,10 @@ fn read_mod_update_cache_view(
     mc_version: &str,
     loader: &str,
 ) -> Result<ModUpdateCacheView, String> {
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let safe_name = safe_path_name(name, "版本名")?;
     let cache = load_update_cache(&game_root, &safe_name);
@@ -1442,7 +2080,7 @@ fn read_mod_update_cache_view(
     ))
 }
 
-// 扫描只比较 size/mtime；变化的 jar 不复用旧来源，避免同名替换串到旧 ID。
+// 元数据相同也要核对内容哈希，防止同大小、同时间戳的替换文件复用旧项目 ID。
 fn scan_local_mod_files(
     game_root: &Path,
     safe_name: &str,
@@ -1479,8 +2117,19 @@ fn scan_local_mod_files(
         let rel = format!("mods/{}", file_name);
         let enabled = !file_name.to_ascii_lowercase().ends_with(".disabled");
         let cached_any = cached_file_for(cache, &file_name);
+        let metadata_matches = cached_any
+            .map(|item| item.size == size && item.modified_ms == modified_ms)
+            .unwrap_or(false);
+        let actual_sha1 = if metadata_matches {
+            Some(crate::downloader::fs::hash_file_sha1(&path)?)
+        } else {
+            None
+        };
         let changed = cached_any
-            .map(|item| item.size != size || item.modified_ms != modified_ms)
+            .zip(actual_sha1.as_deref())
+            .map(|(cached, actual_sha1)| {
+                !cached_file_identity_matches(cached, size, modified_ms, actual_sha1)
+            })
             .unwrap_or(true);
         let cached = cached_any.filter(|_| !changed);
         let mut sources = DetectedSources::default();
@@ -1493,11 +2142,7 @@ fn scan_local_mod_files(
         let curseforge_checked = !changed
             && (sources.curseforge.is_some()
                 || cached.map(|item| item.curseforge_checked).unwrap_or(false));
-        let sha1 = if changed {
-            None
-        } else {
-            cached.and_then(|item| item.sha1.clone())
-        };
+        let sha1 = if changed { None } else { actual_sha1 };
         let sha512 = if changed {
             None
         } else {
@@ -1539,6 +2184,20 @@ fn scan_local_mod_files(
         });
     }
     Ok(files)
+}
+
+fn cached_file_identity_matches(
+    cached: &CachedModFile,
+    size: u64,
+    modified_ms: u64,
+    actual_sha1: &str,
+) -> bool {
+    cached.size == size
+        && cached.modified_ms == modified_ms
+        && cached
+            .sha1
+            .as_deref()
+            .is_some_and(|expected| expected.eq_ignore_ascii_case(actual_sha1))
 }
 
 fn build_update_cache(
@@ -1594,6 +2253,7 @@ fn build_update_cache(
     let links = source_links_from_files(files);
     ModUpdateCache {
         version: UPDATE_CACHE_VERSION,
+        plan_generation: String::new(),
         name: name.to_string(),
         mc_version: mc_version.to_string(),
         loader: loader.to_string(),
@@ -1878,8 +2538,26 @@ fn local_cache_changed(cache: &ModUpdateCache, files: &[LocalModFile]) -> bool {
         let Some(cached) = cache.files.get(&mod_cache_key(&file.file_name)) else {
             return true;
         };
-        cached.size != file.size || cached.modified_ms != file.modified_ms
+        cached.size != file.size
+            || cached.modified_ms != file.modified_ms
+            || cached.sha1.as_deref() != file.sha1.as_deref()
     })
+}
+
+fn local_mod_snapshot(files: &[LocalModFile]) -> Vec<(String, u64, u64, Option<String>)> {
+    let mut snapshot = files
+        .iter()
+        .map(|file| {
+            (
+                mod_cache_key(&file.file_name),
+                file.size,
+                file.modified_ms,
+                file.sha1.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_unstable();
+    snapshot
 }
 
 fn inherit_cached_updates(
@@ -1912,6 +2590,47 @@ fn load_update_cache(game_root: &Path, safe_name: &str) -> Option<ModUpdateCache
     serde_json::from_str(&data).ok()
 }
 
+pub(crate) fn load_cached_installed_project_ids(
+    game_root: &Path,
+    safe_name: &str,
+) -> HashSet<String> {
+    let Some(cache) = load_update_cache(game_root, safe_name) else {
+        return HashSet::new();
+    };
+    if cache.version != UPDATE_CACHE_VERSION {
+        return HashSet::new();
+    }
+    let mods_dir = version_dir(game_root, safe_name).join("mods");
+    let mut identities = HashSet::new();
+    for file in cache.files.values() {
+        if file.file_name.to_ascii_lowercase().ends_with(".disabled") {
+            continue;
+        }
+        let Some(expected_sha1) = file.sha1.as_deref() else {
+            continue;
+        };
+        let Ok(file_name) = safe_path_name(&file.file_name, "文件名") else {
+            continue;
+        };
+        let path = mods_dir.join(file_name);
+        let Ok(actual_sha1) = crate::downloader::fs::hash_file_sha1(&path) else {
+            continue;
+        };
+        if !actual_sha1.eq_ignore_ascii_case(expected_sha1) {
+            continue;
+        }
+
+        let sources = detected_sources_from_cache(file);
+        if let Some(source) = sources.modrinth {
+            identities.insert(format!("mr:{}", source.project_id.to_ascii_lowercase()));
+        }
+        if let Some(source) = sources.curseforge {
+            identities.insert(format!("cf:{}", source.project_id));
+        }
+    }
+    identities
+}
+
 fn save_update_cache(
     game_root: &Path,
     safe_name: &str,
@@ -1922,7 +2641,7 @@ fn save_update_cache(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let data = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
-    std::fs::write(path, data).map_err(|e| e.to_string())
+    write_atomic_store_file(&path, data.as_bytes())
 }
 
 pub(crate) fn load_cached_mrpack_downloads(
@@ -1937,11 +2656,23 @@ pub(crate) fn load_cached_mrpack_downloads(
     if cache.version != UPDATE_CACHE_VERSION || !cache_runtime_matches(&cache, mc_version, loader) {
         return HashMap::new();
     }
+    let mods_dir = version_dir(game_root, safe_name).join("mods");
     cache
         .files
         .into_values()
         .filter_map(|file| {
             let sha1 = file.sha1.clone()?;
+            let file_name = if file.file_name.is_empty() {
+                file.rel.rsplit('/').next().unwrap_or_default()
+            } else {
+                &file.file_name
+            };
+            let safe_file_name = safe_path_name(file_name, "文件名").ok()?;
+            let actual_sha1 =
+                crate::downloader::fs::hash_file_sha1(&mods_dir.join(safe_file_name)).ok()?;
+            if !actual_sha1.eq_ignore_ascii_case(&sha1) {
+                return None;
+            }
             let mut downloads = file.mrpack_downloads;
             if let Some(file_id) = file.curseforge_file_id {
                 let file_name = if file.file_name.is_empty() {
@@ -2031,13 +2762,11 @@ fn detected_sources_from_cache(file: &CachedModFile) -> DetectedSources {
     sources
 }
 
-fn update_task_key(game_root: &Path, safe_name: &str, mc_version: &str, loader: &str) -> String {
+fn update_task_key(game_root: &Path, safe_name: &str, _mc_version: &str, _loader: &str) -> String {
     format!(
-        "{}|{}|{}|{}",
-        game_root.display(),
-        safe_name,
-        mc_version,
-        loader
+        "{}|{}",
+        crate::instance::normalized_game_dir_task_key(&game_root.to_string_lossy()),
+        safe_name
     )
 }
 
@@ -2062,10 +2791,16 @@ fn is_update_refreshing(key: &str) -> bool {
 }
 
 fn mod_cache_key(file_name: &str) -> String {
-    file_name
-        .strip_suffix(".disabled")
+    strip_disabled_suffix_case_insensitive(file_name)
         .unwrap_or(file_name)
         .to_ascii_lowercase()
+}
+
+fn strip_disabled_suffix_case_insensitive(file_name: &str) -> Option<&str> {
+    const SUFFIX: &str = ".disabled";
+    let split_at = file_name.len().checked_sub(SUFFIX.len())?;
+    let (base, suffix) = file_name.split_at(split_at);
+    (suffix.eq_ignore_ascii_case(SUFFIX) && !base.is_empty()).then_some(base)
 }
 
 fn now_secs() -> u64 {
@@ -2077,6 +2812,11 @@ fn now_secs() -> u64 {
 
 fn now_ms() -> u64 {
     system_time_ms(SystemTime::now())
+}
+
+fn new_plan_generation() -> String {
+    let sequence = MOD_UPDATE_PLAN_GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}", now_ms(), sequence)
 }
 
 fn system_time_ms(value: SystemTime) -> u64 {
@@ -2246,7 +2986,7 @@ fn resolve_curseforge_mirror_doh_addrs() -> Vec<SocketAddr> {
             .get(&url)
             .header("Accept", "application/dns-json")
             .send();
-        let Ok(resp) = resp else {
+        let Ok(mut resp) = resp else {
             let err = resp.err().map(|err| err.to_string()).unwrap_or_default();
             eprintln!(
                 "[mod-update][cf] 镜像 DoH 解析失败: provider={} elapsed={}ms error={}",
@@ -2265,9 +3005,12 @@ fn resolve_curseforge_mirror_doh_addrs() -> Vec<SocketAddr> {
             );
             continue;
         }
-        let json = resp.json::<serde_json::Value>();
+        let expected = resp.content_length();
+        let json = read_limited_response_body(&mut resp, expected).and_then(|body| {
+            serde_json::from_slice::<serde_json::Value>(&body).map_err(|e| e.to_string())
+        });
         let Ok(json) = json else {
-            let err = json.err().map(|err| err.to_string()).unwrap_or_default();
+            let err = json.err().unwrap_or_default();
             eprintln!(
                 "[mod-update][cf] 镜像 DoH 响应解析失败: provider={} elapsed={}ms error={}",
                 name,
@@ -2430,6 +3173,42 @@ fn body_preview(body: &[u8]) -> String {
         .replace('\n', "\\n")
 }
 
+fn read_limited_response_body<R: Read>(
+    reader: &mut R,
+    expected: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    read_response_body_with_limit(reader, expected, MAX_MOD_API_RESPONSE_BYTES)
+}
+
+fn read_response_body_with_limit<R: Read>(
+    reader: &mut R,
+    expected: Option<u64>,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    if expected.is_some_and(|size| size > limit as u64) {
+        return Err(format!("响应体超过 {} 字节限制", limit));
+    }
+    let capacity = expected
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or_default()
+        .min(limit);
+    let mut body = Vec::with_capacity(capacity);
+    let mut buffer = [0u8; 81920];
+    loop {
+        let size = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("读取响应体失败: {}", error))?;
+        if size == 0 {
+            break;
+        }
+        if body.len().saturating_add(size) > limit {
+            return Err(format!("响应体超过 {} 字节限制", limit));
+        }
+        body.extend_from_slice(&buffer[..size]);
+    }
+    Ok(body)
+}
+
 fn mod_api_read_json_body(
     mut resp: reqwest::blocking::Response,
     candidate_kind: &str,
@@ -2439,32 +3218,23 @@ fn mod_api_read_json_body(
     log_cf: bool,
 ) -> Option<serde_json::Value> {
     let expected = resp.content_length();
-    let mut body = expected
-        .and_then(|value| usize::try_from(value).ok())
-        .map(Vec::with_capacity)
-        .unwrap_or_default();
-    let mut buffer = [0u8; 81920];
-    loop {
-        match resp.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(size) => body.extend_from_slice(&buffer[..size]),
-            Err(err) => {
-                if log_cf {
-                    eprintln!(
-                        "[mod-update][cf] {}接口响应体下载失败: url={} expected={} downloaded={} elapsed={}ms headers=[{}] error={}",
-                        candidate_kind,
-                        candidate,
-                        expected.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
-                        body.len(),
-                        started.elapsed().as_millis(),
-                        header_summary,
-                        err
-                    );
-                }
-                return None;
+    let body = match read_limited_response_body(&mut resp, expected) {
+        Ok(body) => body,
+        Err(err) => {
+            if log_cf {
+                eprintln!(
+                    "[mod-update][cf] {}接口响应体下载失败: url={} expected={} elapsed={}ms headers=[{}] error={}",
+                    candidate_kind,
+                    candidate,
+                    expected.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
+                    started.elapsed().as_millis(),
+                    header_summary,
+                    err
+                );
             }
+            return None;
         }
-    }
+    };
     if log_cf {
         eprintln!(
             "[mod-update][cf] {}接口响应体下载完成: url={} expected={} downloaded={} elapsed={}ms",
@@ -2822,7 +3592,7 @@ fn fill_missing_fingerprint_parallel(files: &mut [LocalModFile], indexes: &[usiz
 fn refresh_online_mod_data_parallel(
     app_handle: &tauri::AppHandle,
     game_root: &Path,
-    safe_name: &str,
+    _safe_name: &str,
     name: &str,
     http: &reqwest::blocking::Client,
     files: &mut [LocalModFile],
@@ -2910,34 +3680,21 @@ fn refresh_online_mod_data_parallel(
                 done_count += 1;
             }
             event => {
-                let update_plan_changed = matches!(event, OnlineRefreshEvent::UpdatePlan(_));
                 let changed = apply_online_refresh_event(files, event, &mut plans);
                 if !changed {
                     continue;
                 }
                 dedupe_update_lookup_plans(&mut plans);
-                if update_plan_changed {
-                    save_cached_update_plans(
-                        game_root,
-                        safe_name,
-                        plans
-                            .iter()
-                            .cloned()
-                            .map(cached_update_download_plan)
-                            .collect(),
-                    )?;
-                }
-                save_and_emit_mod_update_partial(
+                emit_mod_update_partial(
                     app_handle,
                     game_root,
-                    safe_name,
                     name,
                     mc_version,
                     loader,
                     files,
                     &plans,
                     checked_at_override,
-                )?;
+                );
             }
         }
     }
@@ -3001,17 +3758,16 @@ fn apply_online_refresh_event(
     }
 }
 
-fn save_and_emit_mod_update_partial(
+fn emit_mod_update_partial(
     app_handle: &tauri::AppHandle,
     game_root: &Path,
-    safe_name: &str,
     name: &str,
     mc_version: &str,
     loader: &str,
     files: &[LocalModFile],
     plans: &[UpdateLookupPlan],
     checked_at_override: Option<u64>,
-) -> Result<(), String> {
+) {
     let mut updates = plans
         .iter()
         .map(|plan| plan.update.clone())
@@ -3022,7 +3778,6 @@ fn save_and_emit_mod_update_partial(
         cache.checked_at = checked_at;
     }
     cache.refreshing = true;
-    save_update_cache(game_root, safe_name, &cache)?;
     let view = cache_to_view_without_changed_filter(
         name,
         mc_version,
@@ -3034,6 +3789,7 @@ fn save_and_emit_mod_update_partial(
         "正在合并 Mod 更新结果...".to_string(),
     );
     let event = ModUpdateCacheEvent {
+        game_dir: game_root.to_string_lossy().to_string(),
         name: name.to_string(),
         mc_version: mc_version.to_string(),
         loader: loader.to_string(),
@@ -3042,7 +3798,6 @@ fn save_and_emit_mod_update_partial(
         message: "正在合并 Mod 更新结果...".to_string(),
     };
     let _ = app_handle.emit("mod-update-cache", event);
-    Ok(())
 }
 
 fn refresh_modrinth_worker(
@@ -3228,6 +3983,7 @@ fn lookup_modrinth_update_plans(
                 source_project_id: source.project_id.clone(),
                 source_version_id: latest.info.version_id.clone(),
                 source: "modrinth".to_string(),
+                published_at: latest.published_at.clone(),
             });
         }
     }
@@ -3367,6 +4123,7 @@ fn lookup_curseforge_update_plans(
                 source_project_id: source.project_id.to_string(),
                 source_version_id: latest.info.version_id.clone(),
                 source: "curseforge".to_string(),
+                published_at: latest.published_at.clone(),
             });
         }
     }
@@ -3424,30 +4181,13 @@ fn merge_update_lookup_plan(
     let key = mod_cache_key(&plan.update.file_name);
     match by_file.get_mut(&key) {
         Some(existing) => {
-            let mut downloads = existing.downloads.clone();
-            crate::modpack::download_mirror::append_unique_urls(
-                &mut downloads,
-                plan.downloads.clone(),
-            );
-            let curseforge_file_id = existing.curseforge_file_id.or(plan.curseforge_file_id);
-            let curseforge_file_name = existing
-                .curseforge_file_name
-                .clone()
-                .or_else(|| plan.curseforge_file_name.clone());
             let existing_update = existing.update.clone();
             let incoming_update = plan.update.clone();
-            let mut selected = if prefer_update(&existing_update, &incoming_update) {
+            let mut selected = if prefer_update_lookup_plan(existing, &plan) {
                 existing.clone()
             } else {
                 plan
             };
-            selected.downloads = downloads;
-            if selected.curseforge_file_id.is_none() {
-                selected.curseforge_file_id = curseforge_file_id;
-            }
-            if selected.curseforge_file_name.is_none() {
-                selected.curseforge_file_name = curseforge_file_name;
-            }
             merge_update_links(&mut selected.update, &existing_update);
             merge_update_links(&mut selected.update, &incoming_update);
             *existing = selected;
@@ -3455,6 +4195,47 @@ fn merge_update_lookup_plan(
         None => {
             by_file.insert(key, plan);
         }
+    }
+}
+
+fn prefer_update_lookup_plan(existing: &UpdateLookupPlan, candidate: &UpdateLookupPlan) -> bool {
+    let existing_time = if existing.published_at.is_empty() {
+        existing.update.date.as_str()
+    } else {
+        existing.published_at.as_str()
+    };
+    let candidate_time = if candidate.published_at.is_empty() {
+        candidate.update.date.as_str()
+    } else {
+        candidate.published_at.as_str()
+    };
+    if existing_time != candidate_time {
+        return existing_time > candidate_time;
+    }
+    if existing.sha1.is_some() != candidate.sha1.is_some() {
+        return existing.sha1.is_some();
+    }
+    let existing_rank = update_source_rank(&existing.source);
+    let candidate_rank = update_source_rank(&candidate.source);
+    if existing_rank != candidate_rank {
+        return existing_rank > candidate_rank;
+    }
+    compare_version_ids(&existing.source_version_id, &candidate.source_version_id)
+        != std::cmp::Ordering::Less
+}
+
+fn update_source_rank(source: &str) -> u8 {
+    match source {
+        "modrinth" => 2,
+        "curseforge" => 1,
+        _ => 0,
+    }
+}
+
+fn compare_version_ids(existing: &str, candidate: &str) -> std::cmp::Ordering {
+    match (existing.parse::<u64>(), candidate.parse::<u64>()) {
+        (Ok(existing), Ok(candidate)) => existing.cmp(&candidate),
+        _ => existing.cmp(candidate),
     }
 }
 
@@ -3492,6 +4273,7 @@ fn cached_update_download_plan(plan: UpdateLookupPlan) -> CachedUpdateDownloadPl
         source_project_id: plan.source_project_id,
         source_version_id: plan.source_version_id,
         source: plan.source,
+        published_at: plan.published_at,
         checked_at_ms: now_ms(),
     }
 }
@@ -3601,6 +4383,7 @@ fn modrinth_version_to_download_info(
         sha1: file["hashes"]["sha1"]
             .as_str()
             .map(|value| value.to_string()),
+        published_at: version["date_published"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -3642,6 +4425,7 @@ fn curseforge_file_to_download_info(file: &serde_json::Value) -> Option<VersionD
         },
         downloads,
         sha1,
+        published_at: file["fileDate"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -3766,7 +4550,13 @@ fn prefer_update(existing: &ModUpdateInfo, candidate: &ModUpdateInfo) -> bool {
     if !existing.date.is_empty() && !candidate.date.is_empty() && existing.date != candidate.date {
         return existing.date >= candidate.date;
     }
-    existing.latest_version_id >= candidate.latest_version_id
+    let existing_rank = update_source_rank(&existing.source);
+    let candidate_rank = update_source_rank(&candidate.source);
+    if existing_rank != candidate_rank {
+        return existing_rank > candidate_rank;
+    }
+    compare_version_ids(&existing.latest_version_id, &candidate.latest_version_id)
+        != std::cmp::Ordering::Less
 }
 
 fn lookup_modrinth_versions_by_sha1_batch(
@@ -3872,6 +4662,11 @@ fn lookup_curseforge_mods_by_fingerprints_fast(
 
     for (sha1, mut matches) in matches_by_sha {
         // 指纹结果已经来自本地 mods 文件夹，避免再拉一次 /v1/mods 大响应只为确认 classId。
+        matches.sort_by(|a, b| {
+            a.file_id
+                .cmp(&b.file_id)
+                .then_with(|| b.project_id.cmp(&a.project_id))
+        });
         if let Some(item) = matches.pop() {
             out.insert(sha1, item);
         }
@@ -3960,8 +4755,341 @@ fn is_mod_file(path: &PathBuf) -> bool {
 }
 
 fn display_name_from_file(file_name: &str) -> String {
-    file_name
-        .trim_end_matches(".disabled")
+    strip_disabled_suffix_case_insensitive(file_name)
+        .unwrap_or(file_name)
         .trim_end_matches(".jar")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_mod_update_download_request, cached_file_identity_matches,
+        finalize_staged_deletions_with, load_cached_installed_project_ids,
+        load_mod_update_rollback_store, mod_update_rollback_path, prepare_single_mod_update,
+        read_response_body_with_limit, replace_downloaded_file, restore_staged_deletions,
+        save_mod_update_rollback_record, save_update_cache, CachedModFile, ModRollbackSwap,
+        ModUpdateCache, ModUpdateInfo, ModUpdateRollbackRecord, UpdateDownloadPlan,
+        MOD_UPDATE_STORE_TMP_COUNTER, UPDATE_CACHE_VERSION,
+    };
+    use std::io::Cursor;
+    use std::sync::atomic::Ordering;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "oaoi-{}-{}-{}",
+            name,
+            std::process::id(),
+            MOD_UPDATE_STORE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn test_update(old_file_name: &str, new_file_name: &str) -> ModUpdateInfo {
+        ModUpdateInfo {
+            file_name: old_file_name.to_string(),
+            display_name: "测试 Mod".to_string(),
+            enabled: true,
+            source: "modrinth".to_string(),
+            project_id: "project".to_string(),
+            current_id: "old".to_string(),
+            latest_version_id: "new".to_string(),
+            latest_version_name: "new".to_string(),
+            latest_file_name: new_file_name.to_string(),
+            mc_versions: "1.21.1".to_string(),
+            loaders: "fabric".to_string(),
+            date: String::new(),
+            file_size: 1,
+            mr_url: String::new(),
+            cf_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn 更新目标存在其他文件时拒绝覆盖() {
+        let root = test_root("mod-update-collision");
+        let mods_dir = root.join("mods");
+        let temp_dir = root.join("temp");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(mods_dir.join("old.jar"), b"old").unwrap();
+        std::fs::write(mods_dir.join("new.jar"), b"other-mod").unwrap();
+
+        let result = prepare_single_mod_update(
+            &mods_dir,
+            &temp_dir,
+            0,
+            &test_update("old.jar", "new.jar"),
+            UpdateDownloadPlan {
+                file_name: "new.jar".to_string(),
+                urls: vec!["https://example.invalid/new.jar".to_string()],
+                cache_urls: Vec::new(),
+                sha1: None,
+                source_project_id: "project".to_string(),
+                source_version_id: "new".to_string(),
+                source: "modrinth".to_string(),
+            },
+        );
+
+        assert!(result.err().unwrap().contains("拒绝覆盖其他 Mod"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 更新下载请求同时携带大小和_sha1() {
+        let root = test_root("mod-update-expected-file");
+        let mods_dir = root.join("mods");
+        let temp_dir = root.join("temp");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(mods_dir.join("old.jar"), b"old").unwrap();
+        let mut update = test_update("old.jar", "new.jar");
+        update.file_size = 1234;
+        let pending = prepare_single_mod_update(
+            &mods_dir,
+            &temp_dir,
+            0,
+            &update,
+            UpdateDownloadPlan {
+                file_name: "new.jar".to_string(),
+                urls: vec!["https://example.invalid/new.jar".to_string()],
+                cache_urls: Vec::new(),
+                sha1: Some("0123456789012345678901234567890123456789".to_string()),
+                source_project_id: "project".to_string(),
+                source_version_id: "new".to_string(),
+                source: "modrinth".to_string(),
+            },
+        )
+        .unwrap();
+        let request = build_mod_update_download_request(&pending);
+        assert!(request.allow_resume);
+        assert_eq!(request.expected_size, Some(1234));
+        assert_eq!(
+            request.expected_sha1.as_deref(),
+            Some("0123456789012345678901234567890123456789")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 回档事务可以恢复到操作前状态() {
+        let root = test_root("mod-rollback-file-transaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let old_backup = root.join("old.jar.oaoi-old");
+        let restored_old = root.join("old.jar");
+        let displaced_new = root.join("new.jar.oaoi-old");
+        let original_new = root.join("new.jar");
+        std::fs::write(&restored_old, b"old-version").unwrap();
+        std::fs::write(&displaced_new, b"new-version").unwrap();
+
+        let mut swap = ModRollbackSwap {
+            backup_path: old_backup.clone(),
+            restore_path: restored_old.clone(),
+            displaced: vec![(displaced_new.clone(), original_new.clone())],
+            finished: false,
+        };
+        swap.rollback().unwrap();
+        assert_eq!(std::fs::read(old_backup).unwrap(), b"old-version");
+        assert_eq!(std::fs::read(original_new).unwrap(), b"new-version");
+        assert!(!restored_old.exists());
+        assert!(!displaced_new.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 批量替换中途失败会恢复已暂存文件() {
+        let root = test_root("mod-update-batch-transaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let first_old = root.join("first.jar");
+        let first_new = root.join("first-new.jar");
+        let first_temp = root.join("first.tmp");
+        let second_old = root.join("second.jar");
+        let second_new = root.join("second-new.jar");
+        std::fs::write(&first_old, b"first-old").unwrap();
+        std::fs::write(&first_temp, b"first-new").unwrap();
+        std::fs::write(&second_old, b"second-old").unwrap();
+
+        let staged =
+            vec![replace_downloaded_file(&first_temp, &first_new, &[first_old.clone()]).unwrap()];
+        let missing_temp = root.join("missing.tmp");
+        assert!(
+            replace_downloaded_file(&missing_temp, &second_new, &[second_old.clone()]).is_err()
+        );
+        drop(staged);
+
+        assert_eq!(std::fs::read(first_old).unwrap(), b"first-old");
+        assert_eq!(std::fs::read(second_old).unwrap(), b"second-old");
+        assert!(!first_new.exists());
+        assert!(!second_new.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 删除暂存文件可以完整撤销() {
+        let root = test_root("mod-delete-file-transaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let staged = root.join(".oaoi-delete-test");
+        let original = root.join("old.jar.oaoi-old");
+        std::fs::write(&staged, b"backup").unwrap();
+        restore_staged_deletions(&[(staged.clone(), original.clone())]).unwrap();
+        assert_eq!(std::fs::read(original).unwrap(), b"backup");
+        assert!(!staged.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 永久删除失败会报错并恢复未删除文件() {
+        let root = test_root("mod-delete-finalize-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let staged = root.join(".oaoi-delete-test");
+        let original = root.join("old.jar.oaoi-old");
+        std::fs::write(&staged, b"backup").unwrap();
+
+        let result = finalize_staged_deletions_with(&[(staged.clone(), original.clone())], |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "busy",
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(original).unwrap(), b"backup");
+        assert!(!staged.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 回档记录并发写入不会丢失或产生半截_json() {
+        let root = test_root("mod-update-store");
+        let safe_name = "并发实例";
+        let mut workers = Vec::new();
+        for index in 0..16u64 {
+            let root = root.clone();
+            workers.push(std::thread::spawn(move || {
+                save_mod_update_rollback_record(
+                    &root,
+                    safe_name,
+                    ModUpdateRollbackRecord {
+                        id: format!("record-{}", index),
+                        display_name: format!("Mod {}", index),
+                        old_file_name: format!("old-{}.jar", index),
+                        old_backup_file_name: format!("old-{}.jar.oaoi-old", index),
+                        new_file_name: format!("new-{}.jar", index),
+                        new_sha1: format!("sha1-{}", index),
+                        updated_at_ms: index,
+                    },
+                )
+                .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let store = load_mod_update_rollback_store(&root, safe_name).unwrap();
+        assert_eq!(store.records.len(), 16);
+        let path = mod_update_rollback_path(&root, safe_name);
+        let data = std::fs::read_to_string(&path).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&data).is_ok());
+        let parent = path.parent().unwrap();
+        assert!(std::fs::read_dir(parent).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 损坏回档_json_不会被空数据覆盖() {
+        let root = test_root("mod-update-corrupt-store");
+        let safe_name = "损坏回档实例";
+        let path = mod_update_rollback_path(&root, safe_name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b"{ damaged rollback json";
+        std::fs::write(&path, original).unwrap();
+
+        let error = load_mod_update_rollback_store(&root, safe_name)
+            .err()
+            .unwrap();
+        assert!(error.contains("原文件已保留"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 更新接口响应体超过上限会被拒绝() {
+        let mut oversized = Cursor::new(b"12345".to_vec());
+        assert!(read_response_body_with_limit(&mut oversized, None, 4).is_err());
+
+        let mut exact = Cursor::new(b"1234".to_vec());
+        assert_eq!(
+            read_response_body_with_limit(&mut exact, Some(4), 4).unwrap(),
+            b"1234"
+        );
+    }
+
+    #[test]
+    fn 更新缓存同大小同时间也必须匹配内容身份() {
+        let cached = CachedModFile {
+            size: 4,
+            modified_ms: 100,
+            sha1: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            ..CachedModFile::default()
+        };
+        assert!(cached_file_identity_matches(
+            &cached,
+            4,
+            100,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!cached_file_identity_matches(
+            &cached,
+            4,
+            100,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ));
+    }
+
+    #[test]
+    fn 已安装项目_id_缓存必须对应当前文件内容() {
+        let root = test_root("mod-project-identity-cache");
+        let safe_name = "项目身份实例";
+        let mods_dir = crate::instance::version_dir(&root, safe_name).join("mods");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        let mod_path = mods_dir.join("identity.jar");
+        std::fs::write(&mod_path, b"aaaa").unwrap();
+        let sha1 = crate::downloader::fs::hash_file_sha1(&mod_path).unwrap();
+
+        let cached_file = CachedModFile {
+            file_name: "identity.jar".to_string(),
+            rel: "mods/identity.jar".to_string(),
+            size: 4,
+            sha1: Some(sha1),
+            modrinth_project_id: Some("modrinth-project".to_string()),
+            modrinth_version_id: Some("modrinth-version".to_string()),
+            curseforge_project_id: Some(123),
+            curseforge_file_id: Some(456),
+            ..CachedModFile::default()
+        };
+        let cache = ModUpdateCache {
+            version: UPDATE_CACHE_VERSION,
+            name: safe_name.to_string(),
+            mc_version: "1.21.1".to_string(),
+            loader: "fabric".to_string(),
+            files: std::collections::HashMap::from([("identity.jar".to_string(), cached_file)]),
+            ..ModUpdateCache::default()
+        };
+        save_update_cache(&root, safe_name, &cache).unwrap();
+
+        let identities = load_cached_installed_project_ids(&root, safe_name);
+        assert!(identities.contains("mr:modrinth-project"));
+        assert!(identities.contains("cf:123"));
+
+        std::fs::write(&mod_path, b"bbbb").unwrap();
+        assert!(load_cached_installed_project_ids(&root, safe_name).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "oaoi"
-version = "1.2.5"
+version = "1.2.8"
 dependencies = [
  "flate2",
  "log",

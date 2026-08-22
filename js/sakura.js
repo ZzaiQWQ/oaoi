@@ -6,14 +6,21 @@ class SakuraPetals {
     this.count = count;
     this.paused = false;
     this.destroyed = false;
-    this._timers = [];
+    this._timers = new Set();
     this.init();
+  }
+
+  schedule(callback, delay) {
+    const timer = setTimeout(() => {
+      this._timers.delete(timer);
+      callback();
+    }, delay);
+    this._timers.add(timer);
   }
 
   init() {
     for (let i = 0; i < this.count; i++) {
-      const t = setTimeout(() => this.createPetal(), i * 400);
-      this._timers.push(t);
+      this.schedule(() => this.createPetal(), i * 400);
     }
   }
 
@@ -21,7 +28,7 @@ class SakuraPetals {
   destroy() {
     this.destroyed = true;
     this._timers.forEach(t => clearTimeout(t));
-    this._timers = [];
+    this._timers.clear();
     this.container.querySelectorAll('.sakura-petal').forEach(petal => petal.remove());
   }
 
@@ -40,8 +47,8 @@ class SakuraPetals {
   createPetal() {
     if (this.destroyed) return;
     if (this.paused) {
-      const t = setTimeout(() => this.createPetal(), 1000);
-      this._timers.push(t);
+      // 暂停期间只保留当前等待项，执行后立即从集合移除。
+      this.schedule(() => this.createPetal(), 1000);
       return;
     }
     const petal = document.createElement('div');

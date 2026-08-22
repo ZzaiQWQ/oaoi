@@ -5,9 +5,10 @@ use crate::instance::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
@@ -17,6 +18,7 @@ use crate::modpack_sources::safe_index_name;
 
 const MOD_UPDATE_CACHE_DIR: &str = "launcher-data";
 const MOD_UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
+static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,8 +86,6 @@ struct ExportCachedModFile {
     #[serde(default)]
     size: u64,
     #[serde(default)]
-    modified_ms: u64,
-    #[serde(default)]
     sha1: Option<String>,
     #[serde(default)]
     curseforge_project_id: Option<u32>,
@@ -142,6 +142,11 @@ fn export_modpack_blocking(
 ) -> Result<ExportResult, String> {
     emit_export_progress(app_handle, name, "prepare", 0, 100, "Preparing export...");
     let safe_name = safe_path_name(name, "version name")?;
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, &safe_name)?;
+    // 导出期间保持实例 Mod 快照稳定，避免清单与压缩包内容不一致。
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let inst_dir = version_dir(&game_root, &safe_name);
     if !inst_dir.is_dir() {
@@ -179,15 +184,7 @@ fn export_modpack_blocking(
         .filter(|value| !value.is_empty())
         .unwrap_or("1.0.0")
         .to_string();
-    let mc_version = instance_json["clientVersion"]
-        .as_str()
-        .or_else(|| instance_json["mcVersion"].as_str())
-        .or_else(|| instance_json["id"].as_str())
-        .unwrap_or("")
-        .to_string();
-    if mc_version.is_empty() {
-        return Err("Instance is missing Minecraft version".to_string());
-    }
+    let mc_version = resolve_export_minecraft_version(&game_root, &safe_name, &instance_json)?;
     let (loader_type, loader_version) = detect_loader(&instance_json, &safe_name);
 
     let selected_paths = normalize_selected_paths(include_paths)?;
@@ -726,6 +723,35 @@ fn hash_sha512_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", sha512.finalize()))
 }
 
+fn hash_sha1_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut sha1 = sha1_smol::Sha1::new();
+    let mut buf = [0u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        sha1.update(&buf[..read]);
+    }
+    Ok(sha1.digest().to_string())
+}
+
+fn cached_curseforge_content_matches(
+    path: &Path,
+    cached: &ExportCachedModFile,
+    actual_size: u64,
+) -> Result<bool, String> {
+    if cached.size != actual_size {
+        return Ok(false);
+    }
+    let Some(expected_sha1) = cached.sha1.as_deref() else {
+        return Ok(false);
+    };
+    let actual_sha1 = hash_sha1_file(path)?;
+    Ok(expected_sha1.eq_ignore_ascii_case(&actual_sha1))
+}
+
 fn hash_package_paths(
     app_handle: &tauri::AppHandle,
     name: &str,
@@ -837,13 +863,8 @@ fn load_cached_curseforge_matches_for_packages(
             continue;
         };
         let metadata = std::fs::metadata(&package.path).map_err(|err| err.to_string())?;
-        let modified_ms = metadata
-            .modified()
-            .ok()
-            .map(system_time_ms)
-            .unwrap_or_default();
         // CF 导出缓存命中只看本地文件指纹级元数据，避免全量重新 hash。
-        if file.size != metadata.len() || file.modified_ms != modified_ms {
+        if !cached_curseforge_content_matches(&package.path, &file, metadata.len())? {
             continue;
         }
         let file_name = if file.file_name.is_empty() {
@@ -870,6 +891,10 @@ fn get_modpack_export_items_blocking(
     name: &str,
 ) -> Result<Vec<ExportItem>, String> {
     let safe_name = safe_path_name(name, "version name")?;
+    let mutation_lock = crate::mod_manager::mod_mutation_lock(game_dir, &safe_name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let game_root = resolve_game_dir(game_dir);
     let inst_dir = version_dir(&game_root, &safe_name);
     if !inst_dir.is_dir() {
@@ -881,6 +906,10 @@ fn get_modpack_export_items_blocking(
     for entry in std::fs::read_dir(&inst_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if is_export_link(&metadata) {
+            continue;
+        }
         let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
             continue;
         };
@@ -891,11 +920,12 @@ fn get_modpack_export_items_blocking(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if path.is_dir() {
+        if metadata.is_dir() {
             let item_path = safe.clone();
+            let scan_root = inst_dir.clone();
             dir_handles.push(std::thread::spawn(
                 move || -> Result<Option<ExportItem>, String> {
-                    let (size, count) = dir_stats(&path)?;
+                    let (size, count) = dir_stats(&scan_root, &path)?;
                     if count == 0 {
                         return Ok(None);
                     }
@@ -909,11 +939,11 @@ fn get_modpack_export_items_blocking(
                     }))
                 },
             ));
-        } else if path.is_file() {
+        } else if metadata.is_file() {
             if !should_include_export_root_file(&safe) {
                 continue;
             }
-            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = metadata.len();
             out.push(ExportItem {
                 path: safe.clone(),
                 label: export_label(&safe).to_string(),
@@ -984,22 +1014,27 @@ fn safe_relative_path(value: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-fn dir_stats(dir: &Path) -> Result<(u64, usize), String> {
+fn dir_stats(inst_dir: &Path, dir: &Path) -> Result<(u64, usize), String> {
     let mut size = 0u64;
     let mut count = 0usize;
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if is_export_link(&metadata) {
+            continue;
+        }
+        ensure_export_path_inside(inst_dir, &path, &metadata)?;
         let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
         if name.starts_with('.') || name.ends_with(".tmp") || name.ends_with(".download") {
             continue;
         }
-        if path.is_dir() {
-            let (sub_size, sub_count) = dir_stats(&path)?;
+        if metadata.is_dir() {
+            let (sub_size, sub_count) = dir_stats(inst_dir, &path)?;
             size += sub_size;
             count += sub_count;
-        } else if path.is_file() {
-            size += path.metadata().map(|m| m.len()).unwrap_or(0);
+        } else if metadata.is_file() {
+            size += metadata.len();
             count += 1;
         }
     }
@@ -1409,11 +1444,77 @@ fn write_zip<F>(path: &Path, write: F) -> Result<usize, String>
 where
     F: FnOnce(&mut zip::ZipWriter<File>) -> Result<usize, String>,
 {
-    let file = File::create(path).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
-    let written = write(&mut zip)?;
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(written)
+    if path.exists() {
+        return Err(format!("导出目标已存在: {}", path.display()));
+    }
+    let (temp_path, file) = create_export_temp_file(path)?;
+    let result = (|| {
+        let mut zip = zip::ZipWriter::new(file);
+        let written = write(&mut zip)?;
+        let completed = zip.finish().map_err(|e| e.to_string())?;
+        completed.sync_all().map_err(|e| e.to_string())?;
+        drop(completed);
+        commit_export_temp_file(&temp_path, path)?;
+        Ok(written)
+    })();
+
+    if let Err(error) = result {
+        return Err(cleanup_export_temp_file(&temp_path, error));
+    }
+    result
+}
+
+fn create_export_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "导出文件名无效".to_string())?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for _ in 0..32 {
+        let sequence = EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(
+            ".{}.{}.{}.{}.tmp",
+            file_name,
+            std::process::id(),
+            timestamp,
+            sequence
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建导出临时文件失败: {}", error)),
+        }
+    }
+    Err("创建导出临时文件失败: 临时文件名冲突".to_string())
+}
+
+fn commit_export_temp_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!("导出目标已存在: {}", path.display()));
+    }
+
+    // 临时文件与目标位于同一目录，重命名只会在完整压缩包写入成功后提交。
+    std::fs::rename(temp_path, path).map_err(|error| format!("提交导出文件失败: {}", error))
+}
+
+fn cleanup_export_temp_file(temp_path: &Path, error: String) -> String {
+    match std::fs::remove_file(temp_path) {
+        Ok(()) => error,
+        Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => error,
+        Err(cleanup_error) => format!("{}; 清理导出临时文件失败: {}", error, cleanup_error),
+    }
 }
 
 fn write_json_file(
@@ -1437,8 +1538,18 @@ fn write_standard_overrides(
 
     for rel in bundled_package_paths {
         let src = safe_join(inst_dir, rel)?;
-        if src.is_file() {
-            if write_file_from_disk(zip, &src, &format!("overrides/{}", rel), &mut written)? {
+        if !src.exists() {
+            continue;
+        }
+        let metadata = checked_export_metadata(inst_dir, &src)?;
+        if metadata.is_file() {
+            if write_file_from_disk(
+                zip,
+                inst_dir,
+                &src,
+                &format!("overrides/{}", rel),
+                &mut written,
+            )? {
                 count += 1;
             }
         }
@@ -1446,13 +1557,23 @@ fn write_standard_overrides(
 
     for rel in selected_paths {
         let src = safe_join(inst_dir, rel)?;
-        if src.is_dir() {
+        if !src.exists() {
+            continue;
+        }
+        let metadata = checked_export_metadata(inst_dir, &src)?;
+        if metadata.is_dir() {
             count += write_dir_recursive(zip, inst_dir, &src, &mut written, linked_package_paths)?;
-        } else if src.is_file() {
+        } else if metadata.is_file() {
             if linked_package_paths.contains(rel) {
                 continue;
             }
-            if write_file_from_disk(zip, &src, &format!("overrides/{}", rel), &mut written)? {
+            if write_file_from_disk(
+                zip,
+                inst_dir,
+                &src,
+                &format!("overrides/{}", rel),
+                &mut written,
+            )? {
                 count += 1;
             }
         }
@@ -1472,13 +1593,14 @@ fn write_dir_recursive(
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        let metadata = checked_export_metadata(inst_dir, &path)?;
         let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
         if should_skip_override_file(name) {
             continue;
         }
-        if path.is_dir() {
+        if metadata.is_dir() {
             count += write_dir_recursive(zip, inst_dir, &path, written, excluded_paths)?;
-        } else if path.is_file() {
+        } else if metadata.is_file() {
             let rel = path
                 .strip_prefix(inst_dir)
                 .map_err(|e| e.to_string())?
@@ -1487,7 +1609,7 @@ fn write_dir_recursive(
             if excluded_paths.contains(&rel) {
                 continue;
             }
-            if write_file_from_disk(zip, &path, &format!("overrides/{}", rel), written)? {
+            if write_file_from_disk(zip, inst_dir, &path, &format!("overrides/{}", rel), written)? {
                 count += 1;
             }
         }
@@ -1497,10 +1619,15 @@ fn write_dir_recursive(
 
 fn write_file_from_disk(
     zip: &mut zip::ZipWriter<File>,
+    inst_dir: &Path,
     src: &Path,
     zip_path: &str,
     written: &mut HashSet<String>,
 ) -> Result<bool, String> {
+    let metadata = checked_export_metadata(inst_dir, src)?;
+    if !metadata.is_file() {
+        return Err(format!("导出路径不是普通文件: {}", src.display()));
+    }
     let normalized = zip_path.replace('\\', "/");
     if !written.insert(normalized.clone()) {
         return Ok(false);
@@ -1514,6 +1641,167 @@ fn write_file_from_disk(
     std::io::copy(&mut input, zip)
         .map(|_| true)
         .map_err(|e| e.to_string())
+}
+
+fn checked_export_metadata(inst_dir: &Path, path: &Path) -> Result<std::fs::Metadata, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if is_export_link(&metadata) {
+        return Err(format!("拒绝导出链接路径: {}", path.display()));
+    }
+    ensure_export_path_inside(inst_dir, path, &metadata)?;
+    Ok(metadata)
+}
+
+fn ensure_export_path_inside(
+    inst_dir: &Path,
+    path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), String> {
+    let root = std::fs::canonicalize(inst_dir).map_err(|e| e.to_string())?;
+    let resolved = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    if !resolved.starts_with(&root) {
+        return Err(format!("拒绝导出实例目录外的路径: {}", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cached_curseforge_content_matches, get_modpack_export_items_blocking,
+        resolve_export_minecraft_version, write_zip, ExportCachedModFile, EXPORT_TEMP_COUNTER,
+    };
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "oaoi-export-{}-{}-{}",
+            name,
+            std::process::id(),
+            EXPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn 导出失败时清理临时文件() {
+        let root = test_root("cleanup");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("test.mrpack");
+
+        let result = write_zip(&target, |_| Err("模拟写入失败".to_string()));
+
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 导出不会覆盖已有目标() {
+        let root = test_root("preserve");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("test.zip");
+        std::fs::write(&target, b"existing").unwrap();
+
+        let result = write_zip(&target, |_| Ok(0));
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 导出项目扫描等待_mod_事务锁() {
+        let root = test_root("mod-lock");
+        let game_dir = root.join(".minecraft");
+        let instance_dir = game_dir.join("versions").join("测试实例");
+        std::fs::create_dir_all(instance_dir.join("mods")).unwrap();
+        std::fs::write(instance_dir.join("mods").join("test.jar"), b"mod").unwrap();
+        let game_dir_text = game_dir.to_string_lossy().to_string();
+        let lock = crate::mod_manager::mod_mutation_lock(&game_dir_text, "测试实例").unwrap();
+        let guard = lock.lock().unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = get_modpack_export_items_blocking(&game_dir_text, "测试实例");
+            sender.send(result).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(guard);
+        assert!(receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_minecraft_version_follows_inheritance_chain() {
+        let root = test_root("inheritance");
+        let game_root = root.join(".minecraft");
+        let parent_dir = game_root.join("versions").join("1.20.1");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::write(
+            parent_dir.join("1.20.1.json"),
+            serde_json::to_vec(&serde_json::json!({ "id": "1.20.1" })).unwrap(),
+        )
+        .unwrap();
+        let child = serde_json::json!({
+            "id": "custom-forge",
+            "inheritsFrom": "1.20.1"
+        });
+
+        let version = resolve_export_minecraft_version(&game_root, "custom-forge", &child).unwrap();
+
+        assert_eq!(version, "1.20.1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn curseforge_cache_rejects_same_size_changed_content() {
+        let root = test_root("cf-cache-hash");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("mod.jar");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let cached = ExportCachedModFile {
+            size: 4,
+            sha1: Some(sha1_smol::Sha1::from(b"bbbb").digest().to_string()),
+            ..ExportCachedModFile::default()
+        };
+
+        assert!(!cached_curseforge_content_matches(&path, &cached, 4).unwrap());
+
+        let matching = ExportCachedModFile {
+            size: 4,
+            sha1: Some(sha1_smol::Sha1::from(b"aaaa").digest().to_string()),
+            ..ExportCachedModFile::default()
+        };
+        assert!(cached_curseforge_content_matches(&path, &matching, 4).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn is_export_link(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    is_windows_reparse_point(metadata)
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn write_bytes(zip: &mut zip::ZipWriter<File>, path: &str, data: &[u8]) -> Result<(), String> {
@@ -1539,6 +1827,58 @@ fn read_instance_json(inst_dir: &Path, name: &str) -> Result<serde_json::Value, 
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read version json: {}", e))?;
     serde_json::from_str(&text).map_err(|e| format!("Invalid version json: {}", e))
+}
+
+fn resolve_export_minecraft_version(
+    game_root: &Path,
+    instance_name: &str,
+    instance_json: &serde_json::Value,
+) -> Result<String, String> {
+    let mut current_name = instance_name.to_string();
+    let mut current_json = instance_json.clone();
+    let mut visited = HashSet::new();
+
+    for _ in 0..32 {
+        if !visited.insert(current_name.clone()) {
+            return Err(format!("版本继承出现循环: {}", current_name));
+        }
+        for key in ["clientVersion", "mcVersion"] {
+            if let Some(version) = current_json[key]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(version.to_string());
+            }
+        }
+
+        if let Some(parent) = current_json["inheritsFrom"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let safe_parent = safe_path_name(parent, "继承版本")?;
+            let parent_dir = version_dir(game_root, &safe_parent);
+            let parent_json_path = version_json_path(&parent_dir, &safe_parent);
+            if !parent_json_path.is_file() {
+                return Ok(parent.to_string());
+            }
+            current_json = read_instance_json(&parent_dir, &safe_parent)?;
+            current_name = safe_parent;
+            continue;
+        }
+
+        if let Some(version) = current_json["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(version.to_string());
+        }
+        return Err("Instance is missing Minecraft version".to_string());
+    }
+
+    Err("版本继承层级超过 32 层".to_string())
 }
 
 fn unique_export_path(export_dir: &Path, file_name: &str) -> PathBuf {

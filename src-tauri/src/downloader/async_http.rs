@@ -3,7 +3,7 @@
 //! blocking reqwest 只能设置连接超时，没有可靠的单次 read 空闲超时。这里用异步 chunk
 //! 读取包一层 timeout，避免连接卡住后下载线程一直等。
 use crate::downloader::request::DownloadRequest;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, RANGE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, IF_RANGE, RANGE};
 use reqwest::{Client, Method, RequestBuilder, Response};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,7 +28,26 @@ pub async fn send_request(
     if stop_requested(cancel, abort) {
         return Err("cancelled".to_string());
     }
-    let future = build_request(http, request, url, range)?.send();
+    let future = build_request(http, request, url, range, None)?.send();
+    let response = wait_with_idle_timeout(future, idle_timeout, cancel, abort, label).await?;
+    response.map_err(|e| format!("{label} request failed: {}", e))
+}
+
+pub async fn send_range_request(
+    http: &Client,
+    request: &DownloadRequest,
+    url: &str,
+    range: (u64, u64),
+    if_range: Option<&str>,
+    idle_timeout: Duration,
+    cancel: &AtomicBool,
+    abort: Option<&AtomicBool>,
+    label: &str,
+) -> Result<Response, String> {
+    if stop_requested(cancel, abort) {
+        return Err("cancelled".to_string());
+    }
+    let future = build_request(http, request, url, Some(range), if_range)?.send();
     let response = wait_with_idle_timeout(future, idle_timeout, cancel, abort, label).await?;
     response.map_err(|e| format!("{label} request failed: {}", e))
 }
@@ -63,6 +82,7 @@ fn build_request(
     request: &DownloadRequest,
     url: &str,
     range: Option<(u64, u64)>,
+    if_range: Option<&str>,
 ) -> Result<RequestBuilder, String> {
     let method = if range.is_some() {
         Method::GET
@@ -78,6 +98,11 @@ fn build_request(
         builder = builder
             .header(RANGE, format!("bytes={start}-{end}"))
             .header(ACCEPT_ENCODING, "identity");
+        if let Some(if_range) = if_range {
+            let value = HeaderValue::from_str(if_range)
+                .map_err(|e| format!("invalid If-Range header value: {e}"))?;
+            builder = builder.header(IF_RANGE, value);
+        }
     } else if request.method == Method::GET {
         builder = builder.header(ACCEPT_ENCODING, "identity");
     } else if let Some(body) = &request.body {

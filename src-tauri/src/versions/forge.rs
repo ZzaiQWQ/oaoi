@@ -15,23 +15,12 @@ pub async fn get_forge_versions(mc_version: String) -> Result<Vec<String>, Strin
             &mut seen,
             fetch_bmcl_versions(&http, &mc_version),
         );
-        for url in [
-            "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml",
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
-        ] {
-            merge_versions(
-                &mut versions,
-                &mut seen,
-                fetch_maven_metadata_versions(&http, url, &mc_version),
-            );
-        }
-        if versions.is_empty() {
-            merge_versions(
-                &mut versions,
-                &mut seen,
-                fetch_forge_html_versions(&http, &mc_version),
-            );
-        }
+        // 镜像结果保持在前，官方列表用于补齐镜像尚未同步的版本。
+        merge_versions(
+            &mut versions,
+            &mut seen,
+            fetch_forge_html_versions(&http, &mc_version),
+        );
 
         Ok(versions)
     })
@@ -56,6 +45,7 @@ fn fetch_bmcl_versions(http: &reqwest::blocking::Client, mc_version: &str) -> Ve
 
     let mut versions = arr
         .iter()
+        .filter(|item| has_forge_installer(item))
         .filter_map(|item| {
             let version = item
                 .get("version")
@@ -78,35 +68,15 @@ fn fetch_bmcl_versions(http: &reqwest::blocking::Client, mc_version: &str) -> Ve
     versions
 }
 
-fn fetch_maven_metadata_versions(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    mc_version: &str,
-) -> Vec<String> {
-    let Ok(resp) = http.get(url).send() else {
-        return vec![];
-    };
-    if !resp.status().is_success() {
-        return vec![];
-    }
-    let Ok(xml) = resp.text() else {
-        return vec![];
-    };
-
-    let mut versions = Vec::new();
-    let mut rest = xml.as_str();
-    while let Some(start) = rest.find("<version>") {
-        rest = &rest[start + "<version>".len()..];
-        let Some(end) = rest.find("</version>") else {
-            break;
-        };
-        if let Some(version) = normalize_maven_forge_version(mc_version, &rest[..end]) {
-            versions.push(version);
-        }
-        rest = &rest[end + "</version>".len()..];
-    }
-    versions.reverse();
-    versions
+fn has_forge_installer(item: &serde_json::Value) -> bool {
+    item.get("files")
+        .and_then(|value| value.as_array())
+        .is_some_and(|files| {
+            files.iter().any(|file| {
+                file.get("category").and_then(|value| value.as_str()) == Some("installer")
+                    && file.get("format").and_then(|value| value.as_str()) == Some("jar")
+            })
+        })
 }
 
 fn fetch_forge_html_versions(http: &reqwest::blocking::Client, mc_version: &str) -> Vec<String> {
@@ -152,21 +122,6 @@ fn normalize_forge_version(mc_version: &str, value: &str) -> Option<String> {
     normalize_forge_loader_version(version)
 }
 
-fn normalize_maven_forge_version(mc_version: &str, value: &str) -> Option<String> {
-    let mut version = value.trim();
-    if version.is_empty() || version.contains('<') || version.contains('"') || version.contains('/')
-    {
-        return None;
-    }
-    if let Some(rest) = version.strip_prefix("forge-") {
-        version = rest;
-    }
-    let full_prefix = format!("{}-", mc_version);
-    version
-        .strip_prefix(&full_prefix)
-        .and_then(normalize_forge_loader_version)
-}
-
 fn normalize_forge_loader_version(version: &str) -> Option<String> {
     let version = version.trim();
     if version.is_empty() || version.contains('<') || version.contains('"') || version.contains('/')
@@ -203,5 +158,27 @@ fn merge_versions(
         if seen.insert(version.clone()) {
             out.push(version);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_forge_installer;
+
+    #[test]
+    fn forge_list_keeps_only_jar_installers() {
+        let installer = serde_json::json!({
+            "files": [{ "category": "installer", "format": "jar" }]
+        });
+        let universal = serde_json::json!({
+            "files": [{ "category": "universal", "format": "jar" }]
+        });
+        let zip_installer = serde_json::json!({
+            "files": [{ "category": "installer", "format": "zip" }]
+        });
+
+        assert!(has_forge_installer(&installer));
+        assert!(!has_forge_installer(&universal));
+        assert!(!has_forge_installer(&zip_installer));
     }
 }

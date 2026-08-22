@@ -2,7 +2,17 @@
    oaoi - 主入口（初始化各模块）
    ============================================ */
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  const criticalInitFailures = [];
+  const initCritical = async (label, initializer) => {
+    try {
+      await initializer();
+    } catch (error) {
+      criticalInitFailures.push(label);
+      console.error(`${label}初始化失败:`, error);
+    }
+  };
+
   // ===== 全局等比自适应缩放引擎 =====
   function autoScale() {
     const baseW = 800, baseH = 480;
@@ -36,7 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
   // Tauri 窗口控制
-  initWindowControls();
+  await initCritical('窗口控制', initWindowControls);
 
   // 樱花飘落（读取 DIY 设置，不硬编码数量）
   const sakuraContainer = document.getElementById('sakuraContainer');
@@ -51,29 +61,41 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // 导航
-  try { initNavigation(); } catch (e) { console.error('导航初始化失败:', e); }
+  await initCritical('导航', initNavigation);
   try { initP2PLink(); } catch (e) { console.error('联机工具初始化失败:', e); }
   try { initAboutPage(); } catch (e) { console.error('关于页初始化失败:', e); }
 
   // 主页
-  try { initLaunchButton(); } catch (e) { console.error('启动按钮初始化失败:', e); }
+  await initCritical('启动按钮', initLaunchButton);
   try { initNewsHoverEffects(); } catch (e) { console.error('新闻卡片初始化失败:', e); }
-  try { initVersionDropdown(); } catch (e) { console.error('版本下拉初始化失败:', e); }
+  await initCritical('版本下拉', initVersionDropdown);
 
   // 设置
-  try { initSettings(); } catch (e) { console.error('设置页初始化失败:', e); }
+  await initCritical('设置页', initSettings);
 
   // 下载页
-  try { initDownloadPage(); } catch (e) { console.error('下载页初始化失败:', e); }
-
-  // DIY 个性化（略延迟确保 DOM 就绪）
-  requestAnimationFrame(() => { try { initDiyPage(); } catch (e) { console.error('DIY页初始化失败:', e); } });
+  await initCritical('下载页', initDownloadPage);
 
   // 实例详情页
-  try { initInstanceDetailPage(); } catch (e) { console.error('版本详情初始化失败:', e); }
+  await initCritical('版本详情', initInstanceDetailPage);
 
   // 首次启动：选择游戏目录
-  try { checkFirstLaunch(); } catch (e) { console.error('首次启动检查失败:', e); }
+  await initCritical('首次启动检查', checkFirstLaunch);
+
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  await initCritical('DIY页', initDiyPage);
+
+  // 关键模块全部完成后才能提交更新；失败时由更新助手保留旧版本并回滚。
+  if (criticalInitFailures.length === 0) {
+    try {
+      const tauri = await waitForTauri();
+      await tauri.core.invoke('confirm_update_health');
+    } catch (e) {
+      console.warn('[update] 确认更新健康状态失败:', e);
+    }
+  } else {
+    console.error('[update] 关键模块初始化失败，拒绝确认更新健康状态:', criticalInitFailures);
+  }
 
   setTimeout(() => {
     checkForUpdates().catch(e => console.warn('[update] 检查更新失败:', e));
@@ -183,7 +205,7 @@ async function checkFirstLaunch() {
     }
   });
 
-  confirmBtn.addEventListener('click', () => {
+  confirmBtn.addEventListener('click', async () => {
     if (!selectedDir) return;
     localStorage.setItem('gameDir', selectedDir);
     modal.classList.add('hidden');
@@ -192,6 +214,13 @@ async function checkFirstLaunch() {
     if (gameDirDisplay) {
       gameDirDisplay.textContent = selectedDir;
       gameDirDisplay.title = selectedDir;
+    }
+    if (typeof syncGameDirSummary === 'function') syncGameDirSummary(selectedDir);
+    // 首次直接选择已有目录时，立即读取其中的版本并刷新主页列表。
+    try {
+      if (typeof loadInstalledVersions === 'function') await loadInstalledVersions();
+    } catch (err) {
+      console.warn('首次选择目录后刷新版本列表失败:', err);
     }
   });
 }

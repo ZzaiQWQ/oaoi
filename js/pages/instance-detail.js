@@ -7,7 +7,9 @@ let currentModListFilter = 'all';
 let modListLoadSeq = 0;
 let modListRenderSeq = 0;
 let modListStreamEventBound = false;
+let modListStreamEventBinding = null;
 let modListStreamRequestId = '';
+let modListStreamGameDir = '';
 let modUpdateSeq = 0;
 let modUpdateCheckedKey = '';
 let modUpdateLoadingKey = '';
@@ -18,20 +20,63 @@ let currentModRollbackRecords = [];
 let currentModBulkTab = 'updates';
 let modUpdateReady = false;
 let modUpdateCacheEventBound = false;
+let modUpdateCacheEventBinding = null;
 let fabricUpgradeSeq = 0;
 let fabricUpgradeRunning = false;
+let modAnalyzeSeq = 0;
+let modRollbackListSeq = 0;
+let oldModBackupListSeq = 0;
+let _onlineSearchId = 0;
 let instanceSettingsModal = null;
 let modBulkUpdateModal = null;
 let quickAccessFitTimer = 0;
-const modpackExportTask = {
-  running: false,
-  name: '',
-  format: '',
-  progress: { stage: 'idle', current: 0, total: 100, detail: '' },
-  result: null,
-  error: null,
-  unlisten: null,
-};
+let instanceJvmPresetDraft = null;
+const modpackExportTasks = new Map();
+const activeModpackExportTaskKeys = new Map();
+let modpackExportProgressUnlisten = null;
+let modpackExportProgressBinding = null;
+
+function isCurrentDetailContext(gameDir, instanceName) {
+  return (localStorage.getItem('gameDir') || '') === gameDir
+    && currentDetailInstance === instanceName;
+}
+
+function modpackExportTaskKey(gameDir, name) {
+  return `${gameDir || ''}\u0000${name || ''}`;
+}
+
+function isModpackExportTaskActive(task) {
+  return !!task && (task.running || task.inFlight);
+}
+
+function releaseModpackExportTask(task) {
+  if (!task || isModpackExportTaskActive(task)) return;
+  if (activeModpackExportTaskKeys.get(task.name) === task.key) {
+    activeModpackExportTaskKeys.delete(task.name);
+  }
+  modpackExportTasks.delete(task.key);
+}
+
+function getModpackExportTask(name, gameDir = localStorage.getItem('gameDir') || '') {
+  if (!name) return null;
+  const key = modpackExportTaskKey(gameDir, name);
+  let task = modpackExportTasks.get(key);
+  if (!task) {
+    task = {
+      key,
+      gameDir,
+      running: false,
+      inFlight: false,
+      name,
+      format: '',
+      progress: { stage: 'idle', current: 0, total: 100, detail: '' },
+      result: null,
+      error: null,
+    };
+    modpackExportTasks.set(key, task);
+  }
+  return task;
+}
 
 function cleanModpackArchiveName(name) {
   let cleaned = String(name || '').trim();
@@ -46,8 +91,19 @@ function showInstanceDetail(instanceName) {
   const instance = instancesCache.find(v => v.name === instanceName);
   if (!instance) return;
 
+  // 切换实例时立即作废旧页面尚未完成的异步列表请求。
+  _onlineSearchId++;
+  modAnalyzeSeq++;
+  modRollbackListSeq++;
+  oldModBackupListSeq++;
   currentDetailInstance = instanceName;
   currentDetailInfo = instance;
+  migrateInstanceSettings(instanceName, localStorage.getItem('gameDir') || '');
+  const analyzeBtn = document.getElementById('instanceAnalyzeBtn');
+  if (analyzeBtn) {
+    analyzeBtn.disabled = false;
+    analyzeBtn.textContent = 'MOD检测';
+  }
 
   // 填充信息
   document.getElementById('instanceDetailName').textContent = instance.name;
@@ -103,7 +159,11 @@ function showInstanceDetail(instanceName) {
 }
 
 function instanceSettingKey(prefix) {
-  return `${prefix}_${currentDetailInstance}`;
+  return getInstanceSettingStorageKey(
+    prefix,
+    currentDetailInstance,
+    localStorage.getItem('gameDir') || ''
+  );
 }
 
 function updateInstanceSettingsSummary() {
@@ -160,6 +220,7 @@ function setFabricUpgradeButton({ hidden = true, disabled = false, text = '更�
 async function refreshFabricUpgradeButton() {
   const seq = ++fabricUpgradeSeq;
   const info = currentDetailInfo || {};
+  const gameDir = localStorage.getItem('gameDir') || '';
   if (fabricUpgradeRunning || info.loader_type !== 'fabric' || !info.mc_version || !info.loader_version) {
     setFabricUpgradeButton({ hidden: true });
     return;
@@ -168,7 +229,8 @@ async function refreshFabricUpgradeButton() {
   try {
     const tauri = await waitForTauri();
     const versions = await tauri.core.invoke('get_fabric_versions', { mcVersion: info.mc_version });
-    if (seq !== fabricUpgradeSeq || currentDetailInfo !== info) return;
+    if (seq !== fabricUpgradeSeq || currentDetailInfo !== info
+        || (localStorage.getItem('gameDir') || '') !== gameDir) return;
     const latest = Array.isArray(versions) ? String(versions[0] || '').trim() : '';
     if (!latest || latest === String(info.loader_version || '').trim()) {
       setFabricUpgradeButton({ hidden: true });
@@ -179,26 +241,35 @@ async function refreshFabricUpgradeButton() {
     if (btn) btn.title = `更新 Fabric Loader：${info.loader_version} -> ${latest}`;
   } catch (err) {
     console.warn('检查 Fabric Loader 更新失败:', err);
-    if (seq === fabricUpgradeSeq) setFabricUpgradeButton({ hidden: true });
+    if (seq === fabricUpgradeSeq && (localStorage.getItem('gameDir') || '') === gameDir) {
+      setFabricUpgradeButton({ hidden: true });
+    }
   }
 }
 
-function applyFabricUpgradeResult(result) {
+function applyFabricUpgradeResult(result, gameDir, instanceName, instanceInfo) {
   const newLoaderVersion = result?.newLoaderVersion || '';
-  if (!newLoaderVersion || !currentDetailInstance) return;
-  const info = currentDetailInfo || {};
-  info.loader_version = newLoaderVersion;
-  const cached = instancesCache.find(item => item.name === currentDetailInstance);
+  if (!newLoaderVersion || !instanceName) return;
+  if (instanceInfo) instanceInfo.loader_version = newLoaderVersion;
+  // 实例缓存只代表当前游戏目录，旧目录任务不能写入新目录的同名实例。
+  if ((localStorage.getItem('gameDir') || '') !== gameDir) return;
+  const cached = instancesCache.find(item => item.name === instanceName);
   if (cached) cached.loader_version = newLoaderVersion;
+  if (!isCurrentDetailContext(gameDir, instanceName)) return;
+  if (currentDetailInfo) currentDetailInfo.loader_version = newLoaderVersion;
   const loaderEl = document.getElementById('instanceDetailLoaderVer');
   if (loaderEl) loaderEl.textContent = newLoaderVersion;
 }
 
 async function upgradeCurrentFabricLoader() {
   if (fabricUpgradeRunning || !currentDetailInstance || currentDetailInfo?.loader_type !== 'fabric') return;
+  const requestedInstance = currentDetailInstance;
+  const requestedInfo = currentDetailInfo;
+  const requestedMcVersion = requestedInfo?.mc_version || '';
+  const requestedGameDir = localStorage.getItem('gameDir') || '';
   const btn = document.getElementById('instanceFabricUpdateBtn');
   const targetLoaderVersion = btn?.dataset.targetLoader || '';
-  const currentLoaderVersion = currentDetailInfo?.loader_version || '';
+  const currentLoaderVersion = requestedInfo?.loader_version || '';
   if (!targetLoaderVersion) return;
 
   const confirmed = await showConfirm(
@@ -206,9 +277,10 @@ async function upgradeCurrentFabricLoader() {
     { title: '更新 Fabric Loader', confirmText: '开始更新' }
   );
   if (!confirmed) return;
+  if (!isCurrentDetailContext(requestedGameDir, requestedInstance) || currentDetailInfo !== requestedInfo) return;
 
   fabricUpgradeRunning = true;
-  const oldSeq = ++fabricUpgradeSeq;
+  ++fabricUpgradeSeq;
   setFabricUpgradeButton({ hidden: false, disabled: true, text: '更新中...', target: targetLoaderVersion });
 
   let unlisten = null;
@@ -216,7 +288,7 @@ async function upgradeCurrentFabricLoader() {
     const tauri = await waitForTauri();
     unlisten = await tauri.event.listen('install-progress', (event) => {
       const payload = event.payload || {};
-      if (payload.name !== currentDetailInstance) return;
+      if (payload.name !== requestedInstance || !isCurrentDetailContext(requestedGameDir, requestedInstance)) return;
       if (!['fabric-upgrade', 'fabric-libs'].includes(payload.stage)) return;
       const current = Number(payload.current || 0);
       const total = Number(payload.total || 0);
@@ -224,22 +296,26 @@ async function upgradeCurrentFabricLoader() {
       setFabricUpgradeButton({ hidden: false, disabled: true, text, target: targetLoaderVersion });
     });
 
-    const gameDir = localStorage.getItem('gameDir') || '';
     const result = await tauri.core.invoke('upgrade_fabric_loader', {
-      gameDir,
-      name: currentDetailInstance,
-      mcVersion: currentDetailInfo?.mc_version || '',
+      gameDir: requestedGameDir,
+      name: requestedInstance,
+      mcVersion: requestedMcVersion,
       currentLoaderVersion,
       targetLoaderVersion,
       useMirror: localStorage.getItem('downloadSource') === 'bmcl',
     });
-    if (oldSeq !== fabricUpgradeSeq) return;
-    applyFabricUpgradeResult(result);
-    setFabricUpgradeButton({ hidden: true });
-    showToast(`Fabric Loader 已更新到 ${result?.newLoaderVersion || targetLoaderVersion}`, 'success');
+    applyFabricUpgradeResult(result, requestedGameDir, requestedInstance, requestedInfo);
+    if (isCurrentDetailContext(requestedGameDir, requestedInstance)) {
+      setFabricUpgradeButton({ hidden: true });
+      showToast(`Fabric Loader 已更新到 ${result?.newLoaderVersion || targetLoaderVersion}`, 'success');
+    }
   } catch (err) {
-    showToast('Fabric Loader 更新失败: ' + err, 'error', 10000);
-    setFabricUpgradeButton({ hidden: false, disabled: false, text: '更新', target: targetLoaderVersion });
+    if (isCurrentDetailContext(requestedGameDir, requestedInstance)) {
+      showToast('Fabric Loader 更新失败: ' + err, 'error', 10000);
+      setFabricUpgradeButton({ hidden: false, disabled: false, text: '更新', target: targetLoaderVersion });
+    } else {
+      console.warn(`Fabric Loader 更新失败 (${requestedInstance}):`, err);
+    }
   } finally {
     if (unlisten) unlisten();
     fabricUpgradeRunning = false;
@@ -262,7 +338,7 @@ function updateInstanceJvmPresetUI() {
   const row = document.getElementById('instanceJvmPresetRow');
   const input = document.getElementById('instanceJvmArgsInput');
   if (!row || !input) return;
-  const preset = getInstanceJvmPresetKey();
+  const preset = instanceJvmPresetDraft || getInstanceJvmPresetKey();
   row.querySelectorAll('.instance-jvm-preset').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.preset === preset);
   });
@@ -277,7 +353,7 @@ function updateInstanceJvmPresetUI() {
 function setInstanceJvmPreset(preset) {
   const input = document.getElementById('instanceJvmArgsInput');
   if (!input) return;
-  localStorage.setItem(instanceSettingKey('jvmPreset'), preset);
+  instanceJvmPresetDraft = preset;
   if (preset === 'global') {
     input.value = '';
   } else if (preset === 'clean') {
@@ -344,6 +420,7 @@ function ensureInstanceSettingsModal() {
   instanceSettingsModal = modal;
 
   const close = () => {
+    instanceJvmPresetDraft = null;
     modal.remove();
     instanceSettingsModal = null;
   };
@@ -366,7 +443,7 @@ function ensureInstanceSettingsModal() {
     const preset = typeof getJvmArgsPresetByValue === 'function'
       ? getJvmArgsPresetByValue(value)
       : 'custom';
-    localStorage.setItem(instanceSettingKey('jvmPreset'), preset);
+    instanceJvmPresetDraft = preset;
     updateInstanceJvmPresetUI();
   });
   return modal;
@@ -390,6 +467,7 @@ function updateInstanceJavaPathState() {
 
 function loadInstanceSettings() {
   if (!currentDetailInstance) return;
+  instanceJvmPresetDraft = getInstanceJvmPresetKey();
   const memInput = document.getElementById('instanceMemInput');
   const javaMode = document.getElementById('instanceJavaMode');
   const javaPath = document.getElementById('instanceJavaPathInput');
@@ -428,8 +506,18 @@ function saveInstanceSettings() {
   const hint = document.getElementById('instanceSettingsHint');
 
   const memValue = (memInput?.value || '').trim();
-  if (memValue) localStorage.setItem(instanceSettingKey('mem'), memValue);
-  else localStorage.removeItem(instanceSettingKey('mem'));
+  if (memValue) {
+    const parsedMemory = Number.parseInt(memValue, 10);
+    const globalMemoryInput = document.getElementById('memValue');
+    const maxMemory = Number(globalMemoryInput?.max) || Number.MAX_SAFE_INTEGER;
+    if (!Number.isFinite(parsedMemory) || parsedMemory < 512 || parsedMemory > maxMemory) {
+      showToast(`内存必须在 512 MB 到 ${maxMemory} MB 之间`, 'warn');
+      return;
+    }
+    localStorage.setItem(instanceSettingKey('mem'), String(parsedMemory));
+  } else {
+    localStorage.removeItem(instanceSettingKey('mem'));
+  }
 
   const modeValue = javaMode?.value || 'global';
   if (modeValue === 'global') localStorage.removeItem(instanceSettingKey('javaMode'));
@@ -440,7 +528,7 @@ function saveInstanceSettings() {
   else localStorage.removeItem(instanceSettingKey('javaPath'));
 
   const jvmValue = (jvmArgs?.value || '').trim();
-  const jvmPreset = getInstanceJvmPresetKey();
+  const jvmPreset = instanceJvmPresetDraft || getInstanceJvmPresetKey();
   if (jvmPreset === 'global') {
     localStorage.removeItem(instanceSettingKey('jvmArgs'));
     localStorage.removeItem(instanceSettingKey('jvmPreset'));
@@ -453,7 +541,9 @@ function saveInstanceSettings() {
       ? getJvmArgsPresetByValue(jvmValue)
       : 'custom';
     localStorage.setItem(instanceSettingKey('jvmPreset'), resolvedPreset);
+    instanceJvmPresetDraft = resolvedPreset;
   }
+  if (jvmPreset === 'global' || jvmPreset === 'clean') instanceJvmPresetDraft = jvmPreset;
 
   if (hint) {
     hint.textContent = '已保存';
@@ -467,6 +557,7 @@ function resetInstanceSettings() {
   ['mem', 'javaMode', 'javaPath', 'jvmArgs', 'jvmPreset'].forEach(prefix => {
     localStorage.removeItem(instanceSettingKey(prefix));
   });
+  instanceJvmPresetDraft = null;
   loadInstanceSettings();
   updateInstanceSettingsSummary();
   const hint = document.getElementById('instanceSettingsHint');
@@ -545,6 +636,8 @@ function ensureModpackExportModal() {
 function renderModpackExportTaskState() {
   const modal = document.getElementById('modpackExportModal');
   if (!modal) return;
+  const task = modpackExportTasks.get(modal.dataset.exportTaskKey || '');
+  if (!task) return;
   const progressEl = document.getElementById('modpackExportProgress');
   const progressText = document.getElementById('modpackExportProgressText');
   const progressCount = document.getElementById('modpackExportProgressCount');
@@ -554,49 +647,66 @@ function renderModpackExportTaskState() {
   const defaultBtn = document.getElementById('modpackExportDefault');
   const allBtn = document.getElementById('modpackExportAll');
 
-  const progress = modpackExportTask.progress || {};
+  const progress = task.progress || {};
   const total = Number(progress.total || 0);
   const current = Number(progress.current || 0);
   const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0;
   const detail = progress.detail || '正在导出...';
 
-  if (progressEl) progressEl.classList.toggle('hidden', !modpackExportTask.running && !modpackExportTask.result && !modpackExportTask.error);
-  if (progressText) progressText.textContent = modpackExportTask.error || detail;
-  if (progressCount) progressCount.textContent = modpackExportTask.error ? '失败' : `${pct}%`;
-  if (progressBar) progressBar.style.width = modpackExportTask.error ? '100%' : `${pct}%`;
-  if (summaryEl && modpackExportTask.running) summaryEl.textContent = `正在导出 ${modpackExportTask.format || ''}`;
+  const taskActive = isModpackExportTaskActive(task);
+  if (progressEl) progressEl.classList.toggle('hidden', !taskActive && !task.result && !task.error);
+  if (progressText) progressText.textContent = task.error || detail;
+  if (progressCount) progressCount.textContent = task.error ? '失败' : `${pct}%`;
+  if (progressBar) progressBar.style.width = task.error ? '100%' : `${pct}%`;
+  if (summaryEl && taskActive) summaryEl.textContent = `正在导出 ${task.format || ''}`;
   if (startBtn) {
-    startBtn.disabled = modpackExportTask.running;
-    startBtn.textContent = modpackExportTask.running ? '导出中...' : '开始导出';
+    startBtn.disabled = taskActive;
+    startBtn.textContent = taskActive ? '导出中...' : '开始导出';
   }
-  if (defaultBtn) defaultBtn.disabled = modpackExportTask.running;
-  if (allBtn) allBtn.disabled = modpackExportTask.running;
+  if (defaultBtn) defaultBtn.disabled = taskActive;
+  if (allBtn) allBtn.disabled = taskActive;
 }
 
 async function ensureModpackExportProgressListener(tauri) {
-  if (modpackExportTask.unlisten || !tauri?.event?.listen) return;
-  modpackExportTask.unlisten = await tauri.event.listen('modpack-export-progress', (event) => {
+  if (modpackExportProgressUnlisten || !tauri?.event?.listen) return;
+  if (modpackExportProgressBinding) return modpackExportProgressBinding;
+  modpackExportProgressBinding = tauri.event.listen('modpack-export-progress', (event) => {
     const payload = event.payload || {};
-    if (modpackExportTask.name && payload.name && payload.name !== modpackExportTask.name) return;
-    modpackExportTask.progress = {
+    const taskKey = activeModpackExportTaskKeys.get(payload.name);
+    const task = taskKey ? modpackExportTasks.get(taskKey) : null;
+    if (!task) return;
+    task.progress = {
       stage: payload.stage || '',
       current: Number(payload.current || 0),
       total: Number(payload.total || 0),
       detail: payload.detail || '',
     };
     if (payload.stage === 'done') {
-      modpackExportTask.running = false;
+      task.running = false;
     } else if (payload.stage === 'error') {
-      modpackExportTask.running = false;
-      modpackExportTask.error = payload.detail || '导出失败';
+      task.running = false;
+      task.error = payload.detail || '导出失败';
     }
-    renderModpackExportTaskState();
+    const modal = document.getElementById('modpackExportModal');
+    if (modal?.dataset.exportTaskKey === task.key) renderModpackExportTaskState();
   });
+  try {
+    modpackExportProgressUnlisten = await modpackExportProgressBinding;
+  } finally {
+    modpackExportProgressBinding = null;
+  }
 }
 
 function showModpackExportModal() {
   if (!currentDetailInstance) return;
+  const requestedInstance = currentDetailInstance;
+  const requestedInfo = currentDetailInfo;
+  const gameDir = localStorage.getItem('gameDir') || '';
+  const exportTask = getModpackExportTask(requestedInstance, gameDir);
   const modal = ensureModpackExportModal();
+  modal.dataset.exportInstance = requestedInstance;
+  modal.dataset.exportGameDir = gameDir;
+  modal.dataset.exportTaskKey = exportTask.key;
   const listEl = document.getElementById('modpackExportItems');
   const summaryEl = document.getElementById('modpackExportSummary');
   const startBtn = document.getElementById('modpackExportStart');
@@ -612,6 +722,7 @@ function showModpackExportModal() {
   const close = () => {
     closed = true;
     modal.remove();
+    releaseModpackExportTask(exportTask);
   };
   modal.classList.remove('hidden');
   listEl.innerHTML = '<div class="mod-list-empty">正在扫描当前版本文件夹...</div>';
@@ -619,13 +730,12 @@ function showModpackExportModal() {
   startBtn.disabled = true;
   startBtn.textContent = '开始导出';
   if (nameInput) {
-    const defaultName = cleanModpackArchiveName(currentDetailInfo?.name || currentDetailInstance);
-    nameInput.value = defaultName || currentDetailInstance;
+    const defaultName = cleanModpackArchiveName(requestedInfo?.name || requestedInstance);
+    nameInput.value = defaultName || requestedInstance;
   }
   if (versionInput && !versionInput.value.trim()) {
     versionInput.value = '1.0.0';
   }
-  const gameDir = localStorage.getItem('gameDir') || '';
   const defaultOutputDir = localStorage.getItem('modpackExportOutputDir') || (gameDir ? `${gameDir}\\exports` : '');
   if (outputPathEl) {
     outputPathEl.textContent = defaultOutputDir || '默认 exports';
@@ -654,9 +764,9 @@ function showModpackExportModal() {
       }
     };
   }
-  if (!modpackExportTask.running) {
-    modpackExportTask.result = null;
-    modpackExportTask.error = null;
+  if (!isModpackExportTaskActive(exportTask)) {
+    exportTask.result = null;
+    exportTask.error = null;
     document.getElementById('modpackExportProgress')?.classList.add('hidden');
   }
 
@@ -676,7 +786,7 @@ function showModpackExportModal() {
     if (e.target === modal) close();
   };
 
-  if (modpackExportTask.running && modpackExportTask.name === currentDetailInstance) {
+  if (isModpackExportTaskActive(exportTask)) {
     listEl.innerHTML = '<div class="mod-list-empty">导出正在后台进行，关闭窗口不会取消任务。</div>';
     renderModpackExportTaskState();
     return;
@@ -688,7 +798,6 @@ function showModpackExportModal() {
     summaryEl.textContent = totalCount ? `已选 ${checkedCount}/${totalCount}` : '没有可导出的文件';
   };
 
-  const requestedInstance = currentDetailInstance;
   const loadToken = `${requestedInstance}:${Date.now()}`;
   modal.dataset.exportLoadToken = loadToken;
   setTimeout(async () => {
@@ -700,7 +809,9 @@ function showModpackExportModal() {
       name: requestedInstance,
     });
     if (closed) return;
-    if (modal.dataset.exportLoadToken !== loadToken || currentDetailInstance !== requestedInstance) return;
+    if (modal.dataset.exportLoadToken !== loadToken
+        || modal.dataset.exportTaskKey !== exportTask.key
+        || !isCurrentDetailContext(gameDir, requestedInstance)) return;
 
     if (!exportItems.length) {
       listEl.innerHTML = '<div class="mod-list-empty">这个版本空得很安静，没找到可导出的东西</div>';
@@ -745,35 +856,43 @@ function showModpackExportModal() {
         return;
       }
       const format = modal.querySelector('input[name="modpackExportFormat"]:checked')?.value || 'modrinth';
-      const exportName = cleanModpackArchiveName(nameInput?.value || currentDetailInstance);
+      const exportName = cleanModpackArchiveName(nameInput?.value || requestedInstance);
       const exportVersion = (versionInput?.value || '1.0.0').trim() || '1.0.0';
       if (!exportName) {
         showToast('整合包名称不能为空', 'warn');
         nameInput?.focus();
         return;
       }
-      modpackExportTask.running = true;
-      modpackExportTask.name = currentDetailInstance;
-      modpackExportTask.format = format === 'curseforge' ? 'CurseForge' : 'Modrinth';
-      modpackExportTask.result = null;
-      modpackExportTask.error = null;
-      modpackExportTask.progress = { stage: 'prepare', current: 0, total: 100, detail: 'Preparing export...' };
+      const activeTaskKey = activeModpackExportTaskKeys.get(requestedInstance);
+      if (activeTaskKey && activeTaskKey !== exportTask.key) {
+        showToast('另一个目录中的同名实例正在导出，请等待它完成', 'warn');
+        return;
+      }
+      exportTask.running = true;
+      exportTask.inFlight = true;
+      exportTask.format = format === 'curseforge' ? 'CurseForge' : 'Modrinth';
+      exportTask.result = null;
+      exportTask.error = null;
+      exportTask.progress = { stage: 'prepare', current: 0, total: 100, detail: 'Preparing export...' };
+      modpackExportTasks.set(exportTask.key, exportTask);
+      // 后端进度只携带实例名，同名实例同时导出时必须固定唯一接收者。
+      activeModpackExportTaskKeys.set(requestedInstance, exportTask.key);
       startBtn.disabled = true;
       startBtn.textContent = '导出中...';
       renderModpackExportTaskState();
       try {
         const result = await tauri.core.invoke('export_modpack', {
           gameDir,
-          name: currentDetailInstance,
+          name: requestedInstance,
           format,
           exportName,
           exportVersion,
           outputDir: modal.dataset.exportOutputDir || null,
           includePaths,
         });
-        modpackExportTask.running = false;
-        modpackExportTask.result = result;
-        modpackExportTask.progress = { stage: 'done', current: 100, total: 100, detail: 'Export complete' };
+        exportTask.running = false;
+        exportTask.result = result;
+        exportTask.progress = { stage: 'done', current: 100, total: 100, detail: 'Export complete' };
         renderModpackExportTaskState();
         const bundled = result.bundledFiles ? `，${result.bundledFiles} 个文件已内置打包` : '';
         const warnings = Array.isArray(result.warnings) && result.warnings.length
@@ -782,13 +901,19 @@ function showModpackExportModal() {
         showToast(`导出完成：${result.path}${bundled}${warnings}`, 'success', 10000);
         close();
       } catch (err) {
-        modpackExportTask.running = false;
-        modpackExportTask.error = String(err);
-        modpackExportTask.progress = { stage: 'error', current: 0, total: 0, detail: String(err) };
+        exportTask.running = false;
+        exportTask.error = String(err);
+        exportTask.progress = { stage: 'error', current: 0, total: 0, detail: String(err) };
         renderModpackExportTaskState();
         showToast('导出失败: ' + err, 'error', 10000);
         startBtn.disabled = false;
         startBtn.textContent = '开始导出';
+      } finally {
+        exportTask.inFlight = false;
+        if (activeModpackExportTaskKeys.get(requestedInstance) === exportTask.key) {
+          activeModpackExportTaskKeys.delete(requestedInstance);
+        }
+        releaseModpackExportTask(exportTask);
       }
     };
     } catch (err) {
@@ -865,6 +990,10 @@ function formatInstanceAnalyzeResult(result) {
 
 async function analyzeCurrentInstanceMods() {
   if (!currentDetailInstance) return;
+  const requestSeq = ++modAnalyzeSeq;
+  const requestedInstance = currentDetailInstance;
+  const requestedInfo = currentDetailInfo;
+  const requestedGameDir = localStorage.getItem('gameDir') || '';
   const btn = document.getElementById('instanceAnalyzeBtn');
   const originalText = btn?.textContent || 'MOD检测';
   if (btn) {
@@ -873,24 +1002,31 @@ async function analyzeCurrentInstanceMods() {
   }
   try {
     const tauri = await waitForTauri();
-    const gameDir = localStorage.getItem('gameDir') || '';
+    if (requestSeq !== modAnalyzeSeq
+        || !isCurrentDetailContext(requestedGameDir, requestedInstance)
+        || currentDetailInfo !== requestedInfo) return;
     const result = await tauri.core.invoke('analyze_instance_mods', {
-      gameDir,
-      name: currentDetailInstance,
-      mcVersion: currentDetailInfo?.mc_version || '',
-      loader: currentDetailInfo?.loader_type || '',
+      gameDir: requestedGameDir,
+      name: requestedInstance,
+      mcVersion: requestedInfo?.mc_version || '',
+      loader: requestedInfo?.loader_type || '',
     });
+    if (requestSeq !== modAnalyzeSeq
+        || !isCurrentDetailContext(requestedGameDir, requestedInstance)) return;
     await showAlert(formatInstanceAnalyzeResult(result), {
       title: 'MOD检测结果',
       confirmText: '我知道了',
     });
   } catch (err) {
+    if (requestSeq !== modAnalyzeSeq
+        || !isCurrentDetailContext(requestedGameDir, requestedInstance)) return;
     await showAlert(`检测失败：${err}`, {
       title: 'MOD检测失败',
       confirmText: '我知道了',
     });
   } finally {
-    if (btn) {
+    if (btn && requestSeq === modAnalyzeSeq
+        && isCurrentDetailContext(requestedGameDir, requestedInstance)) {
       btn.disabled = false;
       btn.textContent = originalText;
     }
@@ -934,40 +1070,42 @@ function afterNextPaint() {
 // 加载已安装 mod 列表
 async function loadModList(instanceName = currentDetailInstance) {
   if (!instanceName) return;
+  const gameDir = localStorage.getItem('gameDir') || '';
   const listEl = document.getElementById('modList');
   const loadSeq = ++modListLoadSeq;
   const requestId = `${instanceName}|${loadSeq}|${Date.now()}`;
   modListStreamRequestId = requestId;
+  modListStreamGameDir = gameDir;
   currentModList = [];
   if (listEl) listEl.innerHTML = '<div class="mod-list-empty">加载中...</div>';
   updateLocalModCounts();
   try {
     await afterNextPaint();
-    if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
+    if (loadSeq !== modListLoadSeq || !isCurrentDetailContext(gameDir, instanceName)) return;
     const tauri = await waitForTauri();
     await bindModListStreamEvents();
-    const gameDir = localStorage.getItem('gameDir') || '';
     tauri.core.invoke('stream_mods', { gameDir, name: instanceName, requestId })
-      .catch(err => loadModListFallback(instanceName, loadSeq, err));
+      .catch(err => loadModListFallback(instanceName, gameDir, loadSeq, err));
   } catch (err) {
+    if (loadSeq !== modListLoadSeq || !isCurrentDetailContext(gameDir, instanceName)) return;
     console.warn('加载 Mod 列表失败:', err);
     if (listEl) listEl.innerHTML = '<div class="mod-list-empty">加载失败</div>';
   }
 }
 
-async function loadModListFallback(instanceName, loadSeq, reason) {
-  if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
+async function loadModListFallback(instanceName, gameDir, loadSeq, reason) {
+  if (loadSeq !== modListLoadSeq || !isCurrentDetailContext(gameDir, instanceName)) return;
   console.warn('流式加载 Mod 列表失败，回退到普通列表:', reason);
   const listEl = document.getElementById('modList');
   try {
     const tauri = await waitForTauri();
-    const gameDir = localStorage.getItem('gameDir') || '';
     const mods = await tauri.core.invoke('list_mods', { gameDir, name: instanceName });
-    if (loadSeq !== modListLoadSeq || currentDetailInstance !== instanceName) return;
+    if (loadSeq !== modListLoadSeq || !isCurrentDetailContext(gameDir, instanceName)) return;
     currentModList = mods;
     updateLocalModCounts();
     renderModList(mods, { final: true });
   } catch (err) {
+    if (loadSeq !== modListLoadSeq || !isCurrentDetailContext(gameDir, instanceName)) return;
     console.warn('加载 Mod 列表失败:', err);
     if (listEl) listEl.innerHTML = '<div class="mod-list-empty">加载失败</div>';
   }
@@ -975,37 +1113,48 @@ async function loadModListFallback(instanceName, loadSeq, reason) {
 
 async function bindModListStreamEvents() {
   if (modListStreamEventBound) return;
-  const tauri = await waitForTauri();
-  await tauri.event.listen('mod-list-stream', (event) => {
-    const payload = event.payload || {};
-    if (payload.request_id !== modListStreamRequestId) return;
-    if (payload.name !== currentDetailInstance) return;
-    if (payload.status === 'batch') {
-      const incoming = Array.isArray(payload.mods) ? payload.mods : [];
-      const seen = new Set(currentModList.map(item => item.file_name));
-      incoming.forEach(item => {
-        if (!item?.file_name || seen.has(item.file_name)) return;
-        currentModList.push(item);
-        seen.add(item.file_name);
-      });
-      updateLocalModCounts();
-      renderModList(currentModList, { final: false });
-      return;
-    }
-    if (payload.status === 'icon') {
-      applyModIconPatches(payload.icons);
-      return;
-    }
-    if (payload.status === 'done') {
-      updateLocalModCounts();
-      renderModList(currentModList, { final: true });
-    }
-  });
-  modListStreamEventBound = true;
+  if (modListStreamEventBinding) return modListStreamEventBinding;
+  modListStreamEventBinding = (async () => {
+    const tauri = await waitForTauri();
+    await tauri.event.listen('mod-list-stream', (event) => {
+      const payload = event.payload || {};
+      if (payload.request_id !== modListStreamRequestId) return;
+      if (payload.name !== currentDetailInstance) return;
+      if ((localStorage.getItem('gameDir') || '') !== modListStreamGameDir) return;
+      if (payload.status === 'batch') {
+        const incoming = Array.isArray(payload.mods) ? payload.mods : [];
+        const seen = new Set(currentModList.map(item => item.file_name));
+        incoming.forEach(item => {
+          if (!item?.file_name || seen.has(item.file_name)) return;
+          currentModList.push(item);
+          seen.add(item.file_name);
+        });
+        updateLocalModCounts();
+        renderModList(currentModList, { final: false });
+        return;
+      }
+      if (payload.status === 'icon') {
+        applyModIconPatches(payload.icons);
+        return;
+      }
+      if (payload.status === 'done') {
+        updateLocalModCounts();
+        renderModList(currentModList, { final: true });
+      }
+    });
+    modListStreamEventBound = true;
+  })();
+  try {
+    await modListStreamEventBinding;
+  } finally {
+    modListStreamEventBinding = null;
+  }
 }
 
 function modActionId(fileName) {
-  return String(fileName || '').replace(/[^a-zA-Z0-9]/g, '_');
+  return Array.from(String(fileName || ''))
+    .map(character => character.codePointAt(0).toString(16))
+    .join('-');
 }
 
 function normalizeModIconUrls(iconUrl, iconUrls = []) {
@@ -1230,7 +1379,8 @@ function renderModList(mods, options = {}) {
 }
 
 function getModUpdateCheckKey() {
-  return `${currentDetailInstance || ''}|${currentDetailInfo?.mc_version || ''}|${currentDetailInfo?.loader_type || ''}`;
+  const gameDir = localStorage.getItem('gameDir') || '';
+  return `${gameDir}|${currentDetailInstance || ''}|${currentDetailInfo?.mc_version || ''}|${currentDetailInfo?.loader_type || ''}`;
 }
 
 function getModUpdateArgs() {
@@ -1262,6 +1412,7 @@ function resetModUpdateState(statusText = '只显示需要更新的 Mod') {
 
 async function loadModUpdateCache(options = {}) {
   if (!currentDetailInstance) return;
+  bindModUpdateCacheEvents();
   const { warm = false } = options;
   const checkKey = getModUpdateCheckKey();
   const seq = modUpdateSeq;
@@ -1279,7 +1430,7 @@ async function loadModUpdateCache(options = {}) {
     }
     applyModUpdateCacheView(nextView);
   } catch (err) {
-    if (seq !== modUpdateSeq) return;
+    if (seq !== modUpdateSeq || checkKey !== getModUpdateCheckKey()) return;
     const statusEl = document.getElementById('modUpdateStatus');
     const listEl = document.getElementById('modUpdateList');
     if (statusEl) statusEl.textContent = '读取更新缓存失败';
@@ -1354,28 +1505,27 @@ function formatModUpdateTime(seconds) {
 // 后端刷新完成会推事件回来；只有当前实例匹配时才更新 UI。
 async function bindModUpdateCacheEvents() {
   if (modUpdateCacheEventBound) return;
-  modUpdateCacheEventBound = true;
+  if (modUpdateCacheEventBinding) return modUpdateCacheEventBinding;
+  modUpdateCacheEventBinding = (async () => {
+    try {
+      const tauri = await waitForTauri();
+      await tauri.event.listen('mod-update-cache', (event) => {
+        const payload = event.payload || {};
+        if (payload.name !== currentDetailInstance) return;
+        if (payload.mcVersion !== (currentDetailInfo?.mc_version || '')) return;
+        if (payload.loader !== (currentDetailInfo?.loader_type || '')) return;
+        // 事件不携带游戏目录，只作为刷新信号，再按当前目录读取对应缓存。
+        loadModUpdateCache().catch(err => console.warn('刷新 Mod 更新缓存失败:', err));
+      });
+      modUpdateCacheEventBound = true;
+    } catch (err) {
+      console.warn('监听 Mod 更新缓存事件失败:', err);
+    }
+  })();
   try {
-    const tauri = await waitForTauri();
-    await tauri.event.listen('mod-update-cache', (event) => {
-      const payload = event.payload || {};
-      if (payload.name !== currentDetailInstance) return;
-      if (payload.mcVersion !== (currentDetailInfo?.mc_version || '')) return;
-      if (payload.loader !== (currentDetailInfo?.loader_type || '')) return;
-      if ((payload.status === 'ready' || payload.status === 'partial') && payload.view) {
-        applyModUpdateCacheView(payload.view, { fromEvent: true });
-        return;
-      }
-      const statusEl = document.getElementById('modUpdateStatus');
-      if (statusEl) {
-        const hasOldCache = currentModUpdateList.length || currentModSourceLinks.length;
-        statusEl.textContent = hasOldCache
-          ? `后台检测失败，继续使用旧缓存：${payload.message || '未知错误'}`
-          : `后台检测失败：${payload.message || '未知错误'}`;
-      }
-    });
-  } catch (err) {
-    console.warn('监听 Mod 更新缓存事件失败:', err);
+    await modUpdateCacheEventBinding;
+  } finally {
+    modUpdateCacheEventBinding = null;
   }
 }
 
@@ -1511,7 +1661,10 @@ function ensureModBulkUpdateModal() {
 
 function showModBulkUpdateModal() {
   const modal = ensureModBulkUpdateModal();
+  if (modal.dataset.running === 'true') return;
   modal.dataset.running = 'false';
+  modal.dataset.instanceName = currentDetailInstance || '';
+  modal.dataset.gameDir = localStorage.getItem('gameDir') || '';
   switchModBulkTab(modal, 'updates');
   renderModBulkUpdateChoices(modal);
   refreshModRollbackRecords(modal);
@@ -1618,6 +1771,25 @@ function syncModBulkTabState(modal) {
   }
 }
 
+function setModBulkOperationRunning(modal, running) {
+  if (!modal) return;
+  modal.dataset.running = running ? 'true' : 'false';
+  modal.querySelectorAll('#modBulkUpdateStart, #modBulkRollback, #modBulkDeleteOld')
+    .forEach(button => { if (running) button.disabled = true; });
+  const cancelBtn = modal.querySelector('#modBulkUpdateCancel');
+  if (cancelBtn) cancelBtn.disabled = running;
+  modal.querySelectorAll('.mod-bulk-update-check, #modBulkUpdateSelectAll')
+    .forEach(input => { input.disabled = running; });
+  syncModBulkTabState(modal);
+}
+
+function isModBulkInstanceCurrent(modal, instanceName) {
+  return !!instanceName
+    && currentDetailInstance === instanceName
+    && modal?.dataset.instanceName === instanceName
+    && modal.dataset.gameDir === (localStorage.getItem('gameDir') || '');
+}
+
 function syncModBulkSelectAll(modal) {
   const selectAll = modal.querySelector('#modBulkUpdateSelectAll');
   if (!selectAll) return;
@@ -1626,16 +1798,21 @@ function syncModBulkSelectAll(modal) {
 }
 
 async function refreshModRollbackRecords(modal) {
+  const instanceName = modal?.dataset.instanceName || currentDetailInstance;
+  const gameDir = modal?.dataset.gameDir || localStorage.getItem('gameDir') || '';
+  const requestSeq = ++modRollbackListSeq;
   const listEl = modal.querySelector('#modBulkRollbackList');
   if (listEl) listEl.innerHTML = '<div class="mod-list-empty">正在读取回档记录...</div>';
   try {
     const tauri = await waitForTauri();
     const records = await tauri.core.invoke('list_mod_update_rollbacks', {
-      gameDir: localStorage.getItem('gameDir') || '',
-      name: currentDetailInstance,
+      gameDir,
+      name: instanceName,
     });
+    if (requestSeq !== modRollbackListSeq || !isModBulkInstanceCurrent(modal, instanceName)) return;
     renderModRollbackRecords(modal, records);
   } catch (err) {
+    if (requestSeq !== modRollbackListSeq || !isModBulkInstanceCurrent(modal, instanceName)) return;
     currentModRollbackRecords = [];
     const rollbackBtn = modal.querySelector('#modBulkRollback');
     if (rollbackBtn) rollbackBtn.disabled = true;
@@ -1666,41 +1843,67 @@ function renderModRollbackRecords(modal, records) {
 
 async function rollbackModUpdates(modal) {
   if (!currentModRollbackRecords.length || modal.dataset.running === 'true') return;
-  const rollbackBtn = modal.querySelector('#modBulkRollback');
+  const instanceName = modal.dataset.instanceName || currentDetailInstance;
+  if (!instanceName || currentDetailInstance !== instanceName) return;
+  const gameDir = modal.dataset.gameDir || localStorage.getItem('gameDir') || '';
   const statusEl = modal.querySelector('#modBulkUpdateStatus');
   const recordIds = currentModRollbackRecords.map(item => item.id).filter(Boolean);
   if (!recordIds.length) return;
-  if (rollbackBtn) rollbackBtn.disabled = true;
+  setModBulkOperationRunning(modal, true);
   if (statusEl) statusEl.textContent = `正在回档 ${recordIds.length} 个 Mod...`;
   try {
     const tauri = await waitForTauri();
-    const records = await tauri.core.invoke('rollback_mod_updates', {
-      gameDir: localStorage.getItem('gameDir') || '',
-      name: currentDetailInstance,
+    const result = await tauri.core.invoke('rollback_mod_updates', {
+      gameDir,
+      name: instanceName,
       recordIds,
     });
-    renderModRollbackRecords(modal, records);
-    await loadModList(currentDetailInstance);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
+    await loadModList(instanceName);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     await refreshOldModBackups(modal);
-    if (statusEl) statusEl.textContent = 'Mod 已回档';
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
+    await refreshModRollbackRecords(modal);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
+    const succeeded = Array.isArray(result?.succeeded) ? result.succeeded : [];
+    const failed = Array.isArray(result?.failed) ? result.failed : [];
+    if (statusEl) {
+      statusEl.textContent = failed.length
+        ? `已回档 ${succeeded.length} 个，失败 ${failed.length} 个`
+        : `已回档 ${succeeded.length} 个 Mod`;
+    }
+    if (failed.length) {
+      const details = failed
+        .map(item => `${item?.displayName || item?.id || '未知 Mod'}: ${item?.error || '未知错误'}`)
+        .join('\n');
+      await showAlert?.(details, { title: succeeded.length ? '部分回档失败' : '回档失败' });
+    }
   } catch (err) {
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (statusEl) statusEl.textContent = `回档失败：${err}`;
     await showAlert?.(String(err), { title: '回档失败' });
     renderModRollbackRecords(modal, currentModRollbackRecords);
+  } finally {
+    setModBulkOperationRunning(modal, false);
   }
 }
 
 async function refreshOldModBackups(modal) {
+  const instanceName = modal?.dataset.instanceName || currentDetailInstance;
+  const gameDir = modal?.dataset.gameDir || localStorage.getItem('gameDir') || '';
+  const requestSeq = ++oldModBackupListSeq;
   const listEl = modal.querySelector('#modBulkOldList');
   if (listEl) listEl.innerHTML = '<div class="mod-list-empty">正在读取旧版列表...</div>';
   try {
     const tauri = await waitForTauri();
     const backups = await tauri.core.invoke('list_old_mod_backups', {
-      gameDir: localStorage.getItem('gameDir') || '',
-      name: currentDetailInstance,
+      gameDir,
+      name: instanceName,
     });
+    if (requestSeq !== oldModBackupListSeq || !isModBulkInstanceCurrent(modal, instanceName)) return;
     renderOldModBackups(modal, backups);
   } catch (err) {
+    if (requestSeq !== oldModBackupListSeq || !isModBulkInstanceCurrent(modal, instanceName)) return;
     currentOldModBackups = [];
     const deleteBtn = modal.querySelector('#modBulkDeleteOld');
     if (deleteBtn) deleteBtn.disabled = true;
@@ -1746,66 +1949,75 @@ function formatModBackupTime(ms) {
 
 async function deleteOldModBackups(modal) {
   if (!currentOldModBackups.length || modal.dataset.running === 'true') return;
-  const deleteBtn = modal.querySelector('#modBulkDeleteOld');
+  const instanceName = modal.dataset.instanceName || currentDetailInstance;
+  if (!instanceName || currentDetailInstance !== instanceName) return;
+  const gameDir = modal.dataset.gameDir || localStorage.getItem('gameDir') || '';
   const statusEl = modal.querySelector('#modBulkUpdateStatus');
   const fileNames = currentOldModBackups.map(item => item.fileName).filter(Boolean);
   if (!fileNames.length) return;
-  if (deleteBtn) deleteBtn.disabled = true;
+  setModBulkOperationRunning(modal, true);
   if (statusEl) statusEl.textContent = `正在删除 ${fileNames.length} 个旧版 Mod...`;
   try {
     const tauri = await waitForTauri();
     const backups = await tauri.core.invoke('delete_old_mod_backups', {
-      gameDir: localStorage.getItem('gameDir') || '',
-      name: currentDetailInstance,
+      gameDir,
+      name: instanceName,
       fileNames,
     });
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     renderOldModBackups(modal, backups);
     await refreshModRollbackRecords(modal);
-    await loadModList(currentDetailInstance);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
+    await loadModList(instanceName);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (statusEl) statusEl.textContent = '旧版 Mod 已删除';
   } catch (err) {
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (statusEl) statusEl.textContent = `删除旧版失败：${err}`;
     await showAlert?.(String(err), { title: '删除旧版失败' });
     renderOldModBackups(modal, currentOldModBackups);
+  } finally {
+    setModBulkOperationRunning(modal, false);
   }
 }
 
 async function runSelectedModUpdates(modal) {
   if (!modUpdateReady) return;
+  const instanceName = modal.dataset.instanceName || currentDetailInstance;
+  if (!instanceName || currentDetailInstance !== instanceName) return;
+  const requestedArgs = getModUpdateArgs();
+  if (requestedArgs.name !== instanceName || requestedArgs.gameDir !== modal.dataset.gameDir) return;
   const selectedFileNames = selectedModUpdateFileNames(modal);
   if (!selectedFileNames.length) return;
   const startBtn = modal.querySelector('#modBulkUpdateStart');
-  const cancelBtn = modal.querySelector('#modBulkUpdateCancel');
-  const deleteBtn = modal.querySelector('#modBulkDeleteOld');
-  const rollbackBtn = modal.querySelector('#modBulkRollback');
   const statusEl = modal.querySelector('#modBulkUpdateStatus');
-  modal.dataset.running = 'true';
+  setModBulkOperationRunning(modal, true);
   if (startBtn) {
     startBtn.disabled = true;
     startBtn.textContent = '更新中...';
   }
-  if (cancelBtn) cancelBtn.disabled = true;
-  if (deleteBtn) deleteBtn.disabled = true;
-  if (rollbackBtn) rollbackBtn.disabled = true;
-  modal.querySelectorAll('.mod-bulk-update-check, #modBulkUpdateSelectAll')
-    .forEach(input => input.disabled = true);
   if (statusEl) statusEl.textContent = `正在更新 ${selectedFileNames.length} 个 Mod...`;
 
   try {
     const tauri = await waitForTauri();
     const result = await tauri.core.invoke('update_mods_from_cache', {
-      ...getModUpdateArgs(),
+      ...requestedArgs,
       selectedFileNames,
     });
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (result?.view) {
       applyModUpdateCacheView(result.view, { fromEvent: true });
     }
-    await loadModList(currentDetailInstance);
+    await loadModList(instanceName);
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     const failed = Array.isArray(result?.failed) ? result.failed : [];
+    const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
     if (statusEl) {
       statusEl.textContent = failed.length
         ? `已更新 ${result?.updated || 0} 个，失败 ${failed.length} 个`
-        : `已更新 ${result?.updated || selectedFileNames.length} 个 Mod`;
+        : warnings.length
+          ? `已更新 ${result?.updated || selectedFileNames.length} 个 Mod，有 ${warnings.length} 条提示`
+          : `已更新 ${result?.updated || selectedFileNames.length} 个 Mod`;
     }
     renderModBulkUpdateChoices(modal);
     if (Array.isArray(result?.oldBackups)) {
@@ -1813,26 +2025,31 @@ async function runSelectedModUpdates(modal) {
     } else {
       await refreshOldModBackups(modal);
     }
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (Array.isArray(result?.rollbackRecords)) {
       renderModRollbackRecords(modal, result.rollbackRecords);
     } else {
       await refreshModRollbackRecords(modal);
     }
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (failed.length) {
       await showAlert?.(failed.join('\n'), { title: '部分更新失败' });
     }
+    if (warnings.length) {
+      await showAlert?.(warnings.join('\n'), { title: '更新完成，但有提示' });
+    }
   } catch (err) {
+    if (!isModBulkInstanceCurrent(modal, instanceName)) return;
     if (statusEl) statusEl.textContent = `更新失败：${err}`;
     await showAlert?.(String(err), { title: '更新失败' });
   } finally {
-    modal.dataset.running = 'false';
-    if (cancelBtn) cancelBtn.disabled = false;
+    setModBulkOperationRunning(modal, false);
     if (startBtn) startBtn.textContent = '开始更新';
-    modal.querySelectorAll('.mod-bulk-update-check, #modBulkUpdateSelectAll')
-      .forEach(input => input.disabled = false);
-    updateModBulkSelectionSummary(modal);
-    renderOldModBackups(modal, currentOldModBackups);
-    renderModRollbackRecords(modal, currentModRollbackRecords);
+    if (isModBulkInstanceCurrent(modal, instanceName)) {
+      updateModBulkSelectionSummary(modal);
+      renderOldModBackups(modal, currentOldModBackups);
+      renderModRollbackRecords(modal, currentModRollbackRecords);
+    }
   }
 }
 
@@ -1850,8 +2067,7 @@ function applyModSourceLinks(links) {
 }
 
 function _applyModUrls(info) {
-  const safeId = info.file_name.replace(/[^a-zA-Z0-9]/g, '_');
-  const actionsEl = document.getElementById('mod-actions-' + safeId);
+  const actionsEl = document.getElementById('mod-actions-' + modActionId(info.file_name));
   if (!actionsEl) return;
 
   const deleteBtn = actionsEl.querySelector('.mod-delete-btn');
@@ -1951,11 +2167,18 @@ function bindModListEvents() {
     const toggleBtn = target.closest('.mod-toggle');
     if (toggleBtn && listEl.contains(toggleBtn)) {
       e.stopPropagation();
+      const requestedGameDir = localStorage.getItem('gameDir') || '';
+      const requestedInstance = currentDetailInstance;
+      const fileName = toggleBtn.dataset.file;
+      if (!requestedInstance || !fileName) return;
       try {
         const tauri = await waitForTauri();
-        const gameDir = localStorage.getItem('gameDir') || '';
-        const fileName = toggleBtn.dataset.file;
-        const enabled = await tauri.core.invoke('toggle_mod', { gameDir, name: currentDetailInstance, fileName });
+        const enabled = await tauri.core.invoke('toggle_mod', {
+          gameDir: requestedGameDir,
+          name: requestedInstance,
+          fileName,
+        });
+        if (!isCurrentDetailContext(requestedGameDir, requestedInstance)) return;
         resetModUpdateState('正在读取更新缓存...');
         applyLocalModToggle(fileName, !!enabled);
         loadModUpdateCache({ warm: true });
@@ -1981,11 +2204,18 @@ function bindModListEvents() {
     }
 
     clearTimeout(parseInt(deleteBtn.dataset.timerId));
+    const requestedGameDir = localStorage.getItem('gameDir') || '';
+    const requestedInstance = currentDetailInstance;
+    const fileName = deleteBtn.dataset.file;
+    if (!requestedInstance || !fileName) return;
     try {
       const tauri = await waitForTauri();
-      const gameDir = localStorage.getItem('gameDir') || '';
-      const fileName = deleteBtn.dataset.file;
-      await tauri.core.invoke('delete_mod', { gameDir, name: currentDetailInstance, fileName });
+      await tauri.core.invoke('delete_mod', {
+        gameDir: requestedGameDir,
+        name: requestedInstance,
+        fileName,
+      });
+      if (!isCurrentDetailContext(requestedGameDir, requestedInstance)) return;
       applyLocalModDelete(fileName);
     } catch (err) {
       console.warn('删除 Mod 失败:', err);
@@ -2007,7 +2237,6 @@ function bindModUpdateListEvents() {
 }
 
 let currentOnlineCategory = 'mod';
-let _onlineSearchId = 0; // 防止异步竞态
 
 // 持久化缓存（localStorage，3天过期，新的覆盖旧的）
 const CACHE_KEY = 'onlineSearchCache_v2';
@@ -2096,36 +2325,49 @@ if (onlineCatContainer) {
 
 // 在线搜索
 async function searchOnlineMods() {
+  const searchId = ++_onlineSearchId;
+  const requestedInstance = currentDetailInstance;
   const query = document.getElementById('onlineModSearch')?.value?.trim() || '';
-
   const listEl = document.getElementById('onlineModList');
   if (!listEl) return;
+  const loader = currentDetailInfo?.loader_type || '';
+  const projectType = currentOnlineCategory;
 
   // 检查缓存
-  const cacheKey = `all:${currentDetailInfo?.loader_type || ''}:${currentOnlineCategory}:${query}`;
+  const cacheKey = `all:${loader}:${projectType}:${query}`;
   const cached = onlineSearchCache[cacheKey];
   if (cached) {
-    renderOnlineResults(cached._data || cached, query);
+    const currentQuery = document.getElementById('onlineModSearch')?.value?.trim() || '';
+    if (searchId === _onlineSearchId
+        && currentDetailInstance === requestedInstance
+        && currentOnlineCategory === projectType
+        && currentQuery === query) {
+      renderOnlineResults(cached._data || cached, query);
+    }
     return;
   }
 
   listEl.innerHTML = '<div class="mod-list-empty">搜索中...</div>';
 
-  const searchId = ++_onlineSearchId;
-
   try {
     const tauri = await waitForTauri();
     const mcVersion = '';
-    const loader = currentDetailInfo?.loader_type || '';
-    const projectType = currentOnlineCategory;
     const results = await tauri.core.invoke('search_online_mods', { query, mcVersion, loader, projectType });
-    // 丢弃过期请求（快速切换类别时旧请求晚回来）
-    if (searchId !== _onlineSearchId) return;
+    // 请求必须仍属于当前实例、类别和关键词，迟到响应不能覆盖新页面。
+    const currentQuery = document.getElementById('onlineModSearch')?.value?.trim() || '';
+    if (searchId !== _onlineSearchId
+        || currentDetailInstance !== requestedInstance
+        || currentOnlineCategory !== projectType
+        || currentQuery !== query) return;
     onlineSearchCache[cacheKey] = results;
     _saveCache(onlineSearchCache);
     renderOnlineResults(results, query);
   } catch (err) {
-    if (searchId !== _onlineSearchId) return;
+    const currentQuery = document.getElementById('onlineModSearch')?.value?.trim() || '';
+    if (searchId !== _onlineSearchId
+        || currentDetailInstance !== requestedInstance
+        || currentOnlineCategory !== projectType
+        || currentQuery !== query) return;
     listEl.innerHTML = `<div class="mod-list-empty">搜索失败: ${escapeHtml(err)}</div>`;
   }
 }
@@ -2155,13 +2397,19 @@ function ensureOnlineModVersionModal() {
   return document.getElementById('onlineModVersionModal');
 }
 
-async function showOnlineModVersionModal(mod) {
+let activeOnlineModVersionModalClose = null;
+
+function showOnlineModVersionModal(mod) {
   const modal = ensureOnlineModVersionModal();
   const titleEl = document.getElementById('onlineModVersionTitle');
   const filterEl = document.getElementById('onlineModVersionFilter');
   const listEl = document.getElementById('onlineModVersionList');
   const cancelBtn = document.getElementById('onlineModVersionCancel');
   if (!modal || !listEl) return null;
+  // 新请求接管公共弹窗时先结束旧请求，避免迟到响应覆盖当前列表。
+  activeOnlineModVersionModalClose?.(null);
+  const requestedLoader = currentDetailInfo?.loader_type || '';
+  const requestedProjectType = currentOnlineCategory;
 
   const title = mod.cn_title ? `${mod.cn_title} (${mod.title})` : mod.title;
   if (titleEl) titleEl.textContent = `${title} - 选择下载版本`;
@@ -2169,26 +2417,19 @@ async function showOnlineModVersionModal(mod) {
   listEl.innerHTML = '<div class="mod-list-empty">正在加载版本列表...</div>';
   modal.classList.remove('hidden');
 
-  const tauri = await waitForTauri();
-  let versions = [];
-  let loadError = '';
-  try {
-    versions = await tauri.core.invoke('get_online_mod_versions', {
-      projectId: mod.project_id,
-      loader: currentDetailInfo?.loader_type || '',
-      projectType: currentOnlineCategory,
-    });
-  } catch (err) {
-    loadError = String(err);
-  }
-
   return new Promise((resolve) => {
     let resolved = false;
+    let loading = true;
+    let versions = [];
+    let loadError = '';
 
     const close = (value) => {
       if (resolved) return;
       resolved = true;
-      modal.classList.add('hidden');
+      if (activeOnlineModVersionModalClose === close) {
+        activeOnlineModVersionModalClose = null;
+        modal.classList.add('hidden');
+      }
       cancelBtn?.removeEventListener('click', onCancel);
       modal.removeEventListener('click', onOverlayClick);
       filterEl?.removeEventListener('input', render);
@@ -2201,6 +2442,10 @@ async function showOnlineModVersionModal(mod) {
     };
 
     const render = () => {
+      if (loading) {
+        listEl.innerHTML = '<div class="mod-list-empty">正在加载版本列表...</div>';
+        return;
+      }
       if (loadError) {
         listEl.innerHTML = `<div class="mod-list-empty">加载失败: ${escapeHtml(loadError)}</div>`;
         return;
@@ -2253,12 +2498,37 @@ async function showOnlineModVersionModal(mod) {
       });
     };
 
+    activeOnlineModVersionModalClose = close;
     cancelBtn?.addEventListener('click', onCancel);
     modal.addEventListener('click', onOverlayClick);
     filterEl?.addEventListener('input', render);
 
     render();
     filterEl?.focus();
+    (async () => {
+      try {
+        const tauri = await waitForTauri();
+        const result = await tauri.core.invoke('get_online_mod_versions', {
+          projectId: mod.project_id,
+          loader: requestedLoader,
+          projectType: requestedProjectType,
+        });
+        if (resolved) return;
+        const currentMc = currentDetailInfo?.mc_version || '';
+        versions = (Array.isArray(result) ? result : []).filter(version => {
+          if (!currentMc) return true;
+          return String(version.mc_versions || '')
+            .split(',')
+            .map(item => item.trim())
+            .includes(currentMc);
+        });
+      } catch (err) {
+        if (resolved) return;
+        loadError = String(err);
+      }
+      loading = false;
+      render();
+    })();
   });
 }
 
@@ -2328,8 +2598,14 @@ function renderOnlineResults(results, query) {
 
   // 绑定下载事件
   listEl.querySelectorAll('.online-mod-dl-btn').forEach(btn => {
+    let cancelCurrentDownload = null;
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
+      e.preventDefault();
+      if (cancelCurrentDownload) {
+        await cancelCurrentDownload();
+        return;
+      }
       if (btn.disabled) return;
       btn.disabled = true;
       const originalText = btn.textContent;
@@ -2346,17 +2622,20 @@ function renderOnlineResults(results, query) {
         }
 
         const versionId = selectedVersion.version_id || '';
-        const taskName = `online-mod:${currentDetailInstance}:${btn.dataset.project}:${versionId}`;
+        const gameDir = localStorage.getItem('gameDir') || '';
+        const instanceName = currentDetailInstance;
+        const instanceInfo = currentDetailInfo ? { ...currentDetailInfo } : null;
+        const projectId = btn.dataset.project;
+        const projectType = currentOnlineCategory;
+        const taskName = `online-mod:${instanceName}:${projectId}:${versionId}`;
         let downloading = true;
         const tauri = await waitForTauri();
-        const onCancelDownload = async (event) => {
-          event.stopPropagation();
-          event.preventDefault();
+        cancelCurrentDownload = async () => {
           if (!downloading) return;
           btn.disabled = true;
           btn.textContent = '取消中...';
           try {
-            await tauri.core.invoke('cancel_modpack_install', { fileName: taskName });
+            await tauri.core.invoke('cancel_modpack_install', { fileName: taskName, gameDir });
           } catch (err) {
             btn.disabled = false;
             btn.textContent = '取消';
@@ -2365,25 +2644,26 @@ function renderOnlineResults(results, query) {
         };
         btn.disabled = false;
         btn.textContent = '取消';
-        btn.addEventListener('click', onCancelDownload);
-        const gameDir = localStorage.getItem('gameDir') || '';
         const result = await tauri.core.invoke('download_online_mod', {
           gameDir,
-          name: currentDetailInstance,
-          projectId: btn.dataset.project,
-          mcVersion: selectedVersion.mc_version || currentDetailInfo?.mc_version || '',
-          loader: selectedVersion.loader || currentDetailInfo?.loader_type || '',
-          projectType: currentOnlineCategory,
+          name: instanceName,
+          projectId,
+          mcVersion: instanceInfo?.mc_version || '',
+          loader: instanceInfo?.loader_type || '',
+          projectType,
           versionId,
         }).finally(() => {
           downloading = false;
-          btn.removeEventListener('click', onCancelDownload);
+          cancelCurrentDownload = null;
         });
         btn.textContent = '已下载';
         btn.classList.add('done');
         // 刷新已安装列表
-        resetModUpdateState('正在读取更新缓存...');
-        loadModList();
+        if (currentDetailInstance === instanceName
+            && (localStorage.getItem('gameDir') || '') === gameDir) {
+          resetModUpdateState('正在读取更新缓存...');
+          loadModList();
+        }
       } catch (err) {
         const errMsg = String(err);
         if (errMsg.includes('没有找到') || errMsg.includes('无可用')) {
@@ -2468,11 +2748,12 @@ function initInstanceDetailPage() {
   // 启动按钮
   document.getElementById('instanceLaunchBtn')?.addEventListener('click', () => {
     if (!currentDetailInstance) return;
+    const targetInstance = currentDetailInstance;
     const sel = document.getElementById('versionSelector');
     if (sel) {
-      sel.value = currentDetailInstance;
-      localStorage.setItem('selectedVersion', currentDetailInstance);
-      syncVersionDropdown(instancesCache, currentDetailInstance);
+      sel.value = targetInstance;
+      localStorage.setItem('selectedVersion', targetInstance);
+      syncVersionDropdown(instancesCache, targetInstance);
     }
     const pages = document.querySelectorAll('.page');
     const navItems = document.querySelectorAll('.nav-item');
@@ -2480,33 +2761,40 @@ function initInstanceDetailPage() {
     navItems.forEach(n => n.classList.remove('active'));
     document.getElementById('pageHome').classList.add('active');
     document.querySelector('[data-page="home"]')?.classList.add('active');
-    setTimeout(() => document.getElementById('launchBtn')?.click(), 300);
+    if (typeof window.launchMinecraftInstance === 'function') {
+      window.launchMinecraftInstance(targetInstance);
+    } else {
+      showToast('启动功能尚未初始化，请稍后重试', 'warn');
+    }
   });
 
   // 删除按钮
   document.getElementById('instanceDeleteBtn')?.addEventListener('click', async () => {
     if (!currentDetailInstance) return;
+    const instanceName = currentDetailInstance;
+    const instanceInfo = currentDetailInfo ? { ...currentDetailInfo } : null;
     try {
       const gameDir = localStorage.getItem('gameDir') || '';
       const confirmed = await showConfirm(
-        `确定删除版本 ${currentDetailInstance} 吗？此操作不可恢复。`,
+        `确定删除版本 ${instanceName} 吗？此操作不可恢复。`,
         { title: '删除确认', kind: 'danger' }
       );
       if (!confirmed) return;
       const tauri = await waitForTauri();
-      await tauri.core.invoke('delete_version', { gameDir, name: currentDetailInstance });
-      ['mem', 'javaMode', 'javaPath', 'jvmArgs', 'jvmPreset'].forEach(prefix => {
-        localStorage.removeItem(instanceSettingKey(prefix));
-      });
+      await tauri.core.invoke('delete_version', { gameDir, name: instanceName });
+      migrateInstanceSettings(instanceName, gameDir);
+      removeInstanceSettings(instanceName, gameDir);
       // 只有同版本同loader的最后一个实例删除时才清缓存
-      const mcV = currentDetailInfo?.mc_version;
-      const ldr = currentDetailInfo?.loader_type;
+      const mcV = instanceInfo?.mc_version;
+      const ldr = instanceInfo?.loader_type;
       const othersSame = (typeof instancesCache !== 'undefined' ? instancesCache : [])
-        .filter(v => v.name !== currentDetailInstance && v.mc_version === mcV && v.loader_type === ldr);
+        .filter(v => v.name !== instanceName && v.mc_version === mcV && v.loader_type === ldr);
       if (othersSame.length === 0) {
         clearInstanceCache(mcV, ldr);
       }
-      document.getElementById('instanceBackBtn')?.click();
+      if (currentDetailInstance === instanceName) {
+        document.getElementById('instanceBackBtn')?.click();
+      }
       loadInstalledVersions();
     } catch (err) {
       showToast('删除失败: ' + err, 'error');

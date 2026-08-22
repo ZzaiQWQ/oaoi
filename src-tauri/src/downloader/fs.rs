@@ -38,6 +38,24 @@ pub fn resume_path(dest: &Path) -> PathBuf {
     with_suffix(dest, ".oaoi.dl")
 }
 
+pub fn streaming_fallback_path(dest: &Path) -> PathBuf {
+    with_suffix(dest, ".oaoi.stream")
+}
+
+pub fn resume_temp_path(dest: &Path) -> PathBuf {
+    resume_path(dest).with_extension("oaoi.dl.tmp")
+}
+
+pub fn managed_paths(dest: &Path) -> Vec<PathBuf> {
+    vec![
+        dest.to_path_buf(),
+        partial_path(dest),
+        resume_path(dest),
+        streaming_fallback_path(dest),
+        resume_temp_path(dest),
+    ]
+}
+
 fn with_suffix(dest: &Path, suffix: &str) -> PathBuf {
     let mut out = dest.to_path_buf();
     let name = dest
@@ -54,6 +72,12 @@ pub fn finalize_part_file(
     expected_size: Option<u64>,
     expected_sha1: Option<&str>,
 ) -> Result<(), String> {
+    if dest.is_dir() {
+        return Err(format!(
+            "destination path is a directory: {}",
+            dest.display()
+        ));
+    }
     if let Some(expected_size) = expected_size {
         let actual_size = stdfs::metadata(part)
             .map_err(|e| format!("read part metadata failed: {}", e))?
@@ -101,6 +125,12 @@ pub fn existing_file_ok(
 }
 
 fn replace_part_file(part: &Path, dest: &Path) -> Result<(), String> {
+    if dest.is_dir() {
+        return Err(format!(
+            "destination path is a directory: {}",
+            dest.display()
+        ));
+    }
     let backup = if dest.exists() {
         let backup = replacement_backup_path(dest);
         stdfs::rename(dest, &backup).map_err(|e| format!("backup old file failed: {}", e))?;
@@ -116,12 +146,35 @@ fn replace_part_file(part: &Path, dest: &Path) -> Result<(), String> {
             }
             Ok(())
         }
-        Err(error) => {
-            if let Some(backup) = backup {
-                let _ = stdfs::rename(&backup, dest);
-            }
-            Err(format!("move part file failed: {}", error))
-        }
+        Err(error) => Err(recover_replaced_file(error, backup.as_deref(), dest)),
+    }
+}
+
+pub fn sync_file_data(path: &Path) -> Result<(), String> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open part file for sync failed: {}", e))?
+        .sync_data()
+        .map_err(|e| format!("sync part file failed: {}", e))
+}
+
+fn recover_replaced_file(replace_error: io::Error, backup: Option<&Path>, dest: &Path) -> String {
+    let Some(backup) = backup else {
+        return format!("move part file failed: {}", replace_error);
+    };
+    match stdfs::rename(backup, dest) {
+        Ok(()) => format!(
+            "move part file failed: {}; old file restored",
+            replace_error
+        ),
+        Err(restore_error) => format!(
+            "move part file failed: {}; restore old file failed: {}; backup retained at {}",
+            replace_error,
+            restore_error,
+            backup.display()
+        ),
     }
 }
 
@@ -210,5 +263,82 @@ mod tests {
         assert!(error.contains("size check failed"));
         assert!(!part.exists());
         let _ = stdfs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replace_failure_restores_existing_destination() {
+        let dir = unique_test_dir("replace-restore");
+        stdfs::create_dir_all(&dir).unwrap();
+        let part = dir.join("missing.part");
+        let dest = dir.join("file.bin");
+        stdfs::write(&dest, b"old").unwrap();
+
+        let error = replace_part_file(&part, &dest).unwrap_err();
+
+        assert!(error.contains("old file restored"));
+        assert_eq!(stdfs::read(&dest).unwrap(), b"old");
+        assert!(!dir_has_replacement_backup(&dir));
+        let _ = stdfs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_restore_keeps_backup_and_reports_path() {
+        let dir = unique_test_dir("replace-backup");
+        stdfs::create_dir_all(&dir).unwrap();
+        let backup = dir.join("file.bin.backup");
+        let dest = dir.join("file.bin");
+        stdfs::write(&backup, b"old").unwrap();
+        stdfs::create_dir_all(&dest).unwrap();
+        stdfs::write(dest.join("occupied"), b"x").unwrap();
+
+        let error = recover_replaced_file(
+            io::Error::new(io::ErrorKind::Other, "replace failed"),
+            Some(&backup),
+            &dest,
+        );
+
+        assert!(error.contains("restore old file failed"));
+        assert!(error.contains(&backup.display().to_string()));
+        assert_eq!(stdfs::read(&backup).unwrap(), b"old");
+        let _ = stdfs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn finalize_rejects_existing_destination_directory() {
+        let dir = unique_test_dir("directory-destination");
+        stdfs::create_dir_all(&dir).unwrap();
+        let part = dir.join("file.bin.oaoi.part");
+        let dest = dir.join("file.bin");
+        stdfs::write(&part, b"new").unwrap();
+        stdfs::create_dir_all(&dest).unwrap();
+
+        let error = finalize_part_file(&part, &dest, Some(3), None).unwrap_err();
+
+        assert!(error.contains("destination path is a directory"));
+        assert!(dest.is_dir());
+        assert_eq!(stdfs::read(&part).unwrap(), b"new");
+        let _ = stdfs::remove_dir_all(dir);
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "oaoi-{label}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|time| time.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    fn dir_has_replacement_backup(dir: &Path) -> bool {
+        stdfs::read_dir(dir)
+            .map(|items| {
+                items.filter_map(Result::ok).any(|item| {
+                    item.file_name()
+                        .to_string_lossy()
+                        .contains(".oaoi.replace.")
+                })
+            })
+            .unwrap_or(false)
     }
 }

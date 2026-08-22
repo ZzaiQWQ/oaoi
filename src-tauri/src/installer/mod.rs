@@ -6,6 +6,10 @@ pub mod vanilla;
 
 // ===== 公共工具函数（供 forge/neoforge 共用） =====
 
+const MAX_INSTALLER_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_INSTALLER_ENTRY_SIZE: u64 = 512 * 1024 * 1024;
+const MAX_INSTALLER_TOTAL_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Maven 坐标转文件路径: "net.minecraftforge:forge:1.21.1-52.0.1" → "net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1.jar"
 pub fn maven_name_to_path(name: &str) -> String {
     let parts: Vec<&str> = name.split(':').collect();
@@ -121,10 +125,9 @@ pub fn build_data_map(
     profile: &serde_json::Value,
     libs_dir: &std::path::Path,
     client_jar: &std::path::Path,
-    ver_json_path: &std::path::Path,
     installer_path: &std::path::Path,
     temp_dir: &std::path::Path,
-    _mc_version: &str,
+    mc_version: &str,
 ) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     map.insert("SIDE".to_string(), "client".to_string());
@@ -140,10 +143,7 @@ pub fn build_data_map(
         "MINECRAFT_JAR".to_string(),
         client_jar.to_string_lossy().to_string(),
     );
-    map.insert(
-        "MINECRAFT_VERSION".to_string(),
-        ver_json_path.to_string_lossy().to_string(),
-    );
+    map.insert("MINECRAFT_VERSION".to_string(), mc_version.to_string());
     map.insert(
         "INSTALLER".to_string(),
         installer_path.to_string_lossy().to_string(),
@@ -194,6 +194,145 @@ pub fn resolve_data_arg(
     } else {
         s.to_string()
     }
+}
+
+/// 安全解压 Forge 系安装器，限制条目数量与实际展开体积。
+pub fn extract_installer_archive(
+    installer_path: &std::path::Path,
+    temp_dir: &std::path::Path,
+    loader_name: &str,
+    cancel_name: &str,
+) -> Result<(), String> {
+    let file = std::fs::File::open(installer_path)
+        .map_err(|e| format!("打开 {} 安装器失败: {}", loader_name, e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("读取 {} 安装器失败: {}", loader_name, e))?;
+    if archive.len() > MAX_INSTALLER_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "{} 安装器文件数量超过限制: {} > {}",
+            loader_name,
+            archive.len(),
+            MAX_INSTALLER_ARCHIVE_ENTRIES
+        ));
+    }
+
+    let mut declared_total = 0u64;
+    let mut actual_total = 0u64;
+    for index in 0..archive.len() {
+        if crate::instance::is_cancelled(cancel_name) {
+            return Err("用户取消安装".to_string());
+        }
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("读取 {} 安装器条目失败: {}", loader_name, e))?;
+        let entry_size = entry.size();
+        if entry_size > MAX_INSTALLER_ENTRY_SIZE {
+            return Err(format!(
+                "{} 安装器单个文件超过限制: {} ({} bytes)",
+                loader_name,
+                entry.name(),
+                entry_size
+            ));
+        }
+        declared_total = declared_total
+            .checked_add(entry_size)
+            .ok_or_else(|| format!("{} 安装器展开大小溢出", loader_name))?;
+        if declared_total > MAX_INSTALLER_TOTAL_SIZE {
+            return Err(format!(
+                "{} 安装器总展开大小超过限制: {} bytes",
+                loader_name, declared_total
+            ));
+        }
+
+        let out_path = safe_join(temp_dir, entry.name())
+            .map_err(|e| format!("{} 安装器包含非法路径: {}", loader_name, e))?;
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("创建 {} 临时目录失败: {}", loader_name, e))?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建 {} 临时目录失败: {}", loader_name, e))?;
+        }
+        let mut out_file = std::fs::File::create(&out_path)
+            .map_err(|e| format!("创建 {} 临时文件失败: {}", loader_name, e))?;
+        let copied = std::io::copy(
+            &mut std::io::Read::take(&mut entry, MAX_INSTALLER_ENTRY_SIZE + 1),
+            &mut out_file,
+        )
+        .map_err(|e| format!("解压 {} 安装器失败: {}", loader_name, e))?;
+        if copied > MAX_INSTALLER_ENTRY_SIZE {
+            return Err(format!(
+                "{} 安装器单个文件实际展开大小超过限制: {}",
+                loader_name,
+                out_path.display()
+            ));
+        }
+        actual_total = actual_total
+            .checked_add(copied)
+            .ok_or_else(|| format!("{} 安装器实际展开大小溢出", loader_name))?;
+        if actual_total > MAX_INSTALLER_TOTAL_SIZE {
+            return Err(format!(
+                "{} 安装器实际总展开大小超过限制: {} bytes",
+                loader_name, actual_total
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// processor 成功退出后按 profile.outputs 校验每个生成文件。
+pub fn verify_processor_outputs(
+    processor: &serde_json::Value,
+    data_map: &std::collections::HashMap<String, String>,
+    libs_dir: &std::path::Path,
+    work_dir: &std::path::Path,
+    loader_name: &str,
+) -> Result<(), String> {
+    let Some(outputs) = processor.get("outputs") else {
+        return Ok(());
+    };
+    if outputs.is_null() {
+        return Ok(());
+    }
+    let outputs = outputs
+        .as_object()
+        .ok_or_else(|| format!("{} processor outputs 格式错误", loader_name))?;
+    for (raw_path, expected_value) in outputs {
+        let expected_raw = expected_value
+            .as_str()
+            .ok_or_else(|| format!("{} processor 输出 SHA1 格式错误: {}", loader_name, raw_path))?;
+        let path_text = resolve_data_arg(raw_path, data_map, libs_dir);
+        let expected_sha1 = resolve_data_arg(expected_raw, data_map, libs_dir);
+        if expected_sha1.len() != 40 || !expected_sha1.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(format!(
+                "{} processor 输出 SHA1 无效: {} -> {}",
+                loader_name, raw_path, expected_sha1
+            ));
+        }
+        let output_path = std::path::PathBuf::from(&path_text);
+        let output_path = if output_path.is_absolute() {
+            output_path
+        } else {
+            work_dir.join(output_path)
+        };
+        if !output_path.is_file() {
+            return Err(format!(
+                "{} processor 未生成输出文件: {}",
+                loader_name,
+                output_path.display()
+            ));
+        }
+        if !file_matches_sha1(&output_path, &expected_sha1) {
+            return Err(format!(
+                "{} processor 输出 SHA1 不匹配: {}",
+                loader_name,
+                output_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 从 jar 文件的 MANIFEST.MF 获取 Main-Class
@@ -312,6 +451,10 @@ pub fn wait_for_install_file(
     }
 }
 
+use crate::downloader::event::{DownloadEvent, DownloadOutcome};
+use crate::downloader::{
+    DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
+};
 use crate::instance::{
     resolve_game_dir, safe_join, safe_path_name, strip_launcher_private_version_fields,
     version_dir, version_json_path,
@@ -323,29 +466,182 @@ use tauri::Emitter;
 /// Forge / NeoForge 安装器全局锁 — 同一时间只能运行一个安装
 pub static FORGE_LOCK: Mutex<()> = Mutex::new(());
 static DOWNLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 2 * 1024 * 1024;
-const PARALLEL_DOWNLOAD_MIN_PART_BYTES: u64 = 512 * 1024;
-const PARALLEL_DOWNLOAD_WORKERS: usize = 16;
-const PARALLEL_DOWNLOAD_PROBE_TIMEOUT_SECS: u64 = 15;
-const PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS: u64 = 15;
-const PARALLEL_DOWNLOAD_PART_RETRY_DELAY_SECS: u64 = 15;
 const DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 300;
 
-fn download_retry_delay_secs(last_err: &str, attempt: usize) -> u64 {
-    let lower = last_err.to_ascii_lowercase();
-    if last_err.contains("429")
-        || last_err.contains("range part")
-        || last_err.contains("超时")
-        || last_err.contains("下载过慢")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("deadline")
-        || lower.contains("too slow")
-    {
-        15
-    } else {
-        1 << (attempt - 1)
+pub(super) type LoaderDownloadTask = (String, std::path::PathBuf, Option<String>, Option<u64>);
+
+fn loader_download_candidates(url: &str, use_mirror: bool) -> Vec<DownloadCandidate> {
+    let preferred = mirror_url(url, use_mirror);
+    let fallback = mirror_url(url, !use_mirror);
+    let mut candidates = vec![DownloadCandidate::new(preferred.clone())];
+    if fallback != preferred {
+        candidates.push(DownloadCandidate::new(fallback));
     }
+    candidates
+}
+
+fn loader_download_options(
+    max_active_files: usize,
+    max_connections_per_file: usize,
+) -> DownloadEngineOptions {
+    let mut options = DownloadEngineOptions::default();
+    options.max_global_connections = DownloadEngineOptions::default_global_connection_limit();
+    options.max_active_files = max_active_files.max(1);
+    options.max_connections_per_file = max_connections_per_file.max(1);
+    options
+}
+
+fn loader_download_request(
+    url: &str,
+    dest: &std::path::Path,
+    expected_sha1: Option<&str>,
+    expected_size: Option<u64>,
+    use_mirror: bool,
+) -> DownloadRequest {
+    let request_id = DOWNLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut request = DownloadRequest::new(
+        format!("loader-download-{request_id}"),
+        loader_download_candidates(url, use_mirror),
+        dest,
+    );
+    if let Some(sha1) = expected_sha1.filter(|sha1| !sha1.trim().is_empty()) {
+        request = request.with_expected_sha1(sha1.trim().to_string());
+    }
+    if let Some(size) = expected_size.filter(|size| *size > 0) {
+        request = request.with_expected_size(size);
+    }
+    request
+}
+
+fn loader_download_manager(
+    options: DownloadEngineOptions,
+    cancel_name: Option<&str>,
+) -> Result<DownloadManager, String> {
+    let pool = crate::instance::install_download_pool(
+        cancel_name.unwrap_or("loader-download"),
+        options.max_global_connections,
+    );
+    DownloadManager::with_options_and_pool(options, pool)
+}
+
+fn dedupe_loader_download_tasks(tasks: Vec<LoaderDownloadTask>) -> Vec<LoaderDownloadTask> {
+    let mut unique = Vec::<LoaderDownloadTask>::new();
+    let mut destinations = std::collections::HashMap::<std::path::PathBuf, usize>::new();
+    for (url, dest, sha1, size) in tasks {
+        if let Some(index) = destinations.get(&dest).copied() {
+            // Forge 配置可能在两个清单里重复声明同一库，合并校验信息后只提交一次。
+            let existing = &mut unique[index];
+            if existing.2.is_none() {
+                existing.2 = sha1;
+            }
+            if existing.3.is_none() {
+                existing.3 = size;
+            }
+            continue;
+        }
+        destinations.insert(dest.clone(), unique.len());
+        unique.push((url, dest, sha1, size));
+    }
+    unique
+}
+
+fn map_loader_download_error(error: String, cancel_name: Option<&str>) -> String {
+    if is_download_cancelled(cancel_name) || error.contains("cancelled") {
+        "用户取消下载".to_string()
+    } else {
+        error
+    }
+}
+
+/// 执行可取消的 JSON 请求，用户取消时会同时丢弃网络请求。
+pub fn fetch_json_cancelable(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    cancel_name: &str,
+    request_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    fetch_json_request_cancelable(
+        http,
+        reqwest::Method::GET,
+        url,
+        Vec::new(),
+        None,
+        cancel_name,
+        request_timeout,
+    )
+}
+
+fn cancellable_request_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("oaoi-json-request")
+                .enable_all()
+                .build()
+                .map_err(|error| format!("创建请求运行时失败: {}", error))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// 执行带请求头或 JSON 请求体的可取消请求。
+pub fn fetch_json_request_cancelable(
+    _http: &reqwest::blocking::Client,
+    method: reqwest::Method,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: Option<serde_json::Value>,
+    cancel_name: &str,
+    request_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    if crate::instance::is_cancelled(cancel_name) {
+        return Err("用户取消安装".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(request_timeout.min(std::time::Duration::from_secs(15)))
+        .timeout(request_timeout)
+        .user_agent("OAOI-Launcher/1.0")
+        .build()
+        .map_err(|error| format!("创建请求客户端失败: {}", error))?;
+    let url = url.to_string();
+    let cancel_name = cancel_name.to_string();
+    cancellable_request_runtime()?.block_on(async move {
+        let request_future = async move {
+            let mut request = client.request(method, &url);
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            if let Some(body) = body {
+                request = request.json(&body);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|error| format!("请求失败: {}", error))?
+                .error_for_status()
+                .map_err(|error| format!("HTTP 请求失败: {}", error))?;
+            response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|error| format!("解析响应失败: {}", error))
+        };
+        tokio::pin!(request_future);
+        loop {
+            tokio::select! {
+                result = &mut request_future => return result,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if crate::instance::is_cancelled(&cancel_name) {
+                        return Err("用户取消安装".to_string());
+                    }
+                }
+            }
+        }
+    })
 }
 
 pub fn run_java_process_cancelable(
@@ -451,520 +747,103 @@ pub fn mirror_url(url: &str, use_mirror: bool) -> String {
 }
 
 pub fn download_file_if_needed_cancelable(
-    http: &reqwest::blocking::Client,
+    _http: &reqwest::blocking::Client,
     url: &str,
     dest: &std::path::Path,
     expected_sha1: Option<&str>,
+    expected_size: Option<u64>,
     use_mirror: bool,
     cancel_name: Option<&str>,
 ) -> Result<bool, String> {
-    if existing_file_ok(dest, expected_sha1) {
+    if existing_file_ok(dest, expected_sha1, expected_size) {
         return Ok(false);
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-
-    let real_url = mirror_url(url, use_mirror);
-    let max_retries = 5;
-    let mut last_err = String::new();
-    for attempt in 0..max_retries {
-        if attempt > 0 {
-            let wait_secs = download_retry_delay_secs(&last_err, attempt);
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-        if is_download_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-        match do_download(http, &real_url, dest, cancel_name) {
-            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                Ok(()) => return Ok(true),
-                Err(e) => {
-                    last_err = e;
-                    eprintln!(
-                        "[download] 重试 {}/{}: {} ({})",
-                        attempt + 1,
-                        max_retries,
-                        last_err,
-                        real_url
-                    );
-                }
-            },
-            Err(e) => {
-                last_err = e;
-                eprintln!(
-                    "[download] 重试 {}/{}: {} ({})",
-                    attempt + 1,
-                    max_retries,
-                    last_err,
-                    real_url
-                );
-            }
-        }
+    if is_download_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
     }
 
-    let fallback_url = mirror_url(url, !use_mirror);
-    if fallback_url != real_url {
-        let fallback_name = if use_mirror { "官方" } else { "镜像" };
-        eprintln!(
-            "[download] 当前源失败，回退{}: {}",
-            fallback_name, fallback_url
-        );
-        for attempt in 0..3 {
-            if attempt > 0 {
-                let wait_secs = download_retry_delay_secs(&last_err, attempt);
-                std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-            }
-            if is_download_cancelled(cancel_name) {
-                return Err("用户取消下载".to_string());
-            }
-            match do_download(http, &fallback_url, dest, cancel_name) {
-                Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                    Ok(()) => return Ok(true),
-                    Err(e) => {
-                        last_err = e;
-                        eprintln!(
-                            "[download] {}重试 {}/3: {} ({})",
-                            fallback_name,
-                            attempt + 1,
-                            last_err,
-                            fallback_url
-                        );
-                    }
-                },
-                Err(e) => {
-                    last_err = e;
-                    eprintln!(
-                        "[download] {}重试 {}/3: {} ({})",
-                        fallback_name,
-                        attempt + 1,
-                        last_err,
-                        fallback_url
-                    );
-                }
-            }
-        }
-    }
-
-    Err(format!("下载失败(重试后): {} ({})", last_err, real_url))
+    let options = loader_download_options(1, 16);
+    let manager = loader_download_manager(options, cancel_name)?;
+    let _registration =
+        cancel_name.map(|name| crate::instance::register_download_manager(name, &manager));
+    let request = loader_download_request(url, dest, expected_sha1, expected_size, use_mirror);
+    manager
+        .download_one(request, |_| {})
+        .map_err(|error| map_loader_download_error(error, cancel_name))?;
+    Ok(true)
 }
 
 pub fn download_file_with_progress<F>(
-    http: &reqwest::blocking::Client,
+    _http: &reqwest::blocking::Client,
     url: &str,
     dest: &std::path::Path,
     expected_sha1: Option<&str>,
+    expected_size: Option<u64>,
     use_mirror: bool,
     cancel_name: Option<&str>,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<bool, String>
 where
-    F: FnMut(u64, Option<u64>),
+    F: FnMut(u64, Option<u64>) + Send + 'static,
 {
-    if existing_file_ok(dest, expected_sha1) {
+    if existing_file_ok(dest, expected_sha1, expected_size) {
         let size = dest.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut on_progress = on_progress;
         on_progress(size, Some(size));
         return Ok(false);
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-
-    let real_url = mirror_url(url, use_mirror);
-    let max_retries = 5;
-    let mut last_err = String::new();
-    let mut allow_parallel = true;
-    for attempt in 0..max_retries {
-        if attempt > 0 {
-            let wait_secs = download_retry_delay_secs(&last_err, attempt);
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-        if is_download_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-        let download_result = if allow_parallel {
-            match do_parallel_download_with_progress(
-                http,
-                &real_url,
-                dest,
-                cancel_name,
-                &mut on_progress,
-            ) {
-                Ok(()) => Ok(()),
-                Err(ParallelDownloadError::Unsupported(reason)) => {
-                    allow_parallel = false;
-                    eprintln!(
-                        "[download] parallel unsupported, fallback: {} ({})",
-                        reason, real_url
-                    );
-                    do_download_with_progress(http, &real_url, dest, cancel_name, &mut on_progress)
-                }
-                Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => Err(e),
-                Err(ParallelDownloadError::Failed(e)) => {
-                    allow_parallel = false;
-                    eprintln!(
-                        "[download] parallel failed after part retry, fallback streaming: {} ({})",
-                        e, real_url
-                    );
-                    do_download_with_progress(http, &real_url, dest, cancel_name, &mut on_progress)
-                }
-            }
-        } else {
-            do_download_with_progress(http, &real_url, dest, cancel_name, &mut on_progress)
-        };
-        match download_result {
-            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                Ok(()) => return Ok(true),
-                Err(e) => {
-                    last_err = e;
-                    eprintln!(
-                        "[download] 重试 {}/{}: {} ({})",
-                        attempt + 1,
-                        max_retries,
-                        last_err,
-                        real_url
-                    );
-                }
-            },
-            Err(e) => {
-                last_err = e;
-                eprintln!(
-                    "[download] 重试 {}/{}: {} ({})",
-                    attempt + 1,
-                    max_retries,
-                    last_err,
-                    real_url
-                );
-            }
-        }
+    if is_download_cancelled(cancel_name) {
+        return Err("用户取消下载".to_string());
     }
 
-    let fallback_url = mirror_url(url, !use_mirror);
-    if fallback_url != real_url {
-        let fallback_name = if use_mirror { "官方" } else { "镜像" };
-        eprintln!(
-            "[download] 当前源失败，回退{}: {}",
-            fallback_name, fallback_url
-        );
-        let mut allow_parallel = true;
-        for attempt in 0..3 {
-            if attempt > 0 {
-                let wait_secs = download_retry_delay_secs(&last_err, attempt);
-                std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-            }
-            if is_download_cancelled(cancel_name) {
-                return Err("用户取消下载".to_string());
-            }
-            let download_result = if allow_parallel {
-                match do_parallel_download_with_progress(
-                    http,
-                    &fallback_url,
-                    dest,
-                    cancel_name,
-                    &mut on_progress,
-                ) {
-                    Ok(()) => Ok(()),
-                    Err(ParallelDownloadError::Unsupported(reason)) => {
-                        allow_parallel = false;
-                        eprintln!(
-                            "[download] parallel unsupported, fallback: {} ({})",
-                            reason, fallback_url
-                        );
-                        do_download_with_progress(
-                            http,
-                            &fallback_url,
-                            dest,
-                            cancel_name,
-                            &mut on_progress,
-                        )
-                    }
-                    Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => Err(e),
-                    Err(ParallelDownloadError::Failed(e)) => {
-                        allow_parallel = false;
-                        eprintln!(
-                            "[download] parallel failed after part retry, fallback streaming: {} ({})",
-                            e, fallback_url
-                        );
-                        do_download_with_progress(
-                            http,
-                            &fallback_url,
-                            dest,
-                            cancel_name,
-                            &mut on_progress,
-                        )
-                    }
-                }
-            } else {
-                do_download_with_progress(http, &fallback_url, dest, cancel_name, &mut on_progress)
-            };
-            match download_result {
-                Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                    Ok(()) => return Ok(true),
-                    Err(e) => {
-                        last_err = e;
-                        eprintln!(
-                            "[download] {}重试 {}/3: {} ({})",
-                            fallback_name,
-                            attempt + 1,
-                            last_err,
-                            fallback_url
-                        );
-                    }
-                },
-                Err(e) => {
-                    last_err = e;
-                    eprintln!(
-                        "[download] {}重试 {}/3: {} ({})",
-                        fallback_name,
-                        attempt + 1,
-                        last_err,
-                        fallback_url
-                    );
+    let options = loader_download_options(1, 16);
+    let manager = loader_download_manager(options, cancel_name)?;
+    let _registration =
+        cancel_name.map(|name| crate::instance::register_download_manager(name, &manager));
+    let request = loader_download_request(url, dest, expected_sha1, expected_size, use_mirror);
+    let callback = std::sync::Arc::new(std::sync::Mutex::new(on_progress));
+    let callback_for_event = callback.clone();
+    manager
+        .download_one(request, move |event| match event {
+            DownloadEvent::Progress(progress) => {
+                if let Ok(mut callback) = callback_for_event.lock() {
+                    callback(progress.downloaded, progress.total);
                 }
             }
-        }
-    }
-
-    Err(format!("下载失败(重试后): {} ({})", last_err, real_url))
+            DownloadEvent::FileFinished(result) => {
+                if let Ok(mut callback) = callback_for_event.lock() {
+                    callback(result.bytes, Some(result.bytes));
+                }
+            }
+            _ => {}
+        })
+        .map_err(|error| map_loader_download_error(error, cancel_name))?;
+    Ok(true)
 }
 
-pub fn download_file_mirror_then_official_with_progress<F>(
-    http: &reqwest::blocking::Client,
-    url: &str,
+pub(super) fn existing_file_ok(
     dest: &std::path::Path,
     expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-    mut on_progress: F,
-) -> Result<bool, String>
-where
-    F: FnMut(u64, Option<u64>),
-{
-    if existing_file_ok(dest, expected_sha1) {
-        let size = dest.metadata().map(|m| m.len()).unwrap_or(0);
-        on_progress(size, Some(size));
-        return Ok(false);
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let mirror = mirror_url(url, true);
-    let official = mirror_url(url, false);
-    let mut last_err = String::new();
-
-    match download_exact_with_progress(
-        http,
-        &mirror,
-        dest,
-        expected_sha1,
-        cancel_name,
-        2,
-        "镜像",
-        &mut last_err,
-        &mut on_progress,
-    ) {
-        Ok(()) => return Ok(true),
-        Err(e) if e.contains("用户取消") => return Err(e),
-        Err(_) => {}
-    }
-
-    if official != mirror {
-        eprintln!("[download] 镜像源失败 2 次，回退官方源: {}", official);
-        match download_exact_with_progress(
-            http,
-            &official,
-            dest,
-            expected_sha1,
-            cancel_name,
-            3,
-            "官方",
-            &mut last_err,
-            &mut on_progress,
-        ) {
-            Ok(()) => return Ok(true),
-            Err(e) if e.contains("用户取消") => return Err(e),
-            Err(_) => {}
-        }
-    }
-
-    Err(format!("下载失败(镜像2次+官方后): {}", last_err))
-}
-
-pub fn download_file_mirror_then_official(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-) -> Result<bool, String> {
-    if existing_file_ok(dest, expected_sha1) {
-        return Ok(false);
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let mirror = mirror_url(url, true);
-    let official = mirror_url(url, false);
-    let mut last_err = String::new();
-
-    match download_exact(
-        http,
-        &mirror,
-        dest,
-        expected_sha1,
-        cancel_name,
-        2,
-        "镜像",
-        &mut last_err,
-    ) {
-        Ok(()) => return Ok(true),
-        Err(e) if e.contains("用户取消") => return Err(e),
-        Err(_) => {}
-    }
-
-    if official != mirror {
-        eprintln!("[download] 镜像源失败 2 次，回退官方源: {}", official);
-        match download_exact(
-            http,
-            &official,
-            dest,
-            expected_sha1,
-            cancel_name,
-            3,
-            "官方",
-            &mut last_err,
-        ) {
-            Ok(()) => return Ok(true),
-            Err(e) if e.contains("用户取消") => return Err(e),
-            Err(_) => {}
-        }
-    }
-
-    Err(format!("下载失败(镜像2次+官方后): {}", last_err))
-}
-
-fn download_exact_with_progress<F>(
-    http: &reqwest::blocking::Client,
-    exact_url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-    max_retries: usize,
-    label: &str,
-    last_err: &mut String,
-    on_progress: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(u64, Option<u64>),
-{
-    let mut allow_parallel = true;
-    for attempt in 0..max_retries {
-        if attempt > 0 {
-            let wait_secs = download_retry_delay_secs(last_err, attempt);
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-        if is_download_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-
-        let download_result = if allow_parallel {
-            match do_parallel_download_with_progress(
-                http,
-                exact_url,
-                dest,
-                cancel_name,
-                on_progress,
-            ) {
-                Ok(()) => Ok(()),
-                Err(ParallelDownloadError::Unsupported(reason)) => {
-                    allow_parallel = false;
-                    eprintln!(
-                        "[download] parallel unsupported, fallback: {} ({})",
-                        reason, exact_url
-                    );
-                    do_download_with_progress(http, exact_url, dest, cancel_name, on_progress)
-                }
-                Err(ParallelDownloadError::Failed(e)) if e.contains("用户取消") => Err(e),
-                Err(ParallelDownloadError::Failed(e)) => {
-                    allow_parallel = false;
-                    eprintln!(
-                        "[download] parallel failed after part retry, fallback streaming: {} ({})",
-                        e, exact_url
-                    );
-                    do_download_with_progress(http, exact_url, dest, cancel_name, on_progress)
-                }
-            }
-        } else {
-            do_download_with_progress(http, exact_url, dest, cancel_name, on_progress)
-        };
-
-        match download_result {
-            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                Ok(()) => return Ok(()),
-                Err(e) => *last_err = format!("{} ({})", e, exact_url),
-            },
-            Err(e) => *last_err = format!("{} ({})", e, exact_url),
-        }
-
-        eprintln!(
-            "[download] {}重试 {}/{}: {}",
-            label,
-            attempt + 1,
-            max_retries,
-            last_err
-        );
-    }
-
-    Err(last_err.clone())
-}
-
-fn download_exact(
-    http: &reqwest::blocking::Client,
-    exact_url: &str,
-    dest: &std::path::Path,
-    expected_sha1: Option<&str>,
-    cancel_name: Option<&str>,
-    max_retries: usize,
-    label: &str,
-    last_err: &mut String,
-) -> Result<(), String> {
-    for attempt in 0..max_retries {
-        if attempt > 0 {
-            let wait_secs = download_retry_delay_secs(last_err, attempt);
-            std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-        }
-        if is_download_cancelled(cancel_name) {
-            return Err("用户取消下载".to_string());
-        }
-
-        match do_download(http, exact_url, dest, cancel_name) {
-            Ok(()) => match verify_downloaded_file(dest, expected_sha1) {
-                Ok(()) => return Ok(()),
-                Err(e) => *last_err = format!("{} ({})", e, exact_url),
-            },
-            Err(e) => *last_err = format!("{} ({})", e, exact_url),
-        }
-
-        eprintln!(
-            "[download] {}重试 {}/{}: {}",
-            label,
-            attempt + 1,
-            max_retries,
-            last_err
-        );
-    }
-
-    Err(last_err.clone())
-}
-
-fn existing_file_ok(dest: &std::path::Path, expected_sha1: Option<&str>) -> bool {
+    expected_size: Option<u64>,
+) -> bool {
     if !dest.exists() {
         return false;
     }
-    match expected_sha1 {
+    let actual_size = dest.metadata().map(|metadata| metadata.len()).ok();
+    if let Some(expected_size) = expected_size.filter(|size| *size > 0) {
+        if actual_size != Some(expected_size) {
+            return false;
+        }
+    }
+    match expected_sha1.filter(|sha1| !sha1.trim().is_empty()) {
         Some(sha1) => file_matches_sha1(dest, sha1),
-        None => dest.metadata().map(|m| m.len() > 0).unwrap_or(false),
+        None => actual_size.is_some_and(|size| size > 0),
     }
 }
 
@@ -977,39 +856,35 @@ fn file_matches_sha1(dest: &std::path::Path, expected_sha1: &str) -> bool {
     }
 }
 
-fn verify_downloaded_file(
+pub(super) fn copy_local_library_if_valid(
+    source: &std::path::Path,
     dest: &std::path::Path,
     expected_sha1: Option<&str>,
-) -> Result<(), String> {
-    if let Some(sha1) = expected_sha1 {
-        if !file_matches_sha1(dest, sha1) {
-            let _ = std::fs::remove_file(dest);
-            return Err("sha1 校验失败".to_string());
-        }
+    expected_size: Option<u64>,
+) -> Result<bool, String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建依赖库目录失败 {}: {}", parent.display(), e))?;
     }
-    Ok(())
+    let tmp_path = unique_temp_path(dest);
+    std::fs::copy(source, &tmp_path).map_err(|e| {
+        format!(
+            "复制安装器内置依赖库失败 {} -> {}: {}",
+            source.display(),
+            tmp_path.display(),
+            e
+        )
+    })?;
+    if !existing_file_ok(&tmp_path, expected_sha1, expected_size) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Ok(false);
+    }
+    replace_downloaded_file(&tmp_path, dest)?;
+    Ok(true)
 }
 
 fn is_download_cancelled(cancel_name: Option<&str>) -> bool {
     cancel_name.is_some_and(crate::instance::is_cancelled)
-}
-
-fn acquire_install_connection(
-    cancel_name: Option<&str>,
-) -> Result<Option<crate::downloader::pool::ConnectionPermit>, String> {
-    let Some(name) = cancel_name else {
-        return Ok(None);
-    };
-    let Some(cancel_flag) = crate::instance::install_cancel_flag(name) else {
-        return Ok(None);
-    };
-    let pool = crate::instance::install_download_pool(
-        name,
-        crate::downloader::DownloadEngineOptions::default_global_connection_limit(),
-    );
-    pool.acquire(&cancel_flag)
-        .map(Some)
-        .map_err(|_| "用户取消下载".to_string())
 }
 
 fn unique_temp_path(dest: &std::path::Path) -> std::path::PathBuf {
@@ -1026,417 +901,18 @@ fn unique_temp_path(dest: &std::path::Path) -> std::path::PathBuf {
     ))
 }
 
-fn unique_temp_part_path(dest: &std::path::Path, part: usize) -> std::path::PathBuf {
-    let file_name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("download");
-    let counter = DOWNLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    dest.with_file_name(format!(
-        ".{}.{}.{}.part{}",
-        file_name,
-        std::process::id(),
-        counter,
-        part
-    ))
-}
-
 fn replace_downloaded_file(
     tmp_path: &std::path::Path,
     dest: &std::path::Path,
 ) -> Result<(), String> {
-    if dest.exists() {
-        std::fs::remove_file(dest).map_err(|e| format!("删除旧文件失败: {}", e))?;
-    }
-    std::fs::rename(tmp_path, dest).map_err(|e| format!("重命名失败: {}", e))
-}
-
-/// 实际执行单次下载（流式写入，不一次性读到内存）
-fn do_download(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    dest: &std::path::Path,
-    cancel_name: Option<&str>,
-) -> Result<(), String> {
-    do_download_with_progress(http, url, dest, cancel_name, &mut |_, _| {})
-}
-
-enum ParallelDownloadError {
-    Unsupported(String),
-    Failed(String),
-}
-
-fn probe_range_size(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    cancel_name: Option<&str>,
-) -> Result<(u64, String), ParallelDownloadError> {
-    if is_download_cancelled(cancel_name) {
-        return Err(ParallelDownloadError::Failed("用户取消下载".to_string()));
-    }
-    let _permit = acquire_install_connection(cancel_name).map_err(ParallelDownloadError::Failed)?;
-    let resp = http
-        .get(url)
-        .header(reqwest::header::RANGE, "bytes=0-0")
-        .timeout(std::time::Duration::from_secs(
-            PARALLEL_DOWNLOAD_PROBE_TIMEOUT_SECS,
-        ))
-        .send()
-        .map_err(|e| ParallelDownloadError::Unsupported(format!("probe failed: {}", e)))?;
-    let status = resp.status();
-    let resolved_url = resp.url().to_string();
-    if status != reqwest::StatusCode::PARTIAL_CONTENT {
-        return Err(ParallelDownloadError::Unsupported(format!(
-            "range status {}",
-            status
-        )));
-    }
-    let content_range = resp
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ParallelDownloadError::Unsupported("missing Content-Range".to_string()))?;
-    let total = content_range
-        .rsplit_once('/')
-        .and_then(|(_, total)| total.parse::<u64>().ok())
-        .ok_or_else(|| {
-            ParallelDownloadError::Unsupported(format!("invalid Content-Range: {}", content_range))
-        })?;
-    if total < PARALLEL_DOWNLOAD_MIN_BYTES {
-        return Err(ParallelDownloadError::Unsupported(format!(
-            "file too small: {} bytes",
-            total
-        )));
-    }
-    Ok((total, resolved_url))
-}
-
-fn download_range_part_with_stall_timeout(
-    url: &str,
-    part_path: &std::path::Path,
-    start: u64,
-    end: u64,
-    expected_len: u64,
-    part_progress: &std::sync::atomic::AtomicU64,
-    cancel_name: Option<&str>,
-) -> Result<(), String> {
-    let _permit = acquire_install_connection(cancel_name)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("创建下载运行时失败: {}", e))?;
-    runtime.block_on(async {
-        if cancel_name.is_some_and(crate::instance::is_cancelled) {
-            return Err("用户取消下载".to_string());
-        }
-        if let Some(parent) = part_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(DOWNLOAD_TOTAL_TIMEOUT_SECS))
-            .user_agent("OAOI-Launcher/1.0")
-            .build()
-            .map_err(|e| format!("创建下载客户端失败: {}", e))?;
-        let stall_timeout =
-            std::time::Duration::from_secs(PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS);
-        let send = client
-            .get(url)
-            .header(reqwest::header::RANGE, format!("bytes={}-{}", start, end))
-            .send();
-        let mut resp = tokio::time::timeout(stall_timeout, send)
-            .await
-            .map_err(|_| {
-                format!(
-                    "分片请求超时: {} 秒无响应",
-                    PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS
-                )
-            })?
-            .map_err(|e| format!("请求失败: {}", e))?;
-        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(format!("range HTTP {}", resp.status()));
-        }
-
-        let mut file =
-            std::fs::File::create(part_path).map_err(|e| format!("创建分片失败: {}", e))?;
-        let mut downloaded = 0u64;
-        loop {
-            if cancel_name.is_some_and(crate::instance::is_cancelled) {
-                return Err("用户取消下载".to_string());
-            }
-            let chunk = tokio::time::timeout(stall_timeout, resp.chunk())
-                .await
-                .map_err(|_| {
-                    format!(
-                        "分片下载卡住: {} 秒没有新数据",
-                        PARALLEL_DOWNLOAD_PART_STALL_TIMEOUT_SECS
-                    )
-                })?
-                .map_err(|e| format!("读取失败: {}", e))?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if chunk.is_empty() {
-                continue;
-            }
-            std::io::Write::write_all(&mut file, chunk.as_ref())
-                .map_err(|e| format!("写入失败: {}", e))?;
-            downloaded += chunk.len() as u64;
-            part_progress.store(downloaded, Ordering::Relaxed);
-        }
-        if downloaded != expected_len {
-            return Err(format!(
-                "分片大小不匹配: got {}, expected {}",
-                downloaded, expected_len
-            ));
-        }
-        Ok(())
-    })
-}
-
-fn do_parallel_download_with_progress<F>(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    dest: &std::path::Path,
-    cancel_name: Option<&str>,
-    on_progress: &mut F,
-) -> Result<(), ParallelDownloadError>
-where
-    F: FnMut(u64, Option<u64>),
-{
-    let (total, resolved_url) = probe_range_size(http, url, cancel_name)?;
-    let workers = PARALLEL_DOWNLOAD_WORKERS
-        .min(
-            ((total + PARALLEL_DOWNLOAD_MIN_PART_BYTES - 1) / PARALLEL_DOWNLOAD_MIN_PART_BYTES)
-                as usize,
-        )
-        .max(2);
-    let part_size = (total + workers as u64 - 1) / workers as u64;
-    let progress = std::sync::Arc::new(
-        (0..workers)
-            .map(|_| std::sync::atomic::AtomicU64::new(0))
-            .collect::<Vec<_>>(),
-    );
-    let errors = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-    let cancel_name = cancel_name.map(|name| name.to_string());
-    let part_paths = (0..workers)
-        .map(|part| unique_temp_part_path(dest, part))
-        .collect::<Vec<_>>();
-
-    on_progress(0, Some(total));
-    eprintln!(
-        "[download] parallel range start: {} workers, {} bytes ({})",
-        workers, total, resolved_url
-    );
-
-    let handles = (0..workers)
-        .map(|part| {
-            let url = resolved_url.clone();
-            let part_path = part_paths[part].clone();
-            let progress = progress.clone();
-            let errors = errors.clone();
-            let cancel_name = cancel_name.clone();
-            std::thread::spawn(move || {
-                let start = part as u64 * part_size;
-                let end = ((start + part_size).min(total)).saturating_sub(1);
-                let expected_len = end.saturating_sub(start) + 1;
-                let mut result = Ok(());
-                for attempt in 0..2 {
-                    if attempt > 0 {
-                        std::thread::sleep(std::time::Duration::from_secs(
-                            PARALLEL_DOWNLOAD_PART_RETRY_DELAY_SECS,
-                        ));
-                    }
-                    let attempt_result = download_range_part_with_stall_timeout(
-                        &url,
-                        &part_path,
-                        start,
-                        end,
-                        expected_len,
-                        &progress[part],
-                        cancel_name.as_deref(),
-                    );
-                    match attempt_result {
-                        Ok(()) => {
-                            result = Ok(());
-                            break;
-                        }
-                        Err(e) if e.contains("用户取消") => {
-                            result = Err(e);
-                            break;
-                        }
-                        Err(e) => {
-                            progress[part].store(0, Ordering::Relaxed);
-                            let _ = std::fs::remove_file(&part_path);
-                            eprintln!(
-                                "[download] range part retry {}/2: part {} bytes {}-{}: {}",
-                                attempt + 1,
-                                part,
-                                start,
-                                end,
-                                e
-                            );
-                            result = Err(e);
-                        }
-                    }
-                }
-                if let Err(e) = result {
-                    let _ = std::fs::remove_file(&part_path);
-                    errors.lock().unwrap().push(format!(
-                        "range part {} bytes {}-{} failed: {}",
-                        part, start, end, e
-                    ));
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let mut last_emit = 0u64;
-    loop {
-        let downloaded = progress
-            .iter()
-            .map(|part| part.load(Ordering::Relaxed))
-            .sum::<u64>()
-            .min(total);
-        if downloaded == total
-            || downloaded.saturating_sub(last_emit) >= 512 * 1024
-            || is_download_cancelled(cancel_name.as_deref())
-        {
-            on_progress(downloaded, Some(total));
-            last_emit = downloaded;
-        }
-        if handles.iter().all(|handle| handle.is_finished()) {
-            break;
-        }
-        if is_download_cancelled(cancel_name.as_deref()) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(120));
-    }
-
-    for handle in handles {
-        if handle.join().is_err() {
-            errors
-                .lock()
-                .unwrap()
-                .push("download worker panicked".to_string());
-        }
-    }
-    if is_download_cancelled(cancel_name.as_deref()) {
-        for path in &part_paths {
-            let _ = std::fs::remove_file(path);
-        }
-        return Err(ParallelDownloadError::Failed("用户取消下载".to_string()));
-    }
-    let errors = errors.lock().unwrap();
-    if !errors.is_empty() {
-        for path in &part_paths {
-            let _ = std::fs::remove_file(path);
-        }
-        return Err(ParallelDownloadError::Failed(errors.join("; ")));
-    }
-    drop(errors);
-
-    let tmp_path = unique_temp_path(dest);
-    let merge_result = (|| -> Result<(), String> {
-        let mut out =
-            std::fs::File::create(&tmp_path).map_err(|e| format!("创建合并文件失败: {}", e))?;
-        for path in &part_paths {
-            let mut part_file =
-                std::fs::File::open(path).map_err(|e| format!("读取分片失败: {}", e))?;
-            std::io::copy(&mut part_file, &mut out).map_err(|e| format!("合并分片失败: {}", e))?;
-        }
-        replace_downloaded_file(&tmp_path, dest)?;
-        Ok(())
-    })();
-    for path in &part_paths {
-        let _ = std::fs::remove_file(path);
-    }
-    if let Err(e) = merge_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(ParallelDownloadError::Failed(e));
-    }
-    on_progress(total, Some(total));
-    Ok(())
-}
-
-fn do_download_with_progress<F>(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    dest: &std::path::Path,
-    cancel_name: Option<&str>,
-    on_progress: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(u64, Option<u64>),
-{
-    if is_download_cancelled(cancel_name) {
-        return Err("用户取消下载".to_string());
-    }
-    let _permit = acquire_install_connection(cancel_name)?;
-    let mut resp = http
-        .get(url)
-        .send()
-        .map_err(|e| format!("请求失败: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    let total = resp.content_length();
-    on_progress(0, total);
-    let tmp_path = unique_temp_path(dest);
-    let result = (|| -> Result<(), String> {
-        let mut file =
-            std::fs::File::create(&tmp_path).map_err(|e| format!("创建临时文件失败: {}", e))?;
-        let mut buf = [0u8; 64 * 1024];
-        let mut downloaded = 0u64;
-        let mut last_emit_bytes = 0u64;
-        let mut last_emit_at = std::time::Instant::now();
-
-        loop {
-            if is_download_cancelled(cancel_name) {
-                return Err("用户取消下载".to_string());
-            }
-            let read =
-                std::io::Read::read(&mut resp, &mut buf).map_err(|e| format!("读取失败: {}", e))?;
-            if read == 0 {
-                break;
-            }
-            std::io::Write::write_all(&mut file, &buf[..read])
-                .map_err(|e| format!("写入失败: {}", e))?;
-            downloaded += read as u64;
-
-            let should_emit = downloaded == total.unwrap_or(downloaded)
-                || downloaded.saturating_sub(last_emit_bytes) >= 512 * 1024
-                || last_emit_at.elapsed() >= std::time::Duration::from_millis(250);
-            if should_emit {
-                on_progress(downloaded, total);
-                last_emit_bytes = downloaded;
-                last_emit_at = std::time::Instant::now();
-            }
-        }
-        on_progress(downloaded, total);
-        if let Some(total) = total {
-            if downloaded != total {
-                return Err(format!("下载不完整: {} / {}", downloaded, total));
-            }
-        }
-        Ok(())
-    })();
-
-    if let Err(err) = result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-
-    replace_downloaded_file(&tmp_path, dest)?;
-    Ok(())
+    crate::downloader::fs::finalize_part_file(tmp_path, dest, None, None)
+        .map_err(|e| format!("替换下载文件失败: {}", e))
 }
 
 /// 限制并发的下载执行器
 pub fn parallel_download(
-    http: &reqwest::blocking::Client,
-    tasks: Vec<(String, std::path::PathBuf, Option<String>)>,
+    _http: &reqwest::blocking::Client,
+    tasks: Vec<LoaderDownloadTask>,
     done: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
     max_workers: usize,
     use_mirror: bool,
@@ -1445,183 +921,74 @@ pub fn parallel_download(
     if tasks.is_empty() {
         return Ok(());
     }
-    let errors = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-    let cancel_name = cancel_name.map(|name| name.to_string());
-    let tasks = std::sync::Arc::new(tasks);
-    let next_task = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let worker_count = max_workers.max(1).min(tasks.len());
-    let handles: Vec<_> = (0..worker_count)
-        .map(|_| {
-            let tasks = tasks.clone();
-            let next_task = next_task.clone();
-            let done = done.clone();
-            let errors = errors.clone();
-            let h = http.clone();
-            let cancel_name = cancel_name.clone();
-            std::thread::spawn(move || loop {
-                if cancel_name
-                    .as_deref()
-                    .is_some_and(crate::instance::is_cancelled)
-                {
-                    break;
-                }
-                let index = next_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((url, dest, sha1)) = tasks.get(index) else {
-                    break;
-                };
-                if let Err(e) = download_file_if_needed_cancelable(
-                    &h,
-                    url,
-                    dest,
-                    sha1.as_deref(),
-                    use_mirror,
-                    cancel_name.as_deref(),
-                ) {
-                    eprintln!("[download] 失败: {} -> {}", url, e);
-                    errors.lock().unwrap().push(format!("{} -> {}", url, e));
-                }
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            })
-        })
-        .collect();
-
-    let mut cancelled = false;
-    loop {
-        if cancel_name
-            .as_deref()
-            .is_some_and(crate::instance::is_cancelled)
-        {
-            cancelled = true;
-            break;
-        }
-        if handles.iter().all(|handle| handle.is_finished()) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-
-    for h in handles {
-        if h.join().is_err() {
-            errors
-                .lock()
-                .unwrap()
-                .push("download worker panicked".to_string());
-        }
-    }
-    if cancel_name
-        .as_deref()
-        .is_some_and(crate::instance::is_cancelled)
-        || cancelled
-    {
-        done.store(tasks.len(), std::sync::atomic::Ordering::Relaxed);
+    let requested_task_count = tasks.len();
+    let tasks = dedupe_loader_download_tasks(tasks);
+    if is_download_cancelled(cancel_name) {
+        done.store(requested_task_count, Ordering::Relaxed);
         return Err("用户取消下载".to_string());
     }
-    let errors = errors.lock().unwrap();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        let sample = errors
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(format!("{} files failed: {}", errors.len(), sample))
-    }
-}
 
-pub fn parallel_download_mirror_then_official(
-    http: &reqwest::blocking::Client,
-    tasks: Vec<(String, std::path::PathBuf, Option<String>)>,
-    done: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    max_workers: usize,
-    cancel_name: Option<&str>,
-) -> Result<(), String> {
-    if tasks.is_empty() {
+    // Loader 依赖通常很小，保持多文件并发、单文件单连接；安装器单文件另走 16 连接配置。
+    let options = loader_download_options(max_workers, 1);
+    let manager = loader_download_manager(options, cancel_name).map_err(|error| {
+        done.store(requested_task_count, Ordering::Relaxed);
+        error
+    })?;
+    let _registration =
+        cancel_name.map(|name| crate::instance::register_download_manager(name, &manager));
+    let mut request_urls = std::collections::HashMap::new();
+    let requests = tasks
+        .iter()
+        .map(|(url, dest, sha1, size)| {
+            let request = loader_download_request(url, dest, sha1.as_deref(), *size, use_mirror);
+            request_urls.insert(request.id.clone(), url.clone());
+            request
+        })
+        .collect::<Vec<_>>();
+    let completed = std::sync::Arc::new(std::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let completed_for_event = completed.clone();
+    let done_for_event = done.clone();
+    let outcomes = manager.download_many(requests, move |event| {
+        let request_id = match event {
+            DownloadEvent::FileFinished(result) => Some(result.request_id),
+            DownloadEvent::FileFailed { request_id, .. } => Some(request_id),
+            _ => None,
+        };
+        if let Some(request_id) = request_id {
+            if completed_for_event.lock().unwrap().insert(request_id) {
+                done_for_event.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    done.store(requested_task_count, Ordering::Relaxed);
+
+    let mut errors = Vec::new();
+    for outcome in outcomes {
+        if let DownloadOutcome::Failed {
+            request_id, error, ..
+        } = outcome
+        {
+            let url = request_urls.get(&request_id).cloned().unwrap_or_default();
+            errors.push(format!("{} -> {}", url, error));
+        }
+    }
+    if is_download_cancelled(cancel_name) || errors.iter().any(|error| error.contains("cancelled"))
+    {
+        return Err("用户取消下载".to_string());
+    }
+    if errors.is_empty() {
         return Ok(());
     }
-    let errors = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
-    let cancel_name = cancel_name.map(|name| name.to_string());
-    let tasks = std::sync::Arc::new(tasks);
-    let next_task = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let worker_count = max_workers.max(1).min(tasks.len());
-    let handles: Vec<_> = (0..worker_count)
-        .map(|_| {
-            let tasks = tasks.clone();
-            let next_task = next_task.clone();
-            let done = done.clone();
-            let errors = errors.clone();
-            let h = http.clone();
-            let cancel_name = cancel_name.clone();
-            std::thread::spawn(move || loop {
-                if cancel_name
-                    .as_deref()
-                    .is_some_and(crate::instance::is_cancelled)
-                {
-                    break;
-                }
-                let index = next_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some((url, dest, sha1)) = tasks.get(index) else {
-                    break;
-                };
-                if let Err(e) = download_file_mirror_then_official(
-                    &h,
-                    url,
-                    dest,
-                    sha1.as_deref(),
-                    cancel_name.as_deref(),
-                ) {
-                    eprintln!("[download] 失败: {} -> {}", url, e);
-                    errors.lock().unwrap().push(format!("{} -> {}", url, e));
-                }
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            })
-        })
-        .collect();
 
-    let mut cancelled = false;
-    loop {
-        if cancel_name
-            .as_deref()
-            .is_some_and(crate::instance::is_cancelled)
-        {
-            cancelled = true;
-            break;
-        }
-        if handles.iter().all(|handle| handle.is_finished()) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-
-    for h in handles {
-        if h.join().is_err() {
-            errors
-                .lock()
-                .unwrap()
-                .push("download worker panicked".to_string());
-        }
-    }
-    if cancel_name
-        .as_deref()
-        .is_some_and(crate::instance::is_cancelled)
-        || cancelled
-    {
-        done.store(tasks.len(), std::sync::atomic::Ordering::Relaxed);
-        return Err("用户取消下载".to_string());
-    }
-    let errors = errors.lock().unwrap();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        let sample = errors
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(format!("{} files failed: {}", errors.len(), sample))
-    }
+    let sample = errors
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!("{} files failed: {}", errors.len(), sample))
 }
 
 /// 检查 library 的 rules 是否允许当前 OS
@@ -1689,8 +1056,10 @@ pub fn create_instance(
     use_mirror: bool,
 ) -> Result<String, String> {
     let safe_name = safe_path_name(&name, "版本名")?;
+    validate_loader_selection(&loader_type, &loader_version)?;
     let name_clone = safe_name.clone();
-    crate::instance::register_cancel(&safe_name);
+    let cancel_name = crate::instance::scoped_task_key(&game_dir, &safe_name);
+    crate::instance::try_register_cancel(&cancel_name)?;
     std::thread::spawn(move || {
         eprintln!(
             "[install] 开始创建版本: {} (mc={}, loader={} {}, java={})",
@@ -1706,16 +1075,23 @@ pub fn create_instance(
             &loader_version,
             &java_path,
             use_mirror,
+            &cancel_name,
         ) {
             let user_cancelled = is_user_cancel_error(&e);
-            crate::instance::unregister_cancel(&safe_name);
+            crate::instance::unregister_cancel(&cancel_name);
             eprintln!("[install] 错误: {}", e);
             let game_root = resolve_game_dir(&game_dir);
             let inst_dir = version_dir(&game_root, &safe_name);
             let install_marker = inst_dir.join(".oaoi_installing");
-            if install_marker.exists() {
+            let final_json = version_json_path(&inst_dir, &safe_name);
+            if install_marker.exists() && !is_complete_version_json(&final_json) {
                 let _ = std::fs::remove_dir_all(&inst_dir);
                 eprintln!("[install] 已清理残留目录: {}", inst_dir.display());
+            } else if install_marker.exists() {
+                eprintln!(
+                    "[install] 安装已生成最终版本配置，保留完整实例: {}",
+                    inst_dir.display()
+                );
             } else if inst_dir.exists() {
                 eprintln!("[install] 跳过清理非本次安装目录: {}", inst_dir.display());
             }
@@ -1727,10 +1103,25 @@ pub fn create_instance(
                 }),
             );
         } else {
-            crate::instance::unregister_cancel(&safe_name);
+            crate::instance::unregister_cancel(&cancel_name);
         }
     });
     Ok(format!("开始创建版本: {}", name_clone))
+}
+
+fn validate_loader_selection(loader_type: &str, loader_version: &str) -> Result<(), String> {
+    match loader_type {
+        "vanilla" => Ok(()),
+        "fabric" | "forge" | "quilt" | "neoforge" => {
+            if loader_version.trim().is_empty() {
+                Err(format!("{} 缺少 Loader 版本", loader_type))
+            } else {
+                Ok(())
+            }
+        }
+        "" => Err("缺少 Loader 类型".to_string()),
+        other => Err(format!("不支持的 Loader 类型: {}", other)),
+    }
 }
 
 fn is_user_cancel_error(error: &str) -> bool {
@@ -1739,6 +1130,111 @@ fn is_user_cancel_error(error: &str) -> bool {
         || error.contains("取消下载")
         || error.contains("cancelled")
         || error.contains("download cancelled")
+}
+
+fn remove_install_marker(marker: &std::path::Path) -> Result<(), String> {
+    let mut last_error = String::new();
+    for _ in 0..3 {
+        match std::fs::remove_file(marker) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                last_error = error.to_string();
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+    }
+
+    // 删除受外部占用影响时改成完成标记，避免完整实例仍被视为安装残留。
+    let completed_marker = marker.with_file_name(".oaoi_install_complete");
+    std::fs::rename(marker, &completed_marker).map_err(|error| {
+        format!(
+            "移除安装标记失败: {}; 重命名完成标记也失败: {}",
+            last_error, error
+        )
+    })
+}
+
+fn is_complete_version_json(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|json| {
+            json.get("mainClass")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn write_version_json_atomic(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "版本配置缺少父目录".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "版本配置文件名无效".to_string())?;
+    let temporary = parent.join(format!(".{}.oaoi.tmp", file_name));
+    let content = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("序列化版本配置失败: {}", error))?;
+
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&temporary)
+            .map_err(|error| format!("创建临时版本配置失败: {}", error))?;
+        file.write_all(&content)
+            .map_err(|error| format!("写入临时版本配置失败: {}", error))?;
+        file.sync_all()
+            .map_err(|error| format!("同步临时版本配置失败: {}", error))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("替换最终版本配置失败: {}", error))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+struct LoaderInstallTask {
+    handle: std::thread::JoinHandle<Result<serde_json::Value, String>>,
+    aborted_downloaders: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn abort_vanilla_after_loader_failure(cancel_name: &str) -> bool {
+    let Some(cancel_flag) = crate::instance::install_cancel_flag(cancel_name) else {
+        return false;
+    };
+    if cancel_flag.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    // 内部取消保持到 Vanilla 和 Loader 都退出，确保稍后注册的下载器也会立即停止。
+    crate::instance::cancel_install_task(cancel_name).is_ok()
+}
+
+fn join_loader_install(task: LoaderInstallTask) -> (Result<serde_json::Value, String>, bool) {
+    let LoaderInstallTask {
+        handle,
+        aborted_downloaders,
+    } = task;
+    let result = match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err("Loader 安装线程异常退出".to_string()),
+    };
+    (result, aborted_downloaders.load(Ordering::Relaxed))
+}
+
+fn clear_internal_loader_cancel(cancel_name: &str) {
+    if let Some(cancel_flag) = crate::instance::install_cancel_flag(cancel_name) {
+        cancel_flag.store(false, Ordering::Relaxed);
+    }
 }
 
 fn spawn_loader_install(
@@ -1753,10 +1249,9 @@ fn spawn_loader_install(
     inst_dir: &std::path::Path,
     http: &reqwest::blocking::Client,
     use_mirror: bool,
-) -> Option<std::thread::JoinHandle<Result<serde_json::Value, String>>> {
-    if loader_version.is_empty()
-        || !matches!(loader_type, "fabric" | "forge" | "quilt" | "neoforge")
-    {
+    cancel_name: &str,
+) -> Option<LoaderInstallTask> {
+    if loader_type == "vanilla" {
         return None;
     }
     let app_handle = app_handle.clone();
@@ -1769,69 +1264,91 @@ fn spawn_loader_install(
     let game_dir = game_dir.to_path_buf();
     let inst_dir = inst_dir.to_path_buf();
     let http = http.clone();
+    let cancel_name = cancel_name.to_string();
+    let aborted_downloaders = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let aborted_for_thread = aborted_downloaders.clone();
 
-    Some(std::thread::spawn(move || {
-        let mut loader_json = empty_loader_json();
-        let java_to_use = resolve_loader_java_for_install(
-            &app_handle,
-            &name,
-            &mc_version,
-            &game_dir_input,
-            &loader_type,
-            &java_path,
-        )?;
-        match loader_type.as_str() {
-            "fabric" => fabric::install_fabric(
+    let handle = std::thread::spawn(move || {
+        let result = (|| -> Result<serde_json::Value, String> {
+            let mut loader_json = empty_loader_json();
+            let java_to_use = resolve_loader_java_for_install(
                 &app_handle,
                 &name,
                 &mc_version,
-                &loader_version,
-                &game_dir,
-                &inst_dir,
-                &http,
-                use_mirror,
-                &mut loader_json,
-                true,
-            )?,
-            "forge" => forge::install_forge(
-                &app_handle,
-                &name,
-                &mc_version,
-                &loader_version,
-                &game_dir,
-                &inst_dir,
-                &http,
-                &java_to_use,
-                use_mirror,
-                &mut loader_json,
-            )?,
-            "quilt" => quilt::install_quilt(
-                &app_handle,
-                &name,
-                &mc_version,
-                &loader_version,
-                &game_dir,
-                &inst_dir,
-                &http,
-                use_mirror,
-                &mut loader_json,
-            )?,
-            "neoforge" => neoforge::install_neoforge(
-                &app_handle,
-                &name,
-                &mc_version,
-                &loader_version,
-                &game_dir,
-                &inst_dir,
-                &http,
-                &java_to_use,
-                use_mirror,
-                &mut loader_json,
-            )?,
-            _ => {}
+                &game_dir_input,
+                &loader_type,
+                &java_path,
+                &cancel_name,
+            )?;
+            match loader_type.as_str() {
+                "fabric" => fabric::install_fabric_with_cancel_name(
+                    &app_handle,
+                    &name,
+                    &cancel_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    use_mirror,
+                    &mut loader_json,
+                    true,
+                )?,
+                "forge" => forge::install_forge_with_task_names(
+                    &app_handle,
+                    &name,
+                    &name,
+                    &cancel_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    &java_to_use,
+                    use_mirror,
+                    &mut loader_json,
+                )?,
+                "quilt" => quilt::install_quilt_with_cancel_name(
+                    &app_handle,
+                    &name,
+                    &cancel_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    use_mirror,
+                    &mut loader_json,
+                )?,
+                "neoforge" => neoforge::install_neoforge_with_task_names(
+                    &app_handle,
+                    &name,
+                    &name,
+                    &cancel_name,
+                    &mc_version,
+                    &loader_version,
+                    &game_dir,
+                    &inst_dir,
+                    &http,
+                    &java_to_use,
+                    use_mirror,
+                    &mut loader_json,
+                )?,
+                _ => {}
+            }
+            Ok(loader_json)
+        })();
+        if let Err(error) = &result {
+            if !is_user_cancel_error(error) && abort_vanilla_after_loader_failure(&cancel_name) {
+                aborted_for_thread.store(true, Ordering::Relaxed);
+            }
         }
-        Ok(loader_json)
-    }))
+        result
+    });
+    Some(LoaderInstallTask {
+        handle,
+        aborted_downloaders,
+    })
 }
 
 fn resolve_loader_java_for_install(
@@ -1841,6 +1358,7 @@ fn resolve_loader_java_for_install(
     game_dir_input: &str,
     loader_type: &str,
     java_path: &str,
+    cancel_name: &str,
 ) -> Result<String, String> {
     if !java_path.is_empty() {
         return Ok(java_path.to_string());
@@ -1866,13 +1384,17 @@ fn resolve_loader_java_for_install(
         1,
         &format!("自动下载 Java {}...", required_major),
     );
-    crate::java_download::download_java_sync_cancelable(required_major, game_dir_input, Some(name))
-        .map_err(|e| {
-            format!(
-                "安装 {} 需要 Java {}，自动下载失败: {}",
-                loader_type, required_major, e
-            )
-        })
+    crate::java_download::download_java_sync_cancelable(
+        required_major,
+        game_dir_input,
+        Some(cancel_name),
+    )
+    .map_err(|e| {
+        format!(
+            "安装 {} 需要 Java {}，自动下载失败: {}",
+            loader_type, required_major, e
+        )
+    })
 }
 
 fn do_create_instance(
@@ -1885,6 +1407,7 @@ fn do_create_instance(
     loader_version: &str,
     java_path: &str,
     use_mirror: bool,
+    cancel_name: &str,
 ) -> Result<String, String> {
     // 路径安全校验
     if name.is_empty()
@@ -1903,7 +1426,7 @@ fn do_create_instance(
     }
     let game_dir = resolve_game_dir(game_dir_input);
     let emit = make_emitter(app_handle, name);
-    if crate::instance::is_cancelled(name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
 
@@ -1913,11 +1436,19 @@ fn do_create_instance(
     }
     std::fs::create_dir_all(&inst_dir).map_err(|e| e.to_string())?;
     let install_marker_path = inst_dir.join(".oaoi_installing");
-    std::fs::write(
+    if let Err(error) = std::fs::write(
         &install_marker_path,
         format!("pid={}\nversion={}\n", std::process::id(), mc_version),
-    )
-    .map_err(|e| format!("创建安装标记失败: {}", e))?;
+    ) {
+        let cleanup_result = std::fs::remove_dir_all(&inst_dir);
+        return Err(match cleanup_result {
+            Ok(()) => format!("创建安装标记失败: {}", error),
+            Err(cleanup_error) => format!(
+                "创建安装标记失败: {}; 清理新版本目录失败: {}",
+                error, cleanup_error
+            ),
+        });
+    }
     let inst_json_path = version_json_path(&inst_dir, name);
 
     let http = reqwest::blocking::Client::builder()
@@ -1940,51 +1471,62 @@ fn do_create_instance(
         &inst_dir,
         &http,
         use_mirror,
+        cancel_name,
     );
 
     // 下载 vanilla 基础（版本 jar + libraries + assets），内部也会并行跑
-    let vanilla_result = vanilla::install_vanilla(
-        app_handle, name, mc_version, meta_url, &game_dir, &inst_dir, &http, use_mirror,
+    let vanilla_result = vanilla::install_vanilla_with_task_names(
+        app_handle,
+        name,
+        name,
+        cancel_name,
+        mc_version,
+        meta_url,
+        &game_dir,
+        &inst_dir,
+        &http,
+        use_mirror,
     );
     let mut ver_json = match vanilla_result {
         Ok(ver_json) => ver_json,
-        Err(e) => {
-            let _ = crate::instance::cancel_modpack_install(name.to_string());
-            if let Some(handle) = loader_handle {
-                let _ = handle.join();
+        Err(vanilla_error) => {
+            if !crate::instance::is_cancelled(cancel_name) {
+                let _ = crate::instance::cancel_install_task(cancel_name);
             }
-            return Err(e);
+            if let Some(task) = loader_handle {
+                let (loader_result, internally_aborted) = join_loader_install(task);
+                if internally_aborted {
+                    clear_internal_loader_cancel(cancel_name);
+                    return match loader_result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err("Loader 失败后未返回错误信息".to_string()),
+                    };
+                }
+            }
+            return Err(vanilla_error);
         }
     };
-    if crate::instance::is_cancelled(name) {
-        if let Some(handle) = loader_handle {
-            let _ = handle.join();
-        }
-        return Err("用户取消安装".to_string());
-    }
 
-    if let Some(handle) = loader_handle {
-        let loader_json = match handle.join() {
-            Ok(Ok(loader_json)) => loader_json,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("Loader 安装线程异常退出".to_string()),
-        };
+    if let Some(task) = loader_handle {
+        let (loader_result, internally_aborted) = join_loader_install(task);
+        if internally_aborted {
+            clear_internal_loader_cancel(cancel_name);
+        }
+        let loader_json = loader_result?;
         merge_loader_install_result(&mut ver_json, &loader_json);
     }
-    if crate::instance::is_cancelled(name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
     crate::instance::set_minecraft_language(&inst_dir, "zh_cn")?;
 
     // 写回最终版本 JSON
     strip_launcher_private_version_fields(&mut ver_json);
-    std::fs::write(
-        &inst_json_path,
-        serde_json::to_string_pretty(&ver_json).unwrap(),
-    )
-    .map_err(|e| format!("保存版本配置失败: {}", e))?;
+    write_version_json_atomic(&inst_json_path, &ver_json)
+        .map_err(|error| format!("保存版本配置失败: {}", error))?;
 
+    remove_install_marker(&install_marker_path)
+        .map_err(|error| format!("安装已完成，但{}", error))?;
     emit("done", 1, 1, &format!("版本 '{}' 创建完成！", name));
-    let _ = std::fs::remove_file(&install_marker_path);
     Ok(format!("版本 {} 创建成功", name))
 }

@@ -13,7 +13,7 @@ use crate::downloader::throttle::GlobalThrottle;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, Weak};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,7 @@ pub struct DownloadManager {
     cooldowns: Arc<SourceCooldowns>,
     cancelled: Arc<AtomicBool>,
     cancel_tokens: Arc<Mutex<Vec<Weak<AtomicBool>>>>,
-    active_destinations: Arc<Mutex<HashSet<String>>>,
+    destinations: Arc<DestinationRegistry>,
 }
 
 #[derive(Debug)]
@@ -37,21 +37,36 @@ struct QueuedRequest {
     // 冷却中的任务先留在队列里，到点后再被 worker 捞起。
     available_at: Instant,
     defer_count: usize,
-    dest_guard: DestinationGuard,
 }
 
 #[derive(Debug)]
 struct DestinationGuard {
-    key: String,
-    active: Arc<Mutex<HashSet<String>>>,
+    keys: Vec<String>,
+    registry: Arc<DestinationRegistry>,
+}
+
+#[derive(Debug, Default)]
+struct DestinationRegistry {
+    active: Mutex<HashSet<String>>,
+    wake: Condvar,
 }
 
 impl Drop for DestinationGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.remove(&self.key);
+        if let Ok(mut active) = self.registry.active.lock() {
+            for key in &self.keys {
+                active.remove(key);
+            }
+            self.registry.wake.notify_all();
         }
     }
+}
+
+fn process_destination_registry() -> Arc<DestinationRegistry> {
+    static REGISTRY: OnceLock<Arc<DestinationRegistry>> = OnceLock::new();
+    REGISTRY
+        .get_or_init(|| Arc::new(DestinationRegistry::default()))
+        .clone()
 }
 
 impl DownloadManager {
@@ -82,13 +97,13 @@ impl DownloadManager {
         runtime: tokio::runtime::Runtime,
         options: DownloadEngineOptions,
     ) -> Self {
-        let max_global_connections = options.max_global_connections.max(1);
-        Self::new_with_runtime_and_pool(
-            http,
-            runtime,
-            options,
-            Arc::new(ConnectionPool::new(max_global_connections)),
-        )
+        #[cfg(not(test))]
+        let pool = crate::downloader::pool::process_connection_pool(
+            DownloadEngineOptions::default_global_connection_limit(),
+        );
+        #[cfg(test)]
+        let pool = Arc::new(ConnectionPool::new(options.max_global_connections.max(1)));
+        Self::new_with_runtime_and_pool(http, runtime, options, pool)
     }
 
     pub fn new_with_runtime_and_pool(
@@ -98,30 +113,37 @@ impl DownloadManager {
         pool: Arc<ConnectionPool>,
     ) -> Self {
         let throttle = Arc::new(GlobalThrottle::new(options.global_speed_limit));
+        #[cfg(not(test))]
+        let cooldowns = crate::downloader::source_cooldown::process_source_cooldowns();
+        #[cfg(test)]
+        let cooldowns = Arc::new(SourceCooldowns::default());
         Self {
             http,
             runtime: Arc::new(runtime),
             pool,
             throttle,
-            cooldowns: Arc::new(SourceCooldowns::default()),
+            cooldowns,
             cancelled: Arc::new(AtomicBool::new(false)),
             options,
             cancel_tokens: Arc::new(Mutex::new(Vec::new())),
-            active_destinations: Arc::new(Mutex::new(HashSet::new())),
+            destinations: process_destination_registry(),
         }
     }
 
     pub fn cancel_all(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
         if let Ok(mut tokens) = self.cancel_tokens.lock() {
+            // 全局状态和 token 注册共用临界区，防止取消扫描后插入未取消的新 token。
+            self.cancelled.store(true, Ordering::Release);
             tokens.retain(|token| {
                 if let Some(token) = token.upgrade() {
-                    token.store(true, Ordering::Relaxed);
+                    token.store(true, Ordering::Release);
                     true
                 } else {
                     false
                 }
             });
+        } else {
+            self.cancelled.store(true, Ordering::Release);
         }
         self.pool.wake_all();
     }
@@ -147,7 +169,7 @@ impl DownloadManager {
         F: Fn(DownloadEvent) + Send + Sync + 'static,
     {
         let handler: EventHandler = Arc::new(on_event);
-        let _dest_guard = match self.try_acquire_destination(&request.dest) {
+        let _dest_guard = match self.acquire_destination(&request.dest, &self.cancelled) {
             Ok(guard) => guard,
             Err(error) => {
                 handler(DownloadEvent::FileFailed {
@@ -232,11 +254,14 @@ impl DownloadManager {
                 dest: request.dest.clone(),
             });
 
-            let dest_key = destination_key(&request.dest);
-            if let Some(first_index) = seen_destinations.get(&dest_key).copied() {
+            let dest_keys = destination_keys(&request.dest);
+            if let Some(first_index) = dest_keys
+                .iter()
+                .find_map(|key| seen_destinations.get(key).copied())
+            {
                 // 同一目标文件不能并发写，否则 .part/.dl 会互相覆盖。
                 let error = format!(
-                    "duplicate destination path with request #{}: {}",
+                    "destination or sidecar path conflicts with request #{}: {}",
                     first_index + 1,
                     request.dest.display()
                 );
@@ -253,30 +278,14 @@ impl DownloadManager {
                 continue;
             }
 
-            let dest_guard = match self.try_acquire_destination(&request.dest) {
-                Ok(guard) => guard,
-                Err(error) => {
-                    handler(DownloadEvent::FileFailed {
-                        request_id: request.id.clone(),
-                        dest: request.dest.clone(),
-                        error: error.clone(),
-                    });
-                    outcomes[index] = Some(DownloadOutcome::Failed {
-                        request_id: request.id,
-                        dest: request.dest,
-                        error,
-                    });
-                    continue;
-                }
-            };
-
-            seen_destinations.insert(dest_key, index);
+            for key in dest_keys {
+                seen_destinations.insert(key, index);
+            }
             queued.push_back(QueuedRequest {
                 index,
                 request,
                 available_at: Instant::now(),
                 defer_count: 0,
-                dest_guard,
             });
         }
 
@@ -308,10 +317,23 @@ impl DownloadManager {
                     index,
                     request,
                     defer_count,
-                    dest_guard,
                     ..
                 } = next;
 
+                let _dest_guard = match manager.acquire_destination(&request.dest, &cancel) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        let _ = tx.send((
+                            index,
+                            DownloadOutcome::Failed {
+                                request_id: request.id,
+                                dest: request.dest,
+                                error,
+                            },
+                        ));
+                        continue;
+                    }
+                };
                 match manager.run_file_attempt(
                     request,
                     index,
@@ -365,7 +387,6 @@ impl DownloadManager {
                                 request,
                                 available_at: Instant::now() + wait,
                                 defer_count: defer_count + 1,
-                                dest_guard,
                             });
                         }
                     }
@@ -393,7 +414,7 @@ impl DownloadManager {
         file_total: usize,
         handler: EventHandler,
     ) -> DownloadOutcome {
-        let _dest_guard = match self.try_acquire_destination(&request.dest) {
+        let _dest_guard = match self.acquire_destination(&request.dest, &self.cancelled) {
             Ok(guard) => guard,
             Err(error) => {
                 handler(DownloadEvent::FileFailed {
@@ -473,30 +494,42 @@ impl DownloadManager {
     }
 
     fn new_cancel_token(&self) -> Arc<AtomicBool> {
-        let token = Arc::new(AtomicBool::new(self.cancelled.load(Ordering::Relaxed)));
-        if let Ok(mut tokens) = self.cancel_tokens.lock() {
-            tokens.retain(|token| token.upgrade().is_some());
-            tokens.push(Arc::downgrade(&token));
-        }
+        let Ok(mut tokens) = self.cancel_tokens.lock() else {
+            // 注册表损坏时直接取消，避免产生无法被 cancel_all 管理的下载任务。
+            return Arc::new(AtomicBool::new(true));
+        };
+        let token = Arc::new(AtomicBool::new(self.cancelled.load(Ordering::Acquire)));
+        tokens.retain(|token| token.upgrade().is_some());
+        tokens.push(Arc::downgrade(&token));
         token
     }
 
-    fn try_acquire_destination(&self, dest: &Path) -> Result<DestinationGuard, String> {
-        let key = destination_key(dest);
+    fn acquire_destination(
+        &self,
+        dest: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<DestinationGuard, String> {
+        let keys = destination_keys(dest);
         let mut active = self
-            .active_destinations
+            .destinations
+            .active
             .lock()
             .map_err(|_| "destination lock poisoned".to_string())?;
-        if active.contains(&key) {
-            return Err(format!(
-                "destination already downloading: {}",
-                dest.display()
-            ));
+        while keys.iter().any(|key| active.contains(key)) {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("download cancelled".to_string());
+            }
+            let (next, _) = self
+                .destinations
+                .wake
+                .wait_timeout(active, Duration::from_millis(200))
+                .map_err(|_| "destination lock poisoned".to_string())?;
+            active = next;
         }
-        active.insert(key.clone());
+        active.extend(keys.iter().cloned());
         Ok(DestinationGuard {
-            key,
-            active: self.active_destinations.clone(),
+            keys,
+            registry: self.destinations.clone(),
         })
     }
 }
@@ -545,6 +578,7 @@ fn destination_key(dest: &Path) -> String {
             .unwrap_or_else(|_| dest.to_path_buf())
     };
     let normalized = normalize_path_lexically(&absolute);
+    let normalized = canonicalize_existing_prefix(&normalized).unwrap_or(normalized);
     let key = normalized.to_string_lossy().replace('/', "\\");
     #[cfg(windows)]
     {
@@ -553,6 +587,32 @@ fn destination_key(dest: &Path) -> String {
     #[cfg(not(windows))]
     {
         key
+    }
+}
+
+fn destination_keys(dest: &Path) -> Vec<String> {
+    crate::downloader::fs::managed_paths(dest)
+        .iter()
+        .map(|path| destination_key(path))
+        .collect()
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Some(normalize_path_lexically(&resolved));
+            }
+            Err(_) => {
+                missing.push(cursor.file_name()?.to_os_string());
+                cursor = cursor.parent()?;
+            }
+        }
     }
 }
 
@@ -604,6 +664,16 @@ mod tests {
     }
 
     #[test]
+    fn destination_keys_cover_sidecar_collisions() {
+        let dest = unique_test_dest("sidecar-keys");
+        let sidecar = crate::downloader::fs::partial_path(&dest);
+        let first = destination_keys(&dest);
+        let second = destination_keys(&sidecar);
+
+        assert!(first.iter().any(|key| second.contains(key)));
+    }
+
+    #[test]
     fn cancel_all_cancels_future_tokens() {
         let manager = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
         let active = manager.new_cancel_token();
@@ -615,17 +685,84 @@ mod tests {
     }
 
     #[test]
-    fn destination_guard_blocks_parallel_same_destination() {
+    fn cancel_all_and_token_registration_are_atomic() {
+        let manager =
+            Arc::new(DownloadManager::with_options(DownloadEngineOptions::default()).unwrap());
+        let worker_count = 64_usize;
+        let barrier = Arc::new(std::sync::Barrier::new(worker_count + 2));
+        let mut workers = Vec::new();
+
+        for _ in 0..worker_count {
+            let manager = manager.clone();
+            let barrier = barrier.clone();
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                manager.new_cancel_token()
+            }));
+        }
+
+        let cancel_manager = manager.clone();
+        let cancel_barrier = barrier.clone();
+        let canceller = thread::spawn(move || {
+            cancel_barrier.wait();
+            cancel_manager.cancel_all();
+        });
+        barrier.wait();
+        canceller.join().unwrap();
+
+        for worker in workers {
+            let token = worker.join().unwrap();
+            assert!(token.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn managers_keep_cooldowns_isolated_in_tests() {
+        let first = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
+        let second = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
+
+        assert!(!Arc::ptr_eq(&first.cooldowns, &second.cooldowns));
+    }
+
+    #[test]
+    fn manager_options_do_not_overwrite_shared_pool_limit() {
+        let pool = Arc::new(ConnectionPool::new(64));
+        let mut first_options = DownloadEngineOptions::default();
+        first_options.max_global_connections = 16;
+        let mut second_options = DownloadEngineOptions::default();
+        second_options.max_global_connections = 32;
+
+        let _first = DownloadManager::with_options_and_pool(first_options, pool.clone()).unwrap();
+        let _second = DownloadManager::with_options_and_pool(second_options, pool.clone()).unwrap();
+
+        assert_eq!(pool.limit(), 64);
+    }
+
+    #[test]
+    fn destination_guard_waits_across_managers_without_connection_permit() {
         let manager = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
+        let other = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
         let dest = std::env::current_dir()
             .unwrap()
             .join("target")
             .join("oaoi-active-destination-test.bin");
-        let guard = manager.try_acquire_destination(&dest).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let guard = manager.acquire_destination(&dest, &cancel).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let waiter_dest = crate::downloader::fs::resume_path(&dest);
+        let waiter_cancel = cancel.clone();
+        let waiter = thread::spawn(move || {
+            let _guard = other
+                .acquire_destination(&waiter_dest, &waiter_cancel)
+                .unwrap();
+            tx.send(other.active_connections()).unwrap();
+        });
 
-        assert!(manager.try_acquire_destination(&dest).is_err());
+        assert!(rx.recv_timeout(Duration::from_millis(250)).is_err());
+        assert_eq!(manager.active_connections(), 0);
         drop(guard);
-        assert!(manager.try_acquire_destination(&dest).is_ok());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
+        waiter.join().unwrap();
     }
 
     #[test]
@@ -731,7 +868,10 @@ mod tests {
 
         let error = manager.download_one(request, |_| {}).unwrap_err();
 
-        assert!(error.contains("Content-Range start mismatch"));
+        assert!(
+            error.contains("Content-Range start mismatch"),
+            "实际错误: {error}"
+        );
         assert!(!error.contains("cancelled"));
         assert!(!dest.exists());
         let _ = fs::remove_file(part);
@@ -794,7 +934,7 @@ mod tests {
     #[test]
     fn download_one_restarts_when_resume_cannot_continue() {
         let body = b"restart when resume is unavailable".to_vec();
-        let (url, handle) = spawn_streaming_server(body.clone(), 3);
+        let (url, handle) = spawn_streaming_server(body.clone(), 2);
         let dest = unique_test_dest("restart-no-resume");
         let part = crate::downloader::fs::partial_path(&dest);
         fs::write(&part, b"old partial bytes").unwrap();
@@ -814,6 +954,201 @@ mod tests {
         assert!(!result.ranged);
         assert_eq!(fs::read(&dest).unwrap(), body);
         assert!(!part.exists());
+        let _ = fs::remove_file(dest);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn download_one_clears_failed_resume_before_fresh_streaming() {
+        let body = b"failed resume must restart as a fresh stream".to_vec();
+        let (url, handle) = spawn_failed_resume_then_streaming_server(body.clone());
+        let dest = unique_test_dest("failed-resume-streaming");
+        let part = crate::downloader::fs::partial_path(&dest);
+        let resume = crate::downloader::fs::resume_path(&dest);
+        fs::write(&part, b"old partial bytes").unwrap();
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "failed-resume-streaming-test",
+            vec![DownloadCandidate::new(url)],
+            dest.clone(),
+        )
+        .with_expected_size(body.len() as u64);
+
+        let result = manager.download_one(request, |_| {}).unwrap();
+
+        assert!(!result.ranged);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        assert!(!part.exists());
+        assert!(!resume.exists());
+        let _ = fs::remove_file(dest);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn download_one_keeps_resume_when_fresh_streaming_fails() {
+        let body = b"failed streaming must keep the old resume".to_vec();
+        let (url, handle) = spawn_failed_resume_then_status_server(body.clone(), 500);
+        let dest = unique_test_dest("failed-streaming-keeps-resume");
+        let part = crate::downloader::fs::partial_path(&dest);
+        let stream = crate::downloader::fs::streaming_fallback_path(&dest);
+        fs::write(&part, b"old partial bytes").unwrap();
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "failed-streaming-keeps-resume-test",
+            vec![DownloadCandidate::new(url)],
+            dest.clone(),
+        )
+        .with_expected_size(body.len() as u64);
+
+        assert!(manager.download_one(request, |_| {}).is_err());
+
+        assert!(part.exists());
+        assert!(fs::read(&part).unwrap().starts_with(b"old partial bytes"));
+        assert!(!stream.exists());
+        let _ = fs::remove_file(part);
+        let _ = fs::remove_file(crate::downloader::fs::resume_path(&dest));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn download_one_restarts_mixed_candidates_with_streaming_source() {
+        let body = b"mixed candidates must retry the usable streaming source".to_vec();
+        let (failed_url, failed_handle) = spawn_status_server(404, 1);
+        let (streaming_url, streaming_handle) = spawn_streaming_server(body.clone(), 2);
+        let dest = unique_test_dest("mixed-resume-candidates");
+        let part = crate::downloader::fs::partial_path(&dest);
+        let resume = crate::downloader::fs::resume_path(&dest);
+        fs::write(&part, b"old partial bytes").unwrap();
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "mixed-resume-candidates-test",
+            vec![
+                DownloadCandidate::new(failed_url),
+                DownloadCandidate::new(streaming_url),
+            ],
+            dest.clone(),
+        )
+        .with_expected_size(body.len() as u64);
+
+        let result = manager.download_one(request, |_| {}).unwrap();
+
+        assert!(!result.ranged);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        assert!(!part.exists());
+        assert!(!resume.exists());
+        let _ = fs::remove_file(dest);
+        failed_handle.join().unwrap();
+        streaming_handle.join().unwrap();
+    }
+
+    #[test]
+    fn download_without_resume_falls_back_to_streaming_after_range_failure() {
+        let body = b"without resume still needs streaming fallback".to_vec();
+        let (url, handle) = spawn_failed_resume_then_streaming_server(body.clone());
+        let dest = unique_test_dest("without-resume-fallback");
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "without-resume-fallback-test",
+            vec![DownloadCandidate::new(url)],
+            dest.clone(),
+        )
+        .with_expected_size(body.len() as u64)
+        .without_resume();
+
+        let result = manager.download_one(request, |_| {}).unwrap();
+
+        assert!(!result.ranged);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        assert!(!crate::downloader::fs::partial_path(&dest).exists());
+        assert!(!crate::downloader::fs::resume_path(&dest).exists());
+        let _ = fs::remove_file(dest);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn streaming_pressure_after_range_failure_is_deferred() {
+        let body = b"stream pressure should defer".to_vec();
+        let (url, handle) = spawn_failed_resume_then_status_server(body.clone(), 429);
+        let dest = unique_test_dest("stream-pressure-deferred");
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        options.source_cooldown_duration = Duration::from_millis(10);
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "stream-pressure-deferred-test",
+            vec![DownloadCandidate::new(url)],
+            dest.clone(),
+        )
+        .with_expected_size(body.len() as u64);
+
+        let attempt = manager.run_file_attempt(
+            request,
+            0,
+            1,
+            Arc::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+            0,
+            true,
+        );
+
+        assert!(matches!(attempt, FileTaskAttempt::Deferred { .. }));
+        let _ = fs::remove_file(crate::downloader::fs::partial_path(&dest));
+        let _ = fs::remove_file(crate::downloader::fs::resume_path(&dest));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn changed_range_identity_falls_back_without_mixing_parts() {
+        let old_body = b"old range identity body".to_vec();
+        let new_body = b"new range identity body".to_vec();
+        assert_eq!(old_body.len(), new_body.len());
+        let (url, if_range_rx, handle) =
+            spawn_changed_identity_then_streaming_server(old_body, new_body.clone());
+        let dest = unique_test_dest("changed-range-identity");
+        let mut options = DownloadEngineOptions::default();
+        options.max_global_connections = 1;
+        options.max_connections_per_file = 1;
+        options.segment_retries = 0;
+        options.candidate_retry_attempts = 0;
+        let manager = DownloadManager::with_options(options).unwrap();
+        let request = DownloadRequest::new(
+            "changed-range-identity-test",
+            vec![DownloadCandidate::new(url)],
+            dest.clone(),
+        )
+        .with_expected_size(new_body.len() as u64);
+
+        let result = manager.download_one(request, |_| {}).unwrap();
+
+        assert_eq!(
+            if_range_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "\"v1\""
+        );
+        assert!(!result.ranged);
+        assert_eq!(fs::read(&dest).unwrap(), new_body);
         let _ = fs::remove_file(dest);
         handle.join().unwrap();
     }
@@ -1056,6 +1391,108 @@ mod tests {
         (url, handle)
     }
 
+    fn spawn_failed_resume_then_streaming_server(
+        body: Vec<u8>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let handle = thread::spawn(move || {
+            for request_index in 0..3 {
+                let request = server.recv().unwrap();
+                let range = range_header(&request);
+                match request_index {
+                    0 => respond_range_or_full(request, &body, range, false, false),
+                    1 => respond_range_or_full(request, &body, range, true, false),
+                    _ => {
+                        request
+                            .respond(
+                                Response::from_data(body.clone())
+                                    .with_header(header("Content-Length", &body.len().to_string())),
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn spawn_failed_resume_then_status_server(
+        body: Vec<u8>,
+        status: u16,
+    ) -> (String, thread::JoinHandle<()>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let handle = thread::spawn(move || {
+            for request_index in 0..3 {
+                let request = server.recv().unwrap();
+                let range = range_header(&request);
+                match request_index {
+                    0 => respond_range_or_full(request, &body, range, false, false),
+                    1 => respond_range_or_full(request, &body, range, true, false),
+                    _ => request
+                        .respond(Response::empty(StatusCode(status)))
+                        .unwrap(),
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn spawn_changed_identity_then_streaming_server(
+        old_body: Vec<u8>,
+        new_body: Vec<u8>,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for request_index in 0..3 {
+                let request = server.recv().unwrap();
+                if request_index == 2 {
+                    request
+                        .respond(
+                            Response::from_data(new_body.clone())
+                                .with_header(header("Content-Length", &new_body.len().to_string())),
+                        )
+                        .unwrap();
+                    continue;
+                }
+
+                if request_index == 1 {
+                    tx.send(header_value(&request, "If-Range").unwrap_or_default())
+                        .unwrap();
+                }
+                let body = if request_index == 0 {
+                    &old_body
+                } else {
+                    &new_body
+                };
+                let range = range_header(&request)
+                    .and_then(|range| parse_range(&range, body.len()))
+                    .unwrap();
+                let etag = if request_index == 0 {
+                    "\"v1\""
+                } else {
+                    "\"v2\""
+                };
+                request
+                    .respond(
+                        Response::from_data(body[range.0..=range.1].to_vec())
+                            .with_status_code(StatusCode(206))
+                            .with_header(header(
+                                "Content-Range",
+                                &format!("bytes {}-{}/{}", range.0, range.1, body.len()),
+                            ))
+                            .with_header(header("Accept-Ranges", "bytes"))
+                            .with_header(header("ETag", etag)),
+                    )
+                    .unwrap();
+            }
+        });
+        (url, rx, handle)
+    }
+
     fn spawn_status_server(status: u16, requests: usize) -> (String, thread::JoinHandle<()>) {
         let server = Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr());
@@ -1071,10 +1508,14 @@ mod tests {
     }
 
     fn range_header(request: &tiny_http::Request) -> Option<String> {
+        header_value(request, "Range")
+    }
+
+    fn header_value(request: &tiny_http::Request, name: &'static str) -> Option<String> {
         request
             .headers()
             .iter()
-            .find(|header| header.field.equiv("Range"))
+            .find(|header| header.field.equiv(name))
             .map(|header| header.value.as_str().to_string())
     }
 

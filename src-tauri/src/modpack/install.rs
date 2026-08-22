@@ -5,7 +5,10 @@ use crate::downloader::event::{DownloadEvent, DownloadOutcome};
 use crate::downloader::{
     DownloadCandidate, DownloadEngineOptions, DownloadManager, DownloadRequest,
 };
-use crate::installer::{empty_loader_json, merge_loader_install_result, mirror_url};
+use crate::installer::{
+    empty_loader_json, fetch_json_cancelable, fetch_json_request_cancelable,
+    merge_loader_install_result, write_version_json_atomic,
+};
 use crate::instance::{
     cf_api_key, install_download_pool, register_download_manager, safe_join, safe_path_name,
     strip_launcher_private_version_fields, version_json_path,
@@ -15,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 struct ModpackDownloadTask {
@@ -62,6 +65,68 @@ const MODPACK_FILE_RETRY_DELAY_SECS: u64 = 15;
 const MODPACK_FILE_STALL_TIMEOUT_SECS: u64 = 10;
 const MODPACK_FILE_SLOW_SAMPLE_SECS: u64 = 10;
 const MODPACK_FILE_SLOW_MIN_BYTES_PER_SEC: u64 = 32 * 1024;
+const CF_API_COOLDOWN_SECS: u64 = 15;
+const CF_API_RETRY_ATTEMPTS: usize = 2;
+const CF_FALLBACK_CONCURRENCY: usize = 4;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnresolvedCurseForgeFile {
+    project_id: u32,
+    file_id: u32,
+    try_individual_api: bool,
+}
+
+#[derive(Default)]
+struct CurseForgeApiThrottle {
+    cooldown_until: Mutex<Option<Instant>>,
+}
+
+impl CurseForgeApiThrottle {
+    fn wait(&self, cancel_name: &str) -> Result<(), String> {
+        loop {
+            ensure_modpack_not_cancelled(cancel_name)?;
+            let remaining = {
+                let mut cooldown = self
+                    .cooldown_until
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = Instant::now();
+                match *cooldown {
+                    Some(until) if until > now => Some(until.duration_since(now)),
+                    Some(_) => {
+                        *cooldown = None;
+                        None
+                    }
+                    None => None,
+                }
+            };
+            let Some(remaining) = remaining else {
+                return Ok(());
+            };
+            std::thread::sleep(remaining.min(Duration::from_millis(100)));
+        }
+    }
+
+    fn record_failure(&self, error: &str) {
+        if !curseforge_api_requires_cooldown(error) {
+            return;
+        }
+        let until = Instant::now() + Duration::from_secs(CF_API_COOLDOWN_SECS);
+        let mut cooldown = self
+            .cooldown_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cooldown.is_none_or(|current| current < until) {
+            *cooldown = Some(until);
+        }
+    }
+}
+
+fn curseforge_api_requires_cooldown(error: &str) -> bool {
+    ["429", "500", "502", "503", "504", "timed out", "timeout"]
+        .iter()
+        .any(|marker| error.to_ascii_lowercase().contains(marker))
+}
 
 fn classify_modpack_path(dest: &Path) -> &'static str {
     let s = dest.to_string_lossy().replace('\\', "/");
@@ -135,6 +200,116 @@ fn is_cancel_related_error(error: &str) -> bool {
     error.contains("cancelled")
         || error.contains("download cancelled")
         || error.contains("用户取消")
+}
+
+fn ensure_modpack_not_cancelled(cancel_name: &str) -> Result<(), String> {
+    if crate::instance::is_cancelled(cancel_name) {
+        Err("用户取消安装".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn fetch_curseforge_json_controlled(
+    client: &reqwest::blocking::Client,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<serde_json::Value>,
+    cancel_name: &str,
+    throttle: &CurseForgeApiThrottle,
+    attempts: usize,
+) -> Result<serde_json::Value, String> {
+    let attempts = attempts.max(1);
+    let mut last_error = String::new();
+    for attempt in 0..attempts {
+        throttle.wait(cancel_name)?;
+        match fetch_json_request_cancelable(
+            client,
+            method.clone(),
+            url,
+            vec![("x-api-key".to_string(), cf_api_key())],
+            body.clone(),
+            cancel_name,
+            Duration::from_secs(60),
+        ) {
+            Ok(json) => return Ok(json),
+            Err(error) if is_cancel_related_error(&error) => return Err(error),
+            Err(error) => {
+                throttle.record_failure(&error);
+                last_error = error;
+                if attempt + 1 < attempts && !curseforge_api_requires_cooldown(&last_error) {
+                    let retry_until = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < retry_until {
+                        ensure_modpack_not_cancelled(cancel_name)?;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+struct CancelableProbeResponse {
+    status: reqwest::StatusCode,
+    final_url: reqwest::Url,
+    content_disposition: Option<String>,
+}
+
+fn fetch_response_cancelable(
+    url: &str,
+    cancel_name: &str,
+    timeout: Duration,
+) -> Result<CancelableProbeResponse, String> {
+    ensure_modpack_not_cancelled(cancel_name)?;
+    let cancel = crate::instance::install_cancel_flag(cancel_name)
+        .ok_or_else(|| "安装任务已结束".to_string())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("创建探测运行时失败: {}", error))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .build()
+        .map_err(|error| format!("创建探测客户端失败: {}", error))?;
+    let url = url.to_string();
+
+    runtime.block_on(async move {
+        let request = client.get(&url).timeout(timeout).send();
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                result = &mut request => {
+                    let response = result.map_err(|error| error.to_string())?;
+                    return Ok(CancelableProbeResponse {
+                        status: response.status(),
+                        final_url: response.url().clone(),
+                        content_disposition: response.headers()
+                            .get("content-disposition")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    });
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err("用户取消安装".to_string());
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn abort_downloaders_after_stage_failure(cancel_name: &str) -> bool {
+    let Some(cancel_flag) = crate::instance::install_cancel_flag(cancel_name) else {
+        return false;
+    };
+    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+
+    // 标志保持到并行线程全部退出，确保稍后才注册的原版下载器也会立即停止。
+    crate::instance::cancel_install_task(cancel_name).is_ok()
 }
 
 fn download_modpack_tasks_with_engine(
@@ -283,27 +458,29 @@ fn resolve_curseforge_file_task(
     file_id: u32,
     class_id: Option<u64>,
     inst_dir: &Path,
+    cancel_name: &str,
+    throttle: &CurseForgeApiThrottle,
 ) -> Result<ModpackDownloadTask, String> {
+    ensure_modpack_not_cancelled(cancel_name)?;
     let api_url = format!(
         "https://api.curseforge.com/v1/mods/{}/files/{}",
         project_id, file_id
     );
-    let resp = client
-        .get(&api_url)
-        .header("x-api-key", &cf_api_key())
-        .header("Accept", "application/json")
-        .send()
-        .map_err(|e| format!("CurseForge 文件解析失败: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "CurseForge 文件解析失败: HTTP {} p={} f={}",
-            resp.status(),
-            project_id,
-            file_id
-        ));
-    }
-
-    let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    let json = fetch_curseforge_json_controlled(
+        client,
+        reqwest::Method::GET,
+        &api_url,
+        None,
+        cancel_name,
+        throttle,
+        1,
+    )
+    .map_err(|error| {
+        format!(
+            "CurseForge 文件解析失败: {} p={} f={}",
+            error, project_id, file_id
+        )
+    })?;
     let item = &json["data"];
     let raw_file_name = item["fileName"]
         .as_str()
@@ -333,20 +510,27 @@ fn resolve_curseforge_file_task(
         "https://api.curseforge.com/v1/mods/{}/files/{}/download-url",
         project_id, file_id
     );
-    if let Ok(resp) = client
-        .get(&download_url_api)
-        .header("x-api-key", &cf_api_key())
-        .header("Accept", "application/json")
-        .send()
-    {
-        if resp.status().is_success() {
-            if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(url) = json["data"].as_str().filter(|url| !url.trim().is_empty()) {
-                    append_unique_urls(&mut urls, vec![url.to_string()]);
-                }
+    ensure_modpack_not_cancelled(cancel_name)?;
+    match fetch_curseforge_json_controlled(
+        client,
+        reqwest::Method::GET,
+        &download_url_api,
+        None,
+        cancel_name,
+        throttle,
+        1,
+    ) {
+        Ok(json) => {
+            if let Some(url) = json["data"].as_str().filter(|url| !url.trim().is_empty()) {
+                append_unique_urls(&mut urls, vec![url.to_string()]);
             }
         }
+        Err(error) if crate::instance::is_cancelled(cancel_name) => return Err(error),
+        Err(error) => {
+            eprintln!("[cf] 下载地址 API 失败，继续使用 CDN 候选: {}", error);
+        }
     }
+    ensure_modpack_not_cancelled(cancel_name)?;
     if urls.is_empty() {
         return Err(format!(
             "CurseForge 文件没有可用下载地址: p={} f={}",
@@ -362,18 +546,13 @@ fn resolve_curseforge_file_task(
 }
 
 fn resolve_curseforge_blind_file_task(
-    client: &reqwest::blocking::Client,
     project_id: u32,
     file_id: u32,
     inst_dir: &Path,
+    cancel_name: &str,
 ) -> Result<ModpackDownloadTask, String> {
-    let id_text = file_id.to_string();
-    let (first, second) = if id_text.len() > 4 {
-        let (left, right) = id_text.split_at(4);
-        (left.to_string(), right.to_string())
-    } else {
-        ((file_id / 1000).to_string(), (file_id % 1000).to_string())
-    };
+    ensure_modpack_not_cancelled(cancel_name)?;
+    let (first, second) = curseforge_cdn_parts(file_id);
     let probe_urls = with_mod_mirrors(vec![
         format!("https://mediafilez.forgecdn.net/files/{}/{}", first, second),
         format!("https://edge.forgecdn.net/files/{}/{}", first, second),
@@ -382,11 +561,17 @@ fn resolve_curseforge_blind_file_task(
     let mut resolved_dest: Option<PathBuf> = None;
     let mut resolved_urls = Vec::new();
     for url in probe_urls {
-        match client.get(&url).send() {
-            Ok(resp) if resp.status().is_success() => {
-                let final_url = resp.url().to_string();
-                let file_name = response_file_name(&resp, &second)
-                    .unwrap_or_else(|| format!("{}-{}.jar", project_id, file_id));
+        ensure_modpack_not_cancelled(cancel_name)?;
+        match fetch_response_cancelable(&url, cancel_name, Duration::from_secs(60)) {
+            Ok(resp) if resp.status.is_success() => {
+                ensure_modpack_not_cancelled(cancel_name)?;
+                let final_url = resp.final_url.to_string();
+                let file_name = response_file_name(
+                    &resp.final_url,
+                    resp.content_disposition.as_deref(),
+                    &second,
+                )
+                .unwrap_or_else(|| format!("{}-{}.jar", project_id, file_id));
                 let file_name = safe_path_name(&file_name, "文件名")?;
                 let empty_json = serde_json::json!({});
                 let (target_dir, file_type) = detect_target_dir(&empty_json, &file_name, inst_dir);
@@ -404,12 +589,13 @@ fn resolve_curseforge_blind_file_task(
                 append_unique_urls(&mut resolved_urls, with_mod_mirrors(vec![final_url]));
             }
             Ok(resp) => {
-                last_err = format!("{} HTTP {}", url, resp.status());
+                last_err = format!("{} HTTP {}", url, resp.status);
             }
             Err(e) => {
                 last_err = format!("{}: {}", url, e);
             }
         }
+        ensure_modpack_not_cancelled(cancel_name)?;
     }
     if let Some(dest) = resolved_dest {
         if !resolved_urls.is_empty() {
@@ -426,9 +612,121 @@ fn resolve_curseforge_blind_file_task(
     ))
 }
 
-fn response_file_name(resp: &reqwest::blocking::Response, fallback_path: &str) -> Option<String> {
-    let from_url = resp
-        .url()
+fn curseforge_cdn_parts(file_id: u32) -> (String, String) {
+    ((file_id / 1000).to_string(), (file_id % 1000).to_string())
+}
+
+fn append_missing_curseforge_file_ids(
+    requested: &[u32],
+    returned: &std::collections::HashSet<u32>,
+    file_map: &std::collections::HashMap<u32, (u32, u32)>,
+    unresolved: &mut Vec<UnresolvedCurseForgeFile>,
+) {
+    for file_id in requested {
+        if !returned.contains(file_id) {
+            if let Some(&(project_id, file_id)) = file_map.get(file_id) {
+                unresolved.push(UnresolvedCurseForgeFile {
+                    project_id,
+                    file_id,
+                    try_individual_api: true,
+                });
+            }
+        }
+    }
+}
+
+fn push_unresolved_curseforge_file(
+    unresolved: &mut Vec<UnresolvedCurseForgeFile>,
+    project_id: u32,
+    file_id: u32,
+    try_individual_api: bool,
+) {
+    if let Some(existing) = unresolved
+        .iter_mut()
+        .find(|item| item.project_id == project_id && item.file_id == file_id)
+    {
+        existing.try_individual_api |= try_individual_api;
+        return;
+    }
+    unresolved.push(UnresolvedCurseForgeFile {
+        project_id,
+        file_id,
+        try_individual_api,
+    });
+}
+
+fn resolve_unresolved_curseforge_files(
+    client: Option<&reqwest::blocking::Client>,
+    unresolved: &[UnresolvedCurseForgeFile],
+    pid_class: &HashMap<u32, u64>,
+    inst_dir: &Path,
+    cancel_name: &str,
+    throttle: &CurseForgeApiThrottle,
+) -> Result<Vec<ModpackDownloadTask>, String> {
+    let mut resolved = Vec::with_capacity(unresolved.len());
+    for chunk in unresolved.chunks(CF_FALLBACK_CONCURRENCY) {
+        ensure_modpack_not_cancelled(cancel_name)?;
+        let results = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|entry| {
+                    scope.spawn(move || {
+                        if entry.try_individual_api {
+                            let Some(client) = client else {
+                                return resolve_curseforge_blind_file_task(
+                                    entry.project_id,
+                                    entry.file_id,
+                                    inst_dir,
+                                    cancel_name,
+                                );
+                            };
+                            match resolve_curseforge_file_task(
+                                client,
+                                entry.project_id,
+                                entry.file_id,
+                                pid_class.get(&entry.project_id).copied(),
+                                inst_dir,
+                                cancel_name,
+                                throttle,
+                            ) {
+                                Ok(task) => return Ok(task),
+                                Err(error) if is_cancel_related_error(&error) => return Err(error),
+                                Err(error) => {
+                                    eprintln!("[cf] 单文件 API 解析失败，改用 CDN 探测: {}", error)
+                                }
+                            }
+                        }
+                        resolve_curseforge_blind_file_task(
+                            entry.project_id,
+                            entry.file_id,
+                            inst_dir,
+                            cancel_name,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("CurseForge 解析线程异常退出".to_string()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            resolved.push(result?);
+        }
+    }
+    Ok(resolved)
+}
+
+fn response_file_name(
+    final_url: &reqwest::Url,
+    content_disposition: Option<&str>,
+    fallback_path: &str,
+) -> Option<String> {
+    let from_url = final_url
         .path_segments()
         .and_then(|mut parts| parts.next_back())
         .map(|name| name.split('?').next().unwrap_or(name))
@@ -438,9 +736,7 @@ fn response_file_name(resp: &reqwest::blocking::Response, fallback_path: &str) -
         return from_url;
     }
 
-    resp.headers()
-        .get("content-disposition")
-        .and_then(|value| value.to_str().ok())
+    content_disposition
         .and_then(|value| {
             value
                 .split("filename=")
@@ -482,6 +778,7 @@ pub fn do_install_modpack_inner(
     inst_dir: &std::path::Path,
     game_dir: &std::path::Path,
     display_name: &str,
+    cancel_name: &str,
 ) -> Result<String, String> {
     use crate::installer::fabric;
     use crate::installer::forge;
@@ -494,15 +791,14 @@ pub fn do_install_modpack_inner(
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
         .ok_or_else(|| "整合包名称无效".to_string())?;
-    if crate::instance::is_cancelled(display_name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
 
     // 1. 安装基础游戏
     let http = build_http_client(15, 180, 8)?;
 
-    // 整合包安装：基础游戏（版本 jar/libs/assets）优先用镜像
-    // Mod 下载保持用户原始设置（CurseForge CDN 国内直连就行）
+    // 游戏元数据与基础文件严格服从用户选择；Mod 下载继续使用自己的候选源顺序。
     let mirror_manifest_url = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
     let official_manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
@@ -512,28 +808,54 @@ pub fn do_install_modpack_inner(
         "meta",
         0,
         1,
-        "获取版本清单（镜像优先）...",
+        if use_mirror {
+            "获取版本清单（镜像优先）..."
+        } else {
+            "获取版本清单（官方优先）..."
+        },
     );
-    let manifest_resp = http
-        .get(mirror_manifest_url)
-        .timeout(std::time::Duration::from_secs(8))
-        .send();
-    let (manifest_resp, game_mirror) = match manifest_resp {
-        Ok(r) if r.status().is_success() => {
-            eprintln!("[modpack] 镜像源获取清单成功");
-            (Ok(r), true)
-        }
-        _ => {
-            eprintln!("[modpack] 镜像源失败，回退到官方源...");
-            emit_progress(app, display_name, "meta", 0, 1, "镜像源超时，切换官方源...");
-            (http.get(official_manifest_url).send(), use_mirror)
-        }
+    let manifest_candidates = if use_mirror {
+        [
+            (mirror_manifest_url, "镜像源"),
+            (official_manifest_url, "官方源"),
+        ]
+    } else {
+        [
+            (official_manifest_url, "官方源"),
+            (mirror_manifest_url, "镜像源"),
+        ]
     };
-
-    let manifest: serde_json::Value = manifest_resp
-        .map_err(|e| format!("获取版本清单失败: {}", e))?
-        .json()
-        .map_err(|e| e.to_string())?;
+    let mut manifest = None;
+    let mut manifest_errors = Vec::new();
+    for (index, (url, label)) in manifest_candidates.iter().enumerate() {
+        match fetch_json_cancelable(&http, url, cancel_name, std::time::Duration::from_secs(30)) {
+            Ok(value) => {
+                eprintln!("[modpack] {}获取清单成功", label);
+                manifest = Some(value);
+                break;
+            }
+            Err(error) if error.contains("用户取消") => return Err(error),
+            Err(error) => {
+                manifest_errors.push(format!("{}: {}", label, error));
+                if index + 1 < manifest_candidates.len() {
+                    emit_progress(
+                        app,
+                        display_name,
+                        "meta",
+                        0,
+                        1,
+                        &format!("{}不可用，切换下一个来源...", label),
+                    );
+                }
+            }
+        }
+    }
+    let manifest = manifest.ok_or_else(|| {
+        format!(
+            "获取版本清单失败，所有来源均不可用: {}",
+            manifest_errors.join(" | ")
+        )
+    })?;
     let meta_url = manifest["versions"]
         .as_array()
         .and_then(|arr| {
@@ -543,15 +865,13 @@ pub fn do_install_modpack_inner(
         .and_then(|v| v["url"].as_str())
         .ok_or_else(|| format!("找不到 MC 版本: {}", meta.mc_version))?
         .to_string();
-    let meta_url = mirror_url(&meta_url, game_mirror);
-
     if inst_name.is_empty() {
         return Err("整合包名称无效".to_string());
     }
     std::fs::create_dir_all(inst_dir).map_err(|e| e.to_string())?;
     let inst_json_path = version_json_path(inst_dir, &inst_name);
 
-    if crate::instance::is_cancelled(display_name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
 
@@ -587,6 +907,7 @@ pub fn do_install_modpack_inner(
                     .user_agent("OAOI-Launcher/1.0")
                     .build()
                     .ok();
+                let api_throttle = Arc::new(CurseForgeApiThrottle::default());
 
                 // 先批量获取项目 classId（用于区分 mod/材质包/光影包）
                 let mut pid_class: std::collections::HashMap<u32, u64> =
@@ -606,17 +927,22 @@ pub fn do_install_modpack_inner(
                         unique_pids.len()
                     );
                     for chunk in unique_pids.chunks(50) {
+                        ensure_modpack_not_cancelled(cancel_name)?;
                         let body = serde_json::json!({ "modIds": chunk, "filterPcOnly": true });
-                        if let Ok(resp) = client
-                            .post("https://api.curseforge.com/v1/mods")
-                            .header("x-api-key", &cf_api_key())
-                            .header("Content-Type", "application/json")
-                            .json(&body)
-                            .send()
-                        {
-                            if let Ok(json) = resp.json::<serde_json::Value>() {
+                        let response = fetch_curseforge_json_controlled(
+                            client,
+                            reqwest::Method::POST,
+                            "https://api.curseforge.com/v1/mods",
+                            Some(body),
+                            cancel_name,
+                            &api_throttle,
+                            CF_API_RETRY_ATTEMPTS,
+                        );
+                        match response {
+                            Ok(json) => {
                                 if let Some(data) = json["data"].as_array() {
                                     for proj in data {
+                                        ensure_modpack_not_cancelled(cancel_name)?;
                                         let pid = proj["id"].as_u64().unwrap_or(0) as u32;
                                         let cid = proj["classId"].as_u64().unwrap_or(0);
                                         if cid > 0 {
@@ -625,6 +951,10 @@ pub fn do_install_modpack_inner(
                                     }
                                 }
                             }
+                            Err(error) if crate::instance::is_cancelled(cancel_name) => {
+                                return Err(error);
+                            }
+                            Err(error) => eprintln!("[cf] 项目信息请求失败: {}", error),
                         }
                     }
                     eprintln!(
@@ -639,55 +969,79 @@ pub fn do_install_modpack_inner(
                 );
 
                 let mut resolved: Vec<ModpackDownloadTask> = Vec::new();
-                let mut unresolved: Vec<(u32, u32)> = Vec::new();
+                let mut unresolved: Vec<UnresolvedCurseForgeFile> = Vec::new();
 
                 if let Some(client) = &api_client {
                     for chunk in file_ids.chunks(500) {
+                        ensure_modpack_not_cancelled(cancel_name)?;
                         let body = serde_json::json!({ "fileIds": chunk });
-                        match client
-                            .post("https://api.curseforge.com/v1/mods/files")
-                            .header("x-api-key", &cf_api_key())
-                            .header("Content-Type", "application/json")
-                            .header("Accept", "application/json")
-                            .json(&body)
-                            .send()
-                        {
-                            Ok(resp) if resp.status().is_success() => {
-                                if let Ok(json) = resp.json::<serde_json::Value>() {
-                                    if let Some(data) = json["data"].as_array() {
-                                        for item in data {
-                                            let fid = item["id"].as_u64().unwrap_or(0) as u32;
-                                            let raw_fname =
-                                                item["fileName"].as_str().unwrap_or("").to_string();
-                                            let dl = item["downloadUrl"]
-                                                .as_str()
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let pid = file_map.get(&fid).map(|x| x.0).unwrap_or(0);
-                                            let sha1 = sha1_from_curseforge_hashes(&item["hashes"]);
+                        let response = fetch_curseforge_json_controlled(
+                            client,
+                            reqwest::Method::POST,
+                            "https://api.curseforge.com/v1/mods/files",
+                            Some(body),
+                            cancel_name,
+                            &api_throttle,
+                            CF_API_RETRY_ATTEMPTS,
+                        );
+                        match response {
+                            Ok(json) => {
+                                let requested_ids = chunk
+                                    .iter()
+                                    .copied()
+                                    .collect::<std::collections::HashSet<_>>();
+                                let mut returned_ids = std::collections::HashSet::new();
+                                if let Some(data) = json["data"].as_array() {
+                                    for item in data {
+                                        ensure_modpack_not_cancelled(cancel_name)?;
+                                        let fid = item["id"].as_u64().unwrap_or(0) as u32;
+                                        if !requested_ids.contains(&fid)
+                                            || !returned_ids.insert(fid)
+                                        {
+                                            continue;
+                                        }
+                                        let raw_fname =
+                                            item["fileName"].as_str().unwrap_or("").to_string();
+                                        let dl =
+                                            item["downloadUrl"].as_str().unwrap_or("").to_string();
+                                        let pid = file_map.get(&fid).map(|x| x.0).unwrap_or(0);
+                                        let sha1 = sha1_from_curseforge_hashes(&item["hashes"]);
 
-                                            if raw_fname.is_empty() {
-                                                unresolved.push((pid, fid));
+                                        if raw_fname.is_empty() {
+                                            push_unresolved_curseforge_file(
+                                                &mut unresolved,
+                                                pid,
+                                                fid,
+                                                true,
+                                            );
+                                            continue;
+                                        }
+                                        let fname = match safe_path_name(&raw_fname, "文件名") {
+                                            Ok(name) => name,
+                                            Err(_) => {
+                                                push_unresolved_curseforge_file(
+                                                    &mut unresolved,
+                                                    pid,
+                                                    fid,
+                                                    true,
+                                                );
                                                 continue;
                                             }
-                                            let fname = match safe_path_name(&raw_fname, "文件名")
-                                            {
-                                                Ok(name) => name,
-                                                Err(_) => {
-                                                    unresolved.push((pid, fid));
-                                                    continue;
-                                                }
-                                            };
+                                        };
 
-                                            if fname.is_empty() {
-                                                unresolved.push((pid, fid));
-                                                continue;
-                                            }
+                                        if fname.is_empty() {
+                                            push_unresolved_curseforge_file(
+                                                &mut unresolved,
+                                                pid,
+                                                fid,
+                                                true,
+                                            );
+                                            continue;
+                                        }
 
-                                            // 优先用项目 classId 判断目录（最可靠）
-                                            let (target_dir, file_type) = if let Some(&cid) =
-                                                pid_class.get(&pid)
-                                            {
+                                        // 优先用项目 classId 判断目录（最可靠）
+                                        let (target_dir, file_type) =
+                                            if let Some(&cid) = pid_class.get(&pid) {
                                                 match cid {
                                                     6 => (inst_dir.join("mods"), "mod"),
                                                     12 => {
@@ -710,39 +1064,57 @@ pub fn do_install_modpack_inner(
                                             } else {
                                                 detect_target_dir(item, &fname, inst_dir)
                                             };
-                                            if file_type != "mod" {
-                                                eprintln!(
-                                                    "[cf] {} → {} ({}) [classId={}]",
-                                                    fname,
-                                                    target_dir.display(),
-                                                    file_type,
-                                                    pid_class.get(&pid).unwrap_or(&0)
-                                                );
-                                            }
-                                            let dest = target_dir.join(&fname);
-                                            let mut urls =
-                                                with_mod_mirrors(cf_cdn_urls(fid, &fname));
-                                            if !dl.is_empty() {
-                                                append_unique_urls(&mut urls, vec![dl]);
-                                            }
-                                            if urls.is_empty() {
-                                                unresolved.push((pid, fid));
-                                            } else {
-                                                resolved.push(ModpackDownloadTask {
-                                                    urls,
-                                                    dest,
-                                                    sha1: sha1.clone(),
-                                                });
-                                            }
+                                        if file_type != "mod" {
+                                            eprintln!(
+                                                "[cf] {} → {} ({}) [classId={}]",
+                                                fname,
+                                                target_dir.display(),
+                                                file_type,
+                                                pid_class.get(&pid).unwrap_or(&0)
+                                            );
+                                        }
+                                        let dest = target_dir.join(&fname);
+                                        let mut urls = with_mod_mirrors(cf_cdn_urls(fid, &fname));
+                                        if !dl.is_empty() {
+                                            append_unique_urls(&mut urls, vec![dl]);
+                                        }
+                                        if urls.is_empty() {
+                                            push_unresolved_curseforge_file(
+                                                &mut unresolved,
+                                                pid,
+                                                fid,
+                                                true,
+                                            );
+                                        } else {
+                                            resolved.push(ModpackDownloadTask {
+                                                urls,
+                                                dest,
+                                                sha1: sha1.clone(),
+                                            });
                                         }
                                     }
                                 }
+                                // CF 偶尔会返回 200 但漏掉部分 ID，漏项必须继续走单文件候选解析。
+                                append_missing_curseforge_file_ids(
+                                    chunk,
+                                    &returned_ids,
+                                    &file_map,
+                                    &mut unresolved,
+                                );
                             }
-                            _ => {
-                                eprintln!("[cf] 批量 API 失败, 回退到逐个下载");
+                            Err(error) => {
+                                if crate::instance::is_cancelled(cancel_name) {
+                                    return Err(error);
+                                }
+                                eprintln!("[cf] 批量 API 失败, 回退到逐个下载: {}", error);
                                 for id in chunk {
                                     if let Some(&(pid, fid)) = file_map.get(id) {
-                                        unresolved.push((pid, fid));
+                                        push_unresolved_curseforge_file(
+                                            &mut unresolved,
+                                            pid,
+                                            fid,
+                                            false,
+                                        );
                                     }
                                 }
                             }
@@ -750,7 +1122,13 @@ pub fn do_install_modpack_inner(
                     }
                 } else {
                     for f in files {
-                        unresolved.push((f.project_id, f.file_id));
+                        ensure_modpack_not_cancelled(cancel_name)?;
+                        push_unresolved_curseforge_file(
+                            &mut unresolved,
+                            f.project_id,
+                            f.file_id,
+                            false,
+                        );
                     }
                 }
 
@@ -760,26 +1138,16 @@ pub fn do_install_modpack_inner(
                     unresolved.len()
                 );
 
-                for (pid, fid) in unresolved {
-                    let Some(client) = &api_client else {
-                        return Err("CurseForge API client unavailable".to_string());
-                    };
-                    match resolve_curseforge_file_task(
-                        client,
-                        pid,
-                        fid,
-                        pid_class.get(&pid).copied(),
-                        inst_dir,
-                    ) {
-                        Ok(task) => resolved.push(task),
-                        Err(api_error) => {
-                            eprintln!("[cf] 单文件 API 解析失败，尝试 CDN 盲猜: {}", api_error);
-                            resolved.push(resolve_curseforge_blind_file_task(
-                                client, pid, fid, inst_dir,
-                            )?);
-                        }
-                    }
-                }
+                // 批量接口触发限流时先完成冷却，再以固定并发解析剩余文件。
+                api_throttle.wait(cancel_name)?;
+                resolved.extend(resolve_unresolved_curseforge_files(
+                    api_client.as_ref(),
+                    &unresolved,
+                    &pid_class,
+                    inst_dir,
+                    cancel_name,
+                    &api_throttle,
+                )?);
 
                 resolved
             }
@@ -836,15 +1204,16 @@ pub fn do_install_modpack_inner(
         );
     }
 
-    if crate::instance::is_cancelled(display_name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
 
-    // 基础游戏用 game_mirror（镜像优先），mod 下载用原始 use_mirror。
+    // 基础游戏和 Loader 使用用户选择的来源顺序，Mod 文件保留自己的候选源逻辑。
     // 文件任务解析成功后，再并行启动基础游戏、整合包文件和 loader。
     let vanilla_handle = {
         let app = app.clone();
         let display_name = display_name.to_string();
+        let cancel_name = cancel_name.to_string();
         let version_name = inst_name.clone();
         let mc_version = meta.mc_version.clone();
         let meta_url = meta_url.clone();
@@ -852,23 +1221,24 @@ pub fn do_install_modpack_inner(
         let inst_dir = inst_dir.to_path_buf();
         let http = http.clone();
         std::thread::spawn(move || {
-            vanilla::install_vanilla_with_names(
+            vanilla::install_vanilla_with_task_names(
                 &app,
                 &display_name,
                 &version_name,
+                &cancel_name,
                 &mc_version,
                 &meta_url,
                 &game_dir,
                 &inst_dir,
                 &http,
-                game_mirror,
+                use_mirror,
             )
         })
     };
 
     let mod_download_handle = {
         let categories = categories.clone();
-        let cancel_name = display_name.to_string();
+        let cancel_name = cancel_name.to_string();
         std::thread::spawn(move || {
             download_modpack_tasks_with_engine(tasks, categories, cancel_name)
         })
@@ -915,6 +1285,7 @@ pub fn do_install_modpack_inner(
     } else {
         let app = app.clone();
         let display_name = display_name.to_string();
+        let cancel_name = cancel_name.to_string();
         let version_name = inst_name.clone();
         let mc_version = meta.mc_version.clone();
         let loader_type = meta.loader_type.clone();
@@ -941,7 +1312,6 @@ pub fn do_install_modpack_inner(
                             "这个整合包需要 Java 7，请先手动安装 Java 7，或在设置里选择 Java 7 的 java.exe"
                                 .to_string(),
                         );
-                        let _ = crate::instance::cancel_modpack_install(display_name.clone());
                         resolved_java = String::new();
                         &resolved_java
                     } else {
@@ -956,7 +1326,7 @@ pub fn do_install_modpack_inner(
                         match crate::java_download::download_java_sync_cancelable(
                             required_major,
                             &game_dir_input,
-                            Some(&display_name),
+                            Some(&cancel_name),
                         ) {
                             Ok(p) => {
                                 resolved_java = p;
@@ -967,8 +1337,6 @@ pub fn do_install_modpack_inner(
                                     "找不到 Java {}，自动下载失败: {}",
                                     required_major, e
                                 ));
-                                let _ =
-                                    crate::instance::cancel_modpack_install(display_name.clone());
                                 resolved_java = String::new();
                                 &resolved_java
                             }
@@ -983,53 +1351,57 @@ pub fn do_install_modpack_inner(
 
             let mut loader_json = empty_loader_json();
             match loader_type.as_str() {
-                "fabric" => fabric::install_fabric(
+                "fabric" => fabric::install_fabric_with_cancel_name(
                     &app,
                     &display_name,
+                    &cancel_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
                     &inst_dir,
                     &http,
-                    game_mirror,
+                    use_mirror,
                     &mut loader_json,
                     false,
                 )?,
-                "quilt" => quilt::install_quilt(
+                "quilt" => quilt::install_quilt_with_cancel_name(
                     &app,
                     &display_name,
+                    &cancel_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
                     &inst_dir,
                     &http,
-                    game_mirror,
+                    use_mirror,
                     &mut loader_json,
                 )?,
-                "forge" => forge::install_forge_with_names(
+                "forge" => forge::install_forge_with_task_names(
                     &app,
                     &display_name,
                     &version_name,
+                    &cancel_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
                     &inst_dir,
                     &http,
                     effective_java,
-                    game_mirror,
+                    use_mirror,
                     &mut loader_json,
                 )?,
-                "neoforge" => neoforge::install_neoforge_with_names(
+                "neoforge" => neoforge::install_neoforge_with_task_names(
                     &app,
                     &display_name,
                     &version_name,
+                    &cancel_name,
                     &mc_version,
                     &loader_version,
                     &game_dir,
                     &inst_dir,
                     &http,
                     effective_java,
-                    game_mirror,
+                    use_mirror,
                     &mut loader_json,
                 )?,
                 _ => {}
@@ -1048,6 +1420,7 @@ pub fn do_install_modpack_inner(
     let mut mod_download_result: Option<Result<(), ModpackDownloadError>> = None;
     let mut loader_result: Option<Result<serde_json::Value, String>> = None;
     let mut first_error: Option<String> = None;
+    let mut coordinated_abort = false;
 
     while vanilla_handle.is_some() || mod_download_handle.is_some() || loader_handle.is_some() {
         let mut progressed = false;
@@ -1065,7 +1438,7 @@ pub fn do_install_modpack_inner(
                 if first_error.is_none() {
                     eprintln!("[modpack] 基础游戏阶段失败，取消其它下载: {}", error);
                     first_error = Some(error.clone());
-                    let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+                    coordinated_abort = abort_downloaders_after_stage_failure(cancel_name);
                 }
             }
             vanilla_result = Some(result);
@@ -1093,7 +1466,7 @@ pub fn do_install_modpack_inner(
                         error.message
                     );
                     first_error = Some(error.message.clone());
-                    let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+                    coordinated_abort = abort_downloaders_after_stage_failure(cancel_name);
                 }
             }
             mod_download_result = Some(result);
@@ -1113,7 +1486,7 @@ pub fn do_install_modpack_inner(
                 if first_error.is_none() {
                     eprintln!("[modpack] Loader 阶段失败，取消其它下载: {}", error);
                     first_error = Some(error.clone());
-                    let _ = crate::instance::cancel_modpack_install(display_name.to_string());
+                    coordinated_abort = abort_downloaders_after_stage_failure(cancel_name);
                 }
             }
             loader_result = Some(result);
@@ -1121,10 +1494,17 @@ pub fn do_install_modpack_inner(
         }
 
         if !progressed {
-            if crate::instance::is_cancelled(display_name) && first_error.is_none() {
+            if crate::instance::is_cancelled(cancel_name) && first_error.is_none() {
                 first_error = Some("用户取消安装".to_string());
             }
             std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+    }
+
+    if coordinated_abort {
+        if let Some(cancel_flag) = crate::instance::install_cancel_flag(cancel_name) {
+            // 内部协同取消只用于收拢并行任务，外层仍应报告最先出现的真实错误。
+            cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1132,7 +1512,7 @@ pub fn do_install_modpack_inner(
         vanilla_result.unwrap_or_else(|| Err("基础游戏安装未返回结果".to_string()));
     let mod_download_result = mod_download_result.unwrap_or_else(|| {
         let total_files: usize = categories.iter().map(|(_, c)| c.total).sum();
-        if crate::instance::is_cancelled(display_name) {
+        if crate::instance::is_cancelled(cancel_name) {
             Err(ModpackDownloadError::cancelled(total_files, "用户取消下载"))
         } else {
             Err(ModpackDownloadError::new(
@@ -1167,7 +1547,21 @@ pub fn do_install_modpack_inner(
     let log_total_files = mod_download_error
         .map(|error| error.total_files)
         .unwrap_or(total_files);
-    if mod_download_error
+    if coordinated_abort
+        && mod_download_error
+            .map(|error| error.cancelled)
+            .unwrap_or(false)
+    {
+        let ended_count: usize = categories
+            .iter()
+            .map(|(_, c)| c.done.load(Ordering::Relaxed))
+            .sum();
+        eprintln!(
+            "[modpack] 阶段失败后已中止后台下载: 已结束={}, 总计={}",
+            ended_count.min(log_total_files),
+            log_total_files
+        );
+    } else if mod_download_error
         .map(|error| error.cancelled)
         .unwrap_or(false)
     {
@@ -1202,7 +1596,7 @@ pub fn do_install_modpack_inner(
         let loader_json = result?;
         merge_loader_install_result(&mut ver_json, &loader_json);
     }
-    if crate::instance::is_cancelled(display_name) {
+    if crate::instance::is_cancelled(cancel_name) {
         return Err("用户取消安装".to_string());
     }
 
@@ -1213,12 +1607,15 @@ pub fn do_install_modpack_inner(
     // 复制 overrides
     match &meta.kind {
         ModpackKind::Modrinth { .. } => {
-            extract_overrides_modrinth(zip_file, inst_dir, "overrides")?;
-            extract_overrides_modrinth(zip_file, inst_dir, "client-overrides")?;
+            extract_overrides_modrinth(zip_file, inst_dir, "overrides", cancel_name)?;
+            extract_overrides_modrinth(zip_file, inst_dir, "client-overrides", cancel_name)?;
         }
         ModpackKind::CurseForge { override_path, .. } => {
-            extract_overrides_cf(zip_file, inst_dir, override_path)?;
+            extract_overrides_cf(zip_file, inst_dir, override_path, cancel_name)?;
         }
+    }
+    if crate::instance::is_cancelled(cancel_name) {
+        return Err("用户取消安装".to_string());
     }
     crate::instance::set_minecraft_language(inst_dir, "zh_cn")?;
 
@@ -1281,11 +1678,8 @@ pub fn do_install_modpack_inner(
 
     // 重新写入（因为之前已写过，这里覆盖加上推荐内存）
     strip_launcher_private_version_fields(&mut ver_json);
-    std::fs::write(
-        &inst_json_path,
-        serde_json::to_string_pretty(&ver_json).unwrap(),
-    )
-    .map_err(|e| format!("保存版本配置失败: {}", e))?;
+    write_version_json_atomic(&inst_json_path, &ver_json)
+        .map_err(|error| format!("保存版本配置失败: {}", error))?;
 
     Ok(format!("整合包 {} 安装成功", inst_name))
 }
@@ -1294,11 +1688,16 @@ fn extract_overrides_modrinth(
     zip_path: &std::path::Path,
     inst_dir: &std::path::Path,
     prefix: &str,
+    cancel_name: &str,
 ) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    super::validate_modpack_archive(&mut archive)?;
     let prefix_slash = format!("{}/", prefix);
     for i in 0..archive.len() {
+        if crate::instance::is_cancelled(cancel_name) {
+            return Err("用户取消安装".to_string());
+        }
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
         if name.starts_with(&prefix_slash) && !entry.is_dir() {
@@ -1308,10 +1707,29 @@ fn extract_overrides_modrinth(
             }
             let dest = safe_join(inst_dir, rel)?;
             if let Some(p) = dest.parent() {
-                std::fs::create_dir_all(p).ok();
+                std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
             }
             let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
-            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            let mut copied = 0u64;
+            let mut buffer = [0u8; 128 * 1024];
+            loop {
+                if crate::instance::is_cancelled(cancel_name) {
+                    return Err("用户取消安装".to_string());
+                }
+                let read = std::io::Read::read(&mut entry, &mut buffer)
+                    .map_err(|e| format!("读取 overrides 失败: {}", e))?;
+                if read == 0 {
+                    break;
+                }
+                copied = copied
+                    .checked_add(read as u64)
+                    .ok_or_else(|| "overrides 文件大小溢出".to_string())?;
+                if copied > super::MAX_MODPACK_ENTRY_SIZE {
+                    return Err(format!("overrides 文件超过限制: {}", name));
+                }
+                std::io::Write::write_all(&mut out, &buffer[..read])
+                    .map_err(|e| format!("写入 overrides 失败: {}", e))?;
+            }
         }
     }
     Ok(())
@@ -1321,6 +1739,110 @@ fn extract_overrides_cf(
     zip_path: &std::path::Path,
     inst_dir: &std::path::Path,
     override_path: &str,
+    cancel_name: &str,
 ) -> Result<(), String> {
-    extract_overrides_modrinth(zip_path, inst_dir, override_path)
+    extract_overrides_modrinth(zip_path, inst_dir, override_path, cancel_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curseforge_cdn_parts_support_any_file_id_length() {
+        assert_eq!(
+            curseforge_cdn_parts(999),
+            ("0".to_string(), "999".to_string())
+        );
+        assert_eq!(
+            curseforge_cdn_parts(1_000),
+            ("1".to_string(), "0".to_string())
+        );
+        assert_eq!(
+            curseforge_cdn_parts(1_234_567),
+            ("1234".to_string(), "567".to_string())
+        );
+        assert_eq!(
+            curseforge_cdn_parts(12_345_678),
+            ("12345".to_string(), "678".to_string())
+        );
+    }
+
+    #[test]
+    fn missing_curseforge_batch_ids_become_unresolved() {
+        let requested = [10, 20, 30];
+        let returned = HashSet::from([10, 30]);
+        let file_map = HashMap::from([(10, (1, 10)), (20, (2, 20)), (30, (3, 30))]);
+        let mut unresolved = Vec::new();
+
+        append_missing_curseforge_file_ids(&requested, &returned, &file_map, &mut unresolved);
+
+        assert_eq!(
+            unresolved,
+            vec![UnresolvedCurseForgeFile {
+                project_id: 2,
+                file_id: 20,
+                try_individual_api: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_batch_entries_skip_individual_api_and_are_deduplicated() {
+        let mut unresolved = Vec::new();
+        push_unresolved_curseforge_file(&mut unresolved, 1, 10, false);
+        push_unresolved_curseforge_file(&mut unresolved, 1, 10, false);
+        assert_eq!(unresolved.len(), 1);
+        assert!(!unresolved[0].try_individual_api);
+
+        push_unresolved_curseforge_file(&mut unresolved, 1, 10, true);
+        assert!(unresolved[0].try_individual_api);
+    }
+
+    #[test]
+    fn curseforge_pressure_errors_enter_cooldown() {
+        assert!(curseforge_api_requires_cooldown(
+            "HTTP 429 Too Many Requests"
+        ));
+        assert!(curseforge_api_requires_cooldown(
+            "HTTP 503 Service Unavailable"
+        ));
+        assert!(!curseforge_api_requires_cooldown("HTTP 404 Not Found"));
+        assert_eq!(CF_FALLBACK_CONCURRENCY, 4);
+    }
+
+    #[test]
+    fn loader_failure_stops_current_and_late_download_managers_without_final_cancel_state() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cancel_name = format!("loader-abort-test-{nonce}");
+        crate::instance::try_register_cancel(&cancel_name).unwrap();
+
+        let current = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
+        let _current_registration = register_download_manager(&cancel_name, &current);
+        assert!(abort_downloaders_after_stage_failure(&cancel_name));
+        assert!(crate::instance::is_cancelled(&cancel_name));
+
+        let late = DownloadManager::with_options(DownloadEngineOptions::default()).unwrap();
+        let _late_registration = register_download_manager(&cancel_name, &late);
+        for (index, manager) in [&current, &late].into_iter().enumerate() {
+            let request = DownloadRequest::new(
+                format!("loader-abort-{index}"),
+                vec![DownloadCandidate::new("http://127.0.0.1:9/unreachable")],
+                std::env::temp_dir().join(format!("oaoi-loader-abort-{nonce}-{index}.bin")),
+            );
+            assert!(manager
+                .download_one(request, |_| {})
+                .unwrap_err()
+                .contains("cancelled"));
+        }
+
+        crate::instance::install_cancel_flag(&cancel_name)
+            .unwrap()
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!crate::instance::is_cancelled(&cancel_name));
+        crate::instance::unregister_cancel(&cancel_name);
+    }
 }

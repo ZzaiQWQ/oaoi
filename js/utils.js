@@ -426,6 +426,244 @@ function showAlert(message, options = {}) {
   });
 }
 
+let oaoiUiTaskSequence = 0;
+const oaoiInstallEventNames = new Set();
+
+function createUiTaskId(prefix = 'task') {
+  oaoiUiTaskSequence += 1;
+  const suffix = typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${oaoiUiTaskSequence}`;
+  return `${prefix}-${suffix}`;
+}
+
+function acquireInstallEventName(name) {
+  const key = String(name || '').trim().toLocaleLowerCase();
+  if (!key || oaoiInstallEventNames.has(key)) return false;
+  oaoiInstallEventNames.add(key);
+  return true;
+}
+
+function releaseInstallEventName(name) {
+  oaoiInstallEventNames.delete(String(name || '').trim().toLocaleLowerCase());
+}
+
+function ensureDownloadDetailModal() {
+  let modal = document.getElementById('dlDetailModal');
+  if (modal) return modal;
+
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="dl-detail-modal hidden" id="dlDetailModal">
+      <div class="dl-detail-content">
+        <div class="dl-detail-header">
+          <span class="dl-detail-title">安装详情</span>
+          <button class="dl-detail-close" id="dlDetailClose">✕</button>
+        </div>
+        <div class="dl-detail-stages" id="dlDetailStages"></div>
+      </div>
+    </div>
+  `);
+  modal = document.getElementById('dlDetailModal');
+  const close = () => {
+    modal.classList.add('hidden');
+    delete modal.dataset.taskId;
+  };
+  document.getElementById('dlDetailClose')?.addEventListener('click', close);
+  modal?.addEventListener('click', (event) => {
+    if (event.target === modal) close();
+  });
+  return modal;
+}
+
+function openDownloadDetail(taskId, title, stagesContainer) {
+  const modal = ensureDownloadDetailModal();
+  if (!modal) return;
+  modal.dataset.taskId = taskId;
+  const titleEl = modal.querySelector('.dl-detail-title');
+  if (titleEl) titleEl.textContent = `📦 ${title}`;
+  const modalStages = document.getElementById('dlDetailStages');
+  if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
+  modal.classList.remove('hidden');
+}
+
+function syncDownloadDetail(taskId, stagesContainer) {
+  const modal = document.getElementById('dlDetailModal');
+  if (!modal || modal.classList.contains('hidden') || modal.dataset.taskId !== taskId) return;
+  const modalStages = document.getElementById('dlDetailStages');
+  if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
+}
+
+function closeDownloadDetail(taskId) {
+  const modal = document.getElementById('dlDetailModal');
+  if (!modal || (taskId && modal.dataset.taskId !== taskId)) return;
+  modal.classList.add('hidden');
+  delete modal.dataset.taskId;
+}
+
+function createInstallProgressCard(container, taskId, fileName) {
+  if (!container) return null;
+  container.querySelector('.dl-active-empty')?.remove();
+  if (!container.querySelector('.dl-section-title')) {
+    container.insertAdjacentHTML('afterbegin', '<h2 class="dl-section-title">⏳ 活跃下载</h2>');
+  }
+  container.insertAdjacentHTML('beforeend', `
+    <div class="dl-progress-card" id="${taskId}">
+      <div class="dl-progress-card-header">
+        <div class="dl-progress-name">📦 ${escapeHtml(fileName)}</div>
+        <button class="dl-cancel-btn" id="${taskId}-cancel" title="取消下载">✕</button>
+      </div>
+      <div class="dl-progress-summary" id="${taskId}-summary">
+        <span class="dl-summary-text" id="${taskId}-summary-text">准备中...</span>
+      </div>
+      <div class="dl-progress-bar-wrap" style="height:4px;">
+        <div class="dl-progress-bar" id="${taskId}-main-bar" style="width:0%"></div>
+      </div>
+      <div class="dl-progress-stages" id="${taskId}-stages" style="display:none"></div>
+    </div>
+  `);
+  return document.getElementById(taskId);
+}
+
+function removeInstallProgressCard(container, taskId) {
+  document.getElementById(taskId)?.remove();
+  closeDownloadDetail(taskId);
+  if (container && !container.querySelector('.dl-progress-card')) {
+    container.innerHTML = `
+      <h2 class="dl-section-title">⏳ 活跃下载</h2>
+      <div class="dl-active-empty">暂无下载任务</div>
+    `;
+  }
+}
+
+function createInstallCancelController(options) {
+  const {
+    tauri,
+    fileName,
+    gameDir,
+    getCancelButton,
+    getStatusElement,
+    requireBackendReady = false,
+    logPrefix = 'install',
+  } = options;
+  let retryTimer = null;
+  let inFlight = false;
+  let settled = false;
+  let backendReady = !requireBackendReady;
+
+  const markBackendReady = () => {
+    backendReady = true;
+    const button = getCancelButton?.();
+    if (button && !inFlight && !settled) button.disabled = false;
+  };
+
+  const settle = () => {
+    settled = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
+
+  const requestCancel = async (attempt = 0) => {
+    if (settled || (inFlight && attempt === 0)) return;
+    inFlight = true;
+    const button = getCancelButton?.();
+    const status = getStatusElement?.();
+    if (button) {
+      button.disabled = true;
+      button.textContent = '…';
+    }
+    if (status) status.textContent = '正在取消...';
+    try {
+      await tauri.core.invoke('cancel_modpack_install', { fileName, gameDir });
+    } catch (error) {
+      const missingTask = /未找到.*(?:安装)?任务|任务.*不存在|not found/i.test(String(error || ''));
+      if (missingTask && attempt < 8 && !settled) {
+        retryTimer = setTimeout(() => requestCancel(attempt + 1), 150);
+        return;
+      }
+      inFlight = false;
+      if (button) {
+        button.disabled = requireBackendReady && !backendReady;
+        button.textContent = '✕';
+      }
+      if (status) status.textContent = `取消失败: ${error}`;
+      console.warn(`[${logPrefix}] 取消安装失败:`, error);
+    }
+  };
+
+  return {
+    markBackendReady,
+    requestCancel,
+    settle,
+    isSettled: () => settled,
+  };
+}
+
+function renderInstallProgress(options) {
+  const { taskId, stage, current, total, detail, statusElement, mainBar, stagesContainer } = options;
+  const label = STAGE_LABELS[stage] || stage;
+  const hasTotal = Number(total) > 0;
+  const progressText = hasTotal ? formatStageProgress(current, total, stage) : '';
+  const percent = hasTotal
+    ? Math.min(100, Math.round((Number(current) / Number(total)) * 100))
+    : 0;
+
+  if (statusElement) statusElement.textContent = hasTotal ? `${label} ${progressText}` : label;
+  if (mainBar && hasTotal) mainBar.style.width = `${percent}%`;
+  if (!stagesContainer) return { label, progressText, percent };
+
+  const stageId = `${taskId}-stage-${stage}`;
+  let row = document.getElementById(stageId);
+  if (!row) {
+    stagesContainer.insertAdjacentHTML('beforeend', `
+      <div class="dl-stage-row" id="${stageId}">
+        <div class="dl-stage-head">
+          <span class="dl-stage-label">${escapeHtml(label)}</span>
+          <span class="dl-stage-count" id="${stageId}-count"></span>
+        </div>
+        <div class="dl-progress-bar-wrap" style="height:4px;">
+          <div class="dl-progress-bar" id="${stageId}-bar" style="width:0%"></div>
+        </div>
+      </div>
+    `);
+    row = document.getElementById(stageId);
+  }
+  const countElement = document.getElementById(`${stageId}-count`);
+  const stageBar = document.getElementById(`${stageId}-bar`);
+  if (hasTotal) {
+    if (countElement) countElement.textContent = progressText;
+    if (stageBar) {
+      stageBar.style.width = `${percent}%`;
+      if (percent >= 100) stageBar.style.opacity = '0.5';
+    }
+  } else if (countElement) {
+    countElement.textContent = detail || '';
+  }
+  syncDownloadDetail(taskId, stagesContainer);
+  return { label, progressText, percent };
+}
+
+function renderInstallTerminal(options) {
+  const { taskId, stage, detail, statusElement, mainBar, stagesContainer, cancelButton } = options;
+  const done = stage === 'done';
+  const cancelled = stage === 'cancelled';
+  const icon = done ? '✅' : (cancelled ? '🚫' : '❌');
+  const message = done ? '安装完成！' : (cancelled ? '已取消' : String(detail || '安装失败'));
+  if (statusElement) statusElement.textContent = `${icon} ${message}`;
+  if (mainBar) {
+    mainBar.style.width = done ? '100%' : '0%';
+    if (done) mainBar.style.opacity = '0.5';
+  }
+  if (cancelButton) cancelButton.style.display = 'none';
+  if (stagesContainer) {
+    const color = done ? '' : ' style="color:#ef4444"';
+    stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label"${color}>${icon} ${escapeHtml(message)}</span></div>`;
+    syncDownloadDetail(taskId, stagesContainer);
+  }
+  return { done, cancelled, icon, message };
+}
+
 // 注入确认弹窗样式（仅一次）
 (function injectConfirmStyles() {
   if (document.getElementById('oaoiConfirmStyles')) return;

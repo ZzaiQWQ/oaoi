@@ -96,7 +96,18 @@ const MC_NEWS_CACHE_KEY = 'mcOfficialNewsCache';
 // MC 版本 → 所需 Java 版本映射（全局，settings.js 也可用）
 function getRequiredJavaMajor(mcVersion) {
   if (!mcVersion) return 21;
-  const parts = mcVersion.split('.');
+  const version = String(mcVersion).trim().toLowerCase();
+  const snapshot = version.match(/^(\d+)w(\d+)/);
+  if (snapshot) {
+    const year = parseInt(snapshot[1], 10);
+    const week = parseInt(snapshot[2], 10);
+    if (year >= 26 || (year === 25 && week >= 41)) return 25;
+    if (year > 24 || (year === 24 && week >= 14)) return 21;
+    if (year > 21 || (year === 21 && week >= 19)) return 17;
+    if (year >= 14) return 8;
+    return 7;
+  }
+  const parts = version.split('.');
   const major = parseInt(parts[0]) || 1;
   const minor = parseInt(parts[1]) || 0;
   const patch = parseInt(parts[2]) || 0;
@@ -114,9 +125,54 @@ function getRequiredJavaMajor(mcVersion) {
 
 // 实例缓存（供启动时查 mc_version 用）
 let instancesCache = [];
+let instancesCacheGameDir = '';
 let isLaunching = false;
 let javaDownloadModalTimer = null;
 let launchRepairModalTimer = null;
+let installedVersionsRequestSeq = 0;
+let launchInstanceRequestSeq = 0;
+let launchTaskSeq = 0;
+let activeLaunchTask = null;
+let javaDownloadUiTaskSeq = 0;
+let activeJavaDownloadUiTask = null;
+let crashAnalysisSeq = 0;
+let activeCrashAnalysisTask = null;
+
+const INSTANCE_SETTING_PREFIXES = ['mem', 'javaMode', 'javaPath', 'jvmArgs', 'jvmPreset'];
+
+function normalizeInstanceGameDir(gameDir) {
+  return String(gameDir || '')
+    .trim()
+    .replace(/\//g, '\\')
+    .replace(/\\+$/, '')
+    .toLowerCase();
+}
+
+function getInstanceSettingStorageKey(prefix, instanceName, gameDir = localStorage.getItem('gameDir') || '') {
+  const normalizedDir = normalizeInstanceGameDir(gameDir);
+  return `instanceSetting:${encodeURIComponent(normalizedDir)}:${encodeURIComponent(instanceName || '')}:${prefix}`;
+}
+
+function migrateInstanceSettings(instanceName, gameDir = localStorage.getItem('gameDir') || '') {
+  if (!instanceName || !normalizeInstanceGameDir(gameDir)) return;
+  // 旧键没有目录信息，只允许当前目录首次接收，然后立即移除旧键避免跨目录重复迁移。
+  INSTANCE_SETTING_PREFIXES.forEach(prefix => {
+    const oldKey = `${prefix}_${instanceName}`;
+    const newKey = getInstanceSettingStorageKey(prefix, instanceName, gameDir);
+    const oldValue = localStorage.getItem(oldKey);
+    if (oldValue !== null && localStorage.getItem(newKey) === null) {
+      localStorage.setItem(newKey, oldValue);
+    }
+    if (oldValue !== null) localStorage.removeItem(oldKey);
+  });
+}
+
+function removeInstanceSettings(instanceName, gameDir = localStorage.getItem('gameDir') || '') {
+  if (!instanceName) return;
+  INSTANCE_SETTING_PREFIXES.forEach(prefix => {
+    localStorage.removeItem(getInstanceSettingStorageKey(prefix, instanceName, gameDir));
+  });
+}
 
 function getCachedJavaList() {
   try {
@@ -160,7 +216,7 @@ function ensureJavaDownloadModal() {
           </div>
           <div class="java-download-actions">
             <div class="java-download-percent" id="javaDownloadPercent">0%</div>
-            <button class="java-download-cancel" id="javaDownloadCancel" type="button">取消</button>
+            <button class="java-download-cancel" id="javaDownloadCancel" type="button" disabled>准备中</button>
           </div>
         </div>
         <div class="java-download-bar-wrap">
@@ -175,7 +231,8 @@ function ensureJavaDownloadModal() {
     const btn = document.getElementById('javaDownloadCancel');
     const detailEl = document.getElementById('javaDownloadDetail');
     const major = Number(modal?.dataset.major || 0);
-    if (!major) return;
+    const task = activeJavaDownloadUiTask;
+    if (!major || !task || task.major !== major || !task.cancelReady || task.settled) return;
     if (btn) {
       btn.disabled = true;
       btn.textContent = '取消中';
@@ -183,7 +240,7 @@ function ensureJavaDownloadModal() {
     if (detailEl) detailEl.textContent = '正在取消下载...';
     try {
       const tauri = await waitForTauri();
-      await tauri.core.invoke('cancel_java_download', { major });
+      await tauri.core.invoke('cancel_java_download', { major, gameDir: task.gameDir });
     } catch (err) {
       if (btn) {
         btn.disabled = false;
@@ -195,12 +252,20 @@ function ensureJavaDownloadModal() {
   return modal;
 }
 
-function showJavaDownloadModal(major) {
+function showJavaDownloadModal(major, gameDir) {
   if (javaDownloadModalTimer) {
     clearTimeout(javaDownloadModalTimer);
     javaDownloadModalTimer = null;
   }
   const modal = ensureJavaDownloadModal();
+  const task = {
+    id: ++javaDownloadUiTaskSeq,
+    major,
+    gameDir,
+    cancelReady: false,
+    settled: false,
+  };
+  activeJavaDownloadUiTask = task;
   modal.dataset.major = String(major);
   modal.classList.remove('hidden');
   document.getElementById('javaDownloadTitle').textContent = `下载 Java ${major}`;
@@ -210,10 +275,28 @@ function showJavaDownloadModal(major) {
   document.getElementById('javaDownloadDetail').textContent = '正在连接下载源...';
   const cancelBtn = document.getElementById('javaDownloadCancel');
   if (cancelBtn) {
-    cancelBtn.disabled = false;
-    cancelBtn.textContent = '取消';
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = '准备中';
     cancelBtn.style.display = '';
   }
+  return task;
+}
+
+function enableJavaDownloadCancel(task) {
+  if (!task || task.settled || activeJavaDownloadUiTask?.id !== task.id) return;
+  task.cancelReady = true;
+  const cancelBtn = document.getElementById('javaDownloadCancel');
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = '取消';
+  }
+}
+
+function settleJavaDownloadUiTask(task) {
+  if (!task) return;
+  task.settled = true;
+  task.cancelReady = false;
+  if (activeJavaDownloadUiTask?.id === task.id) activeJavaDownloadUiTask = null;
 }
 
 function updateJavaDownloadModal(payload) {
@@ -433,15 +516,24 @@ function showCrashModal(version, content, loading = false, isLocal = false) {
 
 // 监听后台游戏崩溃事件
 (async () => {
+  const crashEventUnlisteners = [];
   try {
     const tauri = await waitForTauri();
-    await tauri.event.listen('game-crashed', async (event) => {
-      const { version, exit_code, diagnosis, log_tail, crash_report } = event.payload;
+    crashEventUnlisteners.push(await tauri.event.listen('game-crashed', async (event) => {
+      const { version, launch_task_id, exit_code, diagnosis, log_tail, crash_report } = event.payload;
       console.log(`[CRASH DEBUG] 游戏崩溃: ${version}, 退出码: ${exit_code}, diagnosis长度: ${(diagnosis || '').length}`);
 
-      // 立即恢复启动按钮
+      const crashTaskId = ++crashAnalysisSeq;
+      if (activeCrashAnalysisTask?.controller) activeCrashAnalysisTask.controller.abort();
+      activeCrashAnalysisTask = null;
+
+      // 只恢复当前对应的启动任务，旧游戏退出不影响新任务。
       const btn = document.getElementById('launchBtn');
-      if (btn) { resetLaunchBtn(btn); isLaunching = false; }
+      if (btn && activeLaunchTask?.id === launch_task_id) {
+        resetLaunchBtn(btn);
+        isLaunching = false;
+        activeLaunchTask = null;
+      }
 
       // 检查是否配置了 AI 且已启用
       const aiKey = localStorage.getItem('ai_api_key') || '';
@@ -456,12 +548,13 @@ function showCrashModal(version, content, loading = false, isLocal = false) {
         ].filter(Boolean).join('\n\n');
 
         if (!logForAi) {
-          showCrashModal(version, diagnosis);
+          if (crashTaskId === crashAnalysisSeq) showCrashModal(version, diagnosis);
           return;
         }
 
         // 先弹窗显示"AI 分析中"加载状态，关闭按钮可取消
         const aiAbort = new AbortController();
+        activeCrashAnalysisTask = { id: crashTaskId, controller: aiAbort };
         showCrashModal(version, '⏳ **AI 正在分析崩溃日志，请稍候...**\n\n这可能需要几秒钟时间。', true);
         // 绑定取消按钮
         const closeBtn = document.getElementById('crashModalClose');
@@ -470,8 +563,9 @@ function showCrashModal(version, content, loading = false, isLocal = false) {
           closeBtn.textContent = '取消分析';
           closeBtn.onclick = () => {
             aiAbort.abort();
+            if (activeCrashAnalysisTask?.id !== crashTaskId) return;
+            activeCrashAnalysisTask = null;
             document.getElementById('crashModal').style.display = 'none';
-            isLaunching = false;
           };
         }
 
@@ -485,25 +579,38 @@ function showCrashModal(version, content, loading = false, isLocal = false) {
             `Minecraft ${version} 崩溃了，退出码: ${exit_code}。请分析以下日志并给出解决方案：\n\n${logForAi}`,
             aiAbort.signal
           );
-          if (!aiAbort.signal.aborted) {
+          if (!aiAbort.signal.aborted && crashTaskId === crashAnalysisSeq) {
             showCrashModal(version, aiResult || diagnosis);
           }
         } catch (e) {
-          if (aiAbort.signal.aborted) return; // 用户取消，不再显示
+          if (aiAbort.signal.aborted || crashTaskId !== crashAnalysisSeq) return;
           console.warn('AI 分析失败，降级到本地分析:', e);
           showCrashModal(version, `${diagnosis}\n\n**AI 分析失败:** ${e.message}`);
+        } finally {
+          if (activeCrashAnalysisTask?.id === crashTaskId) activeCrashAnalysisTask = null;
         }
       } else {
-        showCrashModal(version, diagnosis || `Minecraft ${version} 异常退出，退出码: ${exit_code}`, false, true);
+        if (crashTaskId === crashAnalysisSeq) {
+          showCrashModal(version, diagnosis || `Minecraft ${version} 异常退出，退出码: ${exit_code}`, false, true);
+        }
       }
-    });
+    }));
 
     // 监听游戏正常退出，恢复启动按钮
-    await tauri.event.listen('game-exited', async () => {
+    crashEventUnlisteners.push(await tauri.event.listen('game-exited', async (event) => {
+      const launchTaskId = event.payload?.launch_task_id;
+      if (!activeLaunchTask || activeLaunchTask.id !== launchTaskId) return;
       const btn = document.getElementById('launchBtn');
-      if (btn) { resetLaunchBtn(btn); isLaunching = false; }
+      if (btn) resetLaunchBtn(btn);
+      isLaunching = false;
+      activeLaunchTask = null;
+    }));
+  } catch (e) {
+    crashEventUnlisteners.forEach(unlisten => {
+      try { unlisten(); } catch (cleanupError) { console.warn('[crash] 清理监听器失败:', cleanupError); }
     });
-  } catch (e) { console.warn('[crash] 监听崩溃事件失败:', e); }
+    console.warn('[crash] 监听崩溃事件失败:', e);
+  }
 })();
 
 function resetLaunchBtn(btn) {
@@ -541,19 +648,35 @@ function initOpenSelectedInstanceButton() {
 }
 
 async function loadInstalledVersions() {
+  const requestSeq = ++installedVersionsRequestSeq;
   const sel = document.getElementById('versionSelector');
   const installedList = document.getElementById('installedList');
   const installedCount = document.getElementById('installedCount');
+  const gameDir = localStorage.getItem('gameDir') || '';
+
+  if (instancesCacheGameDir !== gameDir) {
+    // 目录切换后先清空旧目录状态，避免新列表返回前仍能操作旧实例。
+    instancesCache = [];
+    instancesCacheGameDir = '';
+    if (sel) sel.innerHTML = '<option value="">-- 选择版本 --</option>';
+    syncVersionDropdown([], '');
+    if (installedList) installedList.innerHTML = '<div class="installed-empty">正在读取当前目录...</div>';
+    if (installedCount) installedCount.textContent = '0';
+  }
   try {
     const tauri = await waitForTauri();
-    const gameDir = localStorage.getItem('gameDir') || '';
     if (!gameDir) {
+      instancesCache = [];
+      instancesCacheGameDir = '';
       if (installedList) installedList.innerHTML = '<div class="installed-empty">请先在设置页选择游戏目录</div>';
       if (installedCount) installedCount.textContent = '0';
       return;
     }
     const instances = await tauri.core.invoke('list_installed_versions', { gameDir });
+    if (requestSeq !== installedVersionsRequestSeq) return;
+    if ((localStorage.getItem('gameDir') || '') !== gameDir) return;
     instancesCache = instances; // 缓存供启动时查 mc_version
+    instancesCacheGameDir = gameDir;
 
     // 更新主页版本选择器（隐藏的 select + 自定义下拉）
     if (sel) {
@@ -571,6 +694,11 @@ async function loadInstalledVersions() {
       // 同步自定义下拉组件
       syncVersionDropdown(instances, sel.value);
     }
+
+    // 设置页依赖真实实例版本计算 Java 推荐，缓存就绪后再通知它刷新。
+    document.dispatchEvent(new CustomEvent('oaoi:instances-loaded', {
+      detail: { gameDir },
+    }));
 
     // 更新下载页已安装版本列表
     if (installedList) {
@@ -603,6 +731,8 @@ async function loadInstalledVersions() {
             try {
               const tauri = await waitForTauri();
               await tauri.core.invoke('delete_version', { gameDir, name: ver });
+              migrateInstanceSettings(ver, gameDir);
+              removeInstanceSettings(ver, gameDir);
               loadInstalledVersions();
             } catch (err) {
               showToast('删除失败: ' + err, 'error');
@@ -622,6 +752,16 @@ async function loadInstalledVersions() {
       }
     }
   } catch (e) {
+    if (requestSeq !== installedVersionsRequestSeq) return;
+    if ((localStorage.getItem('gameDir') || '') !== gameDir) return;
+    instancesCache = [];
+    instancesCacheGameDir = gameDir;
+    if (sel) sel.innerHTML = '<option value="">-- 选择版本 --</option>';
+    syncVersionDropdown([], '');
+    if (installedList) {
+      installedList.innerHTML = '<div class="installed-empty">版本读取失败，请检查游戏目录是否存在或具有访问权限</div>';
+    }
+    if (installedCount) installedCount.textContent = '0';
     console.warn('加载版本列表失败:', e);
   }
 }
@@ -630,11 +770,19 @@ async function refreshInstanceForLaunch(gameDir, selectedVersion) {
   if (!gameDir || !selectedVersion) {
     return instancesCache.find(i => i.name === selectedVersion) || null;
   }
+  const requestSeq = ++launchInstanceRequestSeq;
   try {
     const tauri = await waitForTauri();
     const instances = await tauri.core.invoke('list_installed_versions', { gameDir });
     if (Array.isArray(instances)) {
-      instancesCache = instances;
+      if (requestSeq === launchInstanceRequestSeq
+          && (localStorage.getItem('gameDir') || '') === gameDir) {
+        instancesCache = instances;
+        instancesCacheGameDir = gameDir;
+        document.dispatchEvent(new CustomEvent('oaoi:instances-loaded', {
+          detail: { gameDir },
+        }));
+      }
       return instances.find(i => i.name === selectedVersion) || null;
     }
   } catch (err) {
@@ -658,14 +806,14 @@ function initLaunchButton() {
   // 初始加载版本列表
   loadInstalledVersions();
 
-  btn.addEventListener('click', async () => {
+  const launchVersion = async (targetVersion = '') => {
     if (isLaunching) return;
     isLaunching = true;
     // 读取设置
     const gameDir = localStorage.getItem('gameDir');
     let memAlloc = parseInt(localStorage.getItem('memAlloc') || '4096');
     const memoryMode = localStorage.getItem('memoryMode') || 'manual';
-    const selectedVersion = sel ? sel.value : '';
+    const selectedVersion = targetVersion || (sel ? sel.value : '');
     const loginMode = localStorage.getItem('loginMode') || 'offline';
 
     if (loginMode !== 'online' && typeof ensureOfflineModeAllowed === 'function') {
@@ -678,8 +826,9 @@ function initLaunchButton() {
 
     // 实例单独设置优先；全局选择自动时，才使用整合包推荐内存。
     if (selectedVersion) {
+      migrateInstanceSettings(selectedVersion, gameDir);
       const inst = await refreshInstanceForLaunch(gameDir, selectedVersion);
-      const instMemOverride = localStorage.getItem(`mem_${selectedVersion}`);
+      const instMemOverride = localStorage.getItem(getInstanceSettingStorageKey('mem', selectedVersion, gameDir));
       if (instMemOverride) {
         memAlloc = parseInt(instMemOverride) || memAlloc;
         console.log(`[launch] 使用版本内存: ${memAlloc}MB`);
@@ -696,10 +845,11 @@ function initLaunchButton() {
       }
     }
     // 根据登录模式决定玩家信息
+    let accounts = [];
+    try { accounts = JSON.parse(localStorage.getItem('msAccounts') || '[]'); } catch (e) { console.warn('[auth] 解析账号列表失败:', e); }
+    const onlineProof = accounts.find(account => account?.access_token && account?.uuid) || null;
     let playerName, accessToken = null, playerUuid = null;
     if (loginMode === 'online') {
-      let accounts = [];
-      try { accounts = JSON.parse(localStorage.getItem('msAccounts') || '[]'); } catch (e) { console.warn('[auth] 解析账号列表失败:', e); }
       const activeIdx = parseInt(localStorage.getItem('activeAccountIdx') || '0') || 0;
       const msProfile = accounts[activeIdx] || null;
       if (msProfile && msProfile.access_token) {
@@ -721,7 +871,7 @@ function initLaunchButton() {
     if (!playerName) { showToast('请先在设置页输入玩家名称或微软登录', 'warn'); isLaunching = false; return; }
 
     // 自动/手动 Java 选择
-    const instanceJavaMode = localStorage.getItem(`javaMode_${selectedVersion}`) || 'global';
+    const instanceJavaMode = localStorage.getItem(getInstanceSettingStorageKey('javaMode', selectedVersion, gameDir)) || 'global';
     const javaMode = instanceJavaMode === 'global'
       ? (localStorage.getItem('javaMode') || 'auto')
       : instanceJavaMode;
@@ -764,9 +914,15 @@ function initLaunchButton() {
             isLaunching = false;
             return;
           }
-          showJavaDownloadModal(requiredMajor);
+          const javaUiTask = showJavaDownloadModal(requiredMajor, gameDir);
           let progressUnlisten = null;
           let doneUnlisten = null;
+          let javaDownloadSettled = false;
+          let javaDownloadWatchdog = null;
+          let javaStatusTimer = null;
+          let javaStatusChecking = false;
+          const javaRoot = String(gameDir || '').replace(/[\\/]+$/, '');
+          const expectedJavaPath = `${javaRoot}\\runtime\\jre-${requiredMajor}\\bin\\java.exe`;
 
           let resolveJavaDownload;
           let rejectJavaDownload;
@@ -774,62 +930,132 @@ function initLaunchButton() {
             resolveJavaDownload = resolve;
             rejectJavaDownload = reject;
           });
-          doneUnlisten = await tauri.event.listen('java-download-done', (event) => {
-            const d = event.payload;
-            if (d.major === requiredMajor) {
-              if (doneUnlisten) doneUnlisten();
-              if (progressUnlisten) progressUnlisten();
-              if (d.success) {
-                finishJavaDownloadModal(true, 'Java 已安装完成，正在继续启动。');
-                resolveJavaDownload(d.path);
-              } else if (d.cancelled) {
-                finishJavaDownloadModal(false, '已取消下载');
-                rejectJavaDownload('已取消下载');
-              } else {
-                finishJavaDownloadModal(false, d.error || '下载失败');
-                rejectJavaDownload(d.error || '下载失败');
-              }
-            }
-          });
+          // 终态事件可能早于 invoke 返回，先挂接处理器避免出现未处理拒绝。
+          void donePromise.catch(() => {});
 
-          progressUnlisten = await tauri.event.listen('java-download-progress', (event) => {
-            const d = event.payload;
-            if (d.major !== requiredMajor) return;
-            updateJavaDownloadModal(d);
-            if (d.stage === 'extracting') {
-              btn.innerHTML = `<span>解压 Java ${requiredMajor}...</span>`;
-              return;
+          const cleanupJavaDownloadWait = () => {
+            if (javaDownloadWatchdog) {
+              clearTimeout(javaDownloadWatchdog);
+              javaDownloadWatchdog = null;
             }
-            if (d.stage === 'done') {
-              btn.innerHTML = `<span>准备启动...</span>`;
-              return;
+            if (javaStatusTimer) {
+              clearInterval(javaStatusTimer);
+              javaStatusTimer = null;
             }
-            const downloaded = Number(d.downloaded || 0);
-            const total = Number(d.total || 0);
-            if (downloaded > 0 && total > 0) {
-              const percent = Math.min(100, Math.round(downloaded / total * 100));
-              btn.innerHTML = `<span>下载 Java ${requiredMajor} ${percent}%</span>`;
-            } else if (d.detail) {
-              btn.innerHTML = `<span>${escapeHtml(String(d.detail)).slice(0, 24)}</span>`;
+            const listeners = [doneUnlisten, progressUnlisten];
+            doneUnlisten = null;
+            progressUnlisten = null;
+            listeners.forEach(unlisten => {
+              try { unlisten?.(); } catch (cleanupError) { console.warn('[java] 清理下载监听器失败:', cleanupError); }
+            });
+          };
+
+          const settleJavaDownload = (success, value, message) => {
+            if (javaDownloadSettled) return;
+            javaDownloadSettled = true;
+            cleanupJavaDownloadWait();
+            settleJavaDownloadUiTask(javaUiTask);
+            finishJavaDownloadModal(success, message);
+            if (success) resolveJavaDownload(value);
+            else rejectJavaDownload(value);
+          };
+
+          const checkInstalledJava = async () => {
+            if (javaDownloadSettled || javaStatusChecking) return false;
+            javaStatusChecking = true;
+            try {
+              const exists = await tauri.core.invoke('java_path_exists', { path: expectedJavaPath });
+              if (exists) {
+                settleJavaDownload(true, expectedJavaPath, 'Java 已安装完成，正在继续启动。');
+                return true;
+              }
+            } catch (statusError) {
+              console.warn('[java] 检查后台下载状态失败:', statusError);
+            } finally {
+              javaStatusChecking = false;
             }
-          });
+            return false;
+          };
+
+          const resetJavaDownloadWatchdog = () => {
+            if (javaDownloadWatchdog) clearTimeout(javaDownloadWatchdog);
+            javaDownloadWatchdog = setTimeout(async () => {
+              if (await checkInstalledJava()) return;
+              try {
+                await tauri.core.invoke('cancel_java_download', { major: requiredMajor, gameDir });
+              } catch (cancelError) {
+                console.warn('[java] 超时取消后台下载失败:', cancelError);
+              }
+              settleJavaDownload(false, 'Java 下载长时间没有进度，已结束等待', 'Java 下载长时间没有进度，已结束等待');
+            }, 180000);
+          };
+
+          try {
+            doneUnlisten = await tauri.event.listen('java-download-done', (event) => {
+              const d = event.payload || {};
+              if (d.major !== requiredMajor || normalizeInstanceGameDir(d.gameDir) !== normalizeInstanceGameDir(gameDir)) return;
+              if (d.success) {
+                settleJavaDownload(true, d.path || expectedJavaPath, 'Java 已安装完成，正在继续启动。');
+              } else if (d.cancelled) {
+                settleJavaDownload(false, '已取消下载', '已取消下载');
+              } else {
+                const error = d.error || '下载失败';
+                settleJavaDownload(false, error, error);
+              }
+            });
+
+            progressUnlisten = await tauri.event.listen('java-download-progress', (event) => {
+              const d = event.payload || {};
+              if (d.major !== requiredMajor || normalizeInstanceGameDir(d.gameDir) !== normalizeInstanceGameDir(gameDir)) return;
+              resetJavaDownloadWatchdog();
+              updateJavaDownloadModal(d);
+              if (d.stage === 'extracting') {
+                btn.innerHTML = `<span>解压 Java ${requiredMajor}...</span>`;
+                return;
+              }
+              // 进度终态与完成事件任一到达，都可以结束等待。
+              if (d.stage === 'done') {
+                btn.innerHTML = `<span>准备启动...</span>`;
+                settleJavaDownload(true, expectedJavaPath, 'Java 已安装完成，正在继续启动。');
+                return;
+              }
+              const downloaded = Number(d.downloaded || 0);
+              const total = Number(d.total || 0);
+              if (downloaded > 0 && total > 0) {
+                const percent = Math.min(100, Math.round(downloaded / total * 100));
+                btn.innerHTML = `<span>下载 Java ${requiredMajor} ${percent}%</span>`;
+              } else if (d.detail) {
+                btn.innerHTML = `<span>${escapeHtml(String(d.detail)).slice(0, 24)}</span>`;
+              }
+            });
+          } catch (listenerError) {
+            cleanupJavaDownloadWait();
+            settleJavaDownloadUiTask(javaUiTask);
+            finishJavaDownloadModal(false, String(listenerError));
+            throw listenerError;
+          }
 
           let result;
           try {
             result = await tauri.core.invoke('download_java', { major: requiredMajor, gameDir });
           } catch (e) {
-            if (doneUnlisten) doneUnlisten();
-            if (progressUnlisten) progressUnlisten();
+            settleJavaDownloadUiTask(javaUiTask);
+            cleanupJavaDownloadWait();
             finishJavaDownloadModal(false, String(e));
             throw e;
           }
           if (result && result !== 'downloading') {
-            if (doneUnlisten) doneUnlisten();
-            if (progressUnlisten) progressUnlisten();
+            settleJavaDownloadUiTask(javaUiTask);
+            cleanupJavaDownloadWait();
             finishJavaDownloadModal(true, 'Java 已存在，正在继续启动。');
             javaPath = result;
             console.log(`[java] 已存在: ${javaPath}`);
           } else {
+            if (!javaDownloadSettled) {
+              enableJavaDownloadCancel(javaUiTask);
+              resetJavaDownloadWatchdog();
+              javaStatusTimer = setInterval(checkInstalledJava, 3000);
+            }
             javaPath = await donePromise;
             console.log(`[java] 下载完成: ${javaPath}`);
           }
@@ -841,7 +1067,7 @@ function initLaunchButton() {
         return;
       }
     } else {
-      javaPath = localStorage.getItem(`javaPath_${selectedVersion}`) || localStorage.getItem('selectedJavaPath');
+      javaPath = localStorage.getItem(getInstanceSettingStorageKey('javaPath', selectedVersion, gameDir)) || localStorage.getItem('selectedJavaPath');
       if (!javaPath) { showToast('请先在版本设置或设置页选择 Java 路径', 'warn'); isLaunching = false; return; }
     }
 
@@ -852,36 +1078,54 @@ function initLaunchButton() {
     btn.style.background = 'linear-gradient(135deg, #c084fc 0%, #a855f7 50%, #9333ea 100%)';
     createPetalBurst(btn);
 
+    const launchTask = {
+      id: ++launchTaskSeq,
+      version: selectedVersion,
+    };
+    activeLaunchTask = launchTask;
     try {
       const tauri = await waitForTauri();
       let repairUnlisten = null;
       let windowWaitUnlisten = null;
       let windowReadyUnlisten = null;
-      repairUnlisten = await tauri.event.listen('install-progress', (event) => {
-        const d = event.payload || {};
-        if (d.name !== selectedVersion) return;
-        updateLaunchRepairModal(selectedVersion, d);
-      });
-      windowWaitUnlisten = await tauri.event.listen('launch-window-waiting', (event) => {
-        const d = event.payload || {};
-        if (d.version !== selectedVersion) return;
-        finishLaunchRepairModal(true, '文件检查完成，等待游戏窗口出现。');
-        btn.innerHTML = `<span>等待游戏窗口...</span>`;
-        btn.style.background = 'linear-gradient(135deg, #fb7185 0%, #ec4899 50%, #db2777 100%)';
-      });
-      windowReadyUnlisten = await tauri.event.listen('launch-window-ready', (event) => {
-        const d = event.payload || {};
-        if (d.version !== selectedVersion) return;
-        finishLaunchRepairModal(true, '游戏窗口已出现，启动成功。');
-      });
-      const instanceJvmArgs = localStorage.getItem(`jvmArgs_${selectedVersion}`);
+      const cleanupLaunchListeners = () => {
+        const listeners = [repairUnlisten, windowWaitUnlisten, windowReadyUnlisten];
+        repairUnlisten = null;
+        windowWaitUnlisten = null;
+        windowReadyUnlisten = null;
+        listeners.forEach(unlisten => {
+          try { unlisten?.(); } catch (cleanupError) { console.warn('[launch] 清理启动监听器失败:', cleanupError); }
+        });
+      };
+      try {
+        repairUnlisten = await tauri.event.listen('install-progress', (event) => {
+          const d = event.payload || {};
+          if (d.name !== selectedVersion) return;
+          updateLaunchRepairModal(selectedVersion, d);
+        });
+        windowWaitUnlisten = await tauri.event.listen('launch-window-waiting', (event) => {
+          const d = event.payload || {};
+          if (d.launch_task_id !== launchTask.id) return;
+          finishLaunchRepairModal(true, '文件检查完成，等待游戏窗口出现。');
+          btn.innerHTML = `<span>等待游戏窗口...</span>`;
+          btn.style.background = 'linear-gradient(135deg, #fb7185 0%, #ec4899 50%, #db2777 100%)';
+        });
+        windowReadyUnlisten = await tauri.event.listen('launch-window-ready', (event) => {
+          const d = event.payload || {};
+          if (d.launch_task_id !== launchTask.id) return;
+          finishLaunchRepairModal(true, '游戏窗口已出现，启动成功。');
+        });
+      } catch (listenerError) {
+        cleanupLaunchListeners();
+        throw listenerError;
+      }
+      const instanceJvmArgs = localStorage.getItem(getInstanceSettingStorageKey('jvmArgs', selectedVersion, gameDir));
       const globalJvmArgs = typeof getGlobalJvmArgs === 'function'
         ? getGlobalJvmArgs()
         : (localStorage.getItem('customJvmArgs') || '');
       const customJvmArgs = instanceJvmArgs !== null
         ? instanceJvmArgs
         : (globalJvmArgs || null);
-      const hasOnlineAccount = typeof hasOnlineAccountLogin === 'function' && hasOnlineAccountLogin();
       let result;
       try {
         btn.innerHTML = `<span>等待游戏窗口...</span>`;
@@ -897,17 +1141,18 @@ function initLaunchButton() {
             server_port: null,
             access_token: accessToken,
             uuid: playerUuid,
-            has_online_account: hasOnlineAccount,
+            online_account_access_token: onlineProof?.access_token || null,
+            online_account_uuid: onlineProof?.uuid || null,
             custom_jvm_args: customJvmArgs,
+            launch_task_id: launchTask.id,
           }
         });
       } finally {
-        if (repairUnlisten) repairUnlisten();
-        if (windowWaitUnlisten) windowWaitUnlisten();
-        if (windowReadyUnlisten) windowReadyUnlisten();
+        cleanupLaunchListeners();
       }
 
       console.log('🎮 ' + result);
+      if (activeLaunchTask?.id !== launchTask.id) return;
       finishLaunchRepairModal(true, '游戏窗口已出现，启动成功。');
       btn.innerHTML = `
         <span>启动成功！</span>
@@ -929,10 +1174,15 @@ function initLaunchButton() {
     }
 
     setTimeout(() => {
+      if (activeLaunchTask?.id !== launchTask.id) return;
       resetLaunchBtn(btn);
       isLaunching = false;
+      activeLaunchTask = null;
     }, 8000);
-  });
+  };
+
+  window.launchMinecraftInstance = launchVersion;
+  btn.addEventListener('click', () => launchVersion());
 }
 
 

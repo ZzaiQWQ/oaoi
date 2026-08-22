@@ -13,41 +13,11 @@ function initDownloadPage() {
   let nameCheckToken = 0;
   let validateInstanceName = async () => true;
 
-  // 快照和预发布先放开选择，真正有没有 Loader 版本交给后端接口判断。
-  function parseComparableVersion(version) {
-    const raw = String(version || '').trim();
-    const match = raw.match(/^(\d+)\.(\d+)(?:\.(\d+))?(?:-(?:pre|rc)[.-]?\d+)?$/i);
-    if (!match) return null;
-    return [Number(match[1]), Number(match[2]), Number(match[3] || 0)];
-  }
-
-  function isVersionAtLeast(version, major, minor, patch = 0) {
-    const parsed = parseComparableVersion(version);
-    if (!parsed) return false;
-    const target = [major, minor, patch];
-    for (let i = 0; i < 3; i++) {
-      if (parsed[i] !== target[i]) return parsed[i] > target[i];
-    }
-    return true;
-  }
-
-  function isModernSnapshot(version) {
-    return /^\d{2}w\d{2}[a-z]$/i.test(String(version || '').trim());
-  }
-
-  function isLoaderSupported(loader, mcVersion) {
-    if (loader === 'vanilla' || loader === 'forge') return true;
-    if (isModernSnapshot(mcVersion)) return true;
-    if (loader === 'fabric' || loader === 'quilt') return isVersionAtLeast(mcVersion, 1, 14);
-    if (loader === 'neoforge') return isVersionAtLeast(mcVersion, 1, 20, 1);
-    return false;
-  }
-
-  function refreshLoaderChoices(mcVersion) {
+  // 所有版本都显示 Loader 入口，实际可用版本由对应接口返回。
+  function refreshLoaderChoices() {
     document.querySelectorAll('input[name="loader"]').forEach(radio => {
-      const supported = isLoaderSupported(radio.value, mcVersion);
-      radio.disabled = !supported;
-      radio.closest('.loader-radio-btn')?.toggleAttribute('hidden', !supported);
+      radio.disabled = false;
+      radio.closest('.loader-radio-btn')?.removeAttribute('hidden');
     });
   }
 
@@ -379,218 +349,93 @@ function initDownloadPage() {
 
     // 确认创建实例
     createBtn.addEventListener('click', async () => {
+      if (!(await validateInstanceName())) return;
+
+      // 异步重名检查完成后重新读取选择，避免提交检查期间已经切换掉的 Loader。
       const mcVer = modal.dataset.mcVersion || '';
       const name = document.getElementById('instNameInput').value.trim() || mcVer;
       const metaUrl = document.getElementById('instMetaUrl').value;
       const downloadSource = modal.dataset.downloadSource || dlSource;
-      const loaderType = document.querySelector('input[name="loader"]:checked').value;
+      const loaderRadio = document.querySelector('input[name="loader"]:checked');
+      if (!loaderRadio) return;
+      const loaderType = loaderRadio.value;
       const loaderVer = loaderSelect.value || '';
-
-      if (!(await validateInstanceName())) return;
+      if (modal.dataset.loaderReady === '0') return;
 
       createBtn.disabled = true;
       createBtn.textContent = '✨ 创建中...';
 
       let unlisten = null;
+      let cancelController = null;
+      const dlActiveList = document.getElementById('dlActiveList');
+      const dlId = createUiTaskId('dl');
+      if (!acquireInstallEventName(name)) {
+        showToast(`同名安装任务正在进行: ${name}`, 'warn');
+        createBtn.textContent = '确认创建';
+        createBtn.disabled = false;
+        return;
+      }
+      let eventNameAcquired = true;
+      const releaseEventName = () => {
+        if (!eventNameAcquired) return;
+        eventNameAcquired = false;
+        releaseInstallEventName(name);
+      };
       try {
         const tauri = await waitForTauri();
-        const dlActiveList = document.getElementById('dlActiveList');
-        const dlId = 'dl-' + Date.now();
+        const gameDir = localStorage.getItem('gameDir') || '';
 
         closeModal();
 
         if (dlActiveList) {
-          // 移除"暂无下载"提示
-          const emptyMsg = dlActiveList.querySelector('.dl-active-empty');
-          if (emptyMsg) emptyMsg.remove();
-          // 确保有标题
-          if (!dlActiveList.querySelector('.dl-section-title')) {
-            dlActiveList.insertAdjacentHTML('afterbegin', '<h2 class="dl-section-title">⏳ 活跃下载</h2>');
-          }
-          // 紧凑进度卡片（与整合包安装一致）
-          dlActiveList.insertAdjacentHTML('beforeend', `
-            <div class="dl-progress-card" id="${dlId}">
-              <div class="dl-progress-card-header">
-                <div class="dl-progress-name">📦 ${escapeHtml(name)}</div>
-                <button class="dl-cancel-btn" id="${dlId}-cancel" title="取消安装">✕</button>
-              </div>
-              <div class="dl-progress-summary" id="${dlId}-summary">
-                <span class="dl-summary-text" id="${dlId}-summary-text">准备中...</span>
-              </div>
-              <div class="dl-progress-bar-wrap" style="height:4px;">
-                <div class="dl-progress-bar" id="${dlId}-main-bar" style="width:0%"></div>
-              </div>
-              <div class="dl-progress-stages" id="${dlId}-stages" style="display:none"></div>
-            </div>
-          `);
-
-          // 创建详情弹窗（共用同一个，如果已存在就复用）
-          let detailModal = document.getElementById('dlDetailModal');
-          if (!detailModal) {
-            document.body.insertAdjacentHTML('beforeend', `
-              <div class="dl-detail-modal hidden" id="dlDetailModal">
-                <div class="dl-detail-content">
-                  <div class="dl-detail-header">
-                    <span class="dl-detail-title">安装详情</span>
-                    <button class="dl-detail-close" id="dlDetailClose">✕</button>
-                  </div>
-                  <div class="dl-detail-stages" id="dlDetailStages"></div>
-                </div>
-              </div>
-            `);
-            detailModal = document.getElementById('dlDetailModal');
-            document.getElementById('dlDetailClose').addEventListener('click', () => {
-              detailModal.classList.add('hidden');
-            });
-            detailModal.addEventListener('click', (e) => {
-              if (e.target === detailModal) detailModal.classList.add('hidden');
-            });
-          }
+          createInstallProgressCard(dlActiveList, dlId, name);
+          document.getElementById(`${dlId}-cancel`)?.setAttribute('title', '取消安装');
 
           // 点击摘要行打开详情弹窗
           document.getElementById(`${dlId}-summary`)?.addEventListener('click', () => {
-            const modal = document.getElementById('dlDetailModal');
-            const titleEl = modal.querySelector('.dl-detail-title');
-            if (titleEl) titleEl.textContent = `📦 ${name}`;
             const stagesContainer = document.getElementById(`${dlId}-stages`);
-            const modalStages = document.getElementById('dlDetailStages');
-            if (stagesContainer && modalStages) {
-              modalStages.innerHTML = stagesContainer.innerHTML;
-            }
-            modal.classList.remove('hidden');
+            openDownloadDetail(dlId, name, stagesContainer);
           });
 
           // 取消按钮
           document.getElementById(`${dlId}-cancel`)?.addEventListener('click', async (event) => {
             event.preventDefault();
             event.stopPropagation();
-            const cancelBtn = event.currentTarget;
-            const summaryText = document.getElementById(`${dlId}-summary-text`);
-            cancelBtn.disabled = true;
-            cancelBtn.textContent = '…';
-            if (summaryText) summaryText.textContent = '正在取消...';
-            try {
-              await tauri.core.invoke('cancel_modpack_install', { fileName: name });
-            } catch (e) {
-              cancelBtn.disabled = false;
-              cancelBtn.textContent = '✕';
-              if (summaryText) summaryText.textContent = `取消失败: ${e}`;
-              console.warn('取消失败:', e);
-            }
+            await cancelController?.requestCancel();
           });
         }
 
-        // 使用全局 STAGE_LABELS (utils.js)
+        cancelController = createInstallCancelController({
+          tauri,
+          fileName: name,
+          gameDir,
+          getCancelButton: () => document.getElementById(`${dlId}-cancel`),
+          getStatusElement: () => document.getElementById(`${dlId}-summary-text`),
+          logPrefix: 'install',
+        });
 
         unlisten = await tauri.event.listen('install-progress', (event) => {
           const { name: evtName, stage, current, total, detail } = event.payload;
           if (evtName !== name) return;
 
-          let stagesContainer = document.getElementById(`${dlId}-stages`);
-          let progressCard = document.getElementById(dlId);
-          if (!stagesContainer) {
-            const cards = document.querySelectorAll('.dl-progress-card');
-            if (cards.length > 0) {
-              progressCard = cards[cards.length - 1];
-              stagesContainer = progressCard.querySelector('.dl-progress-stages');
-            }
-          }
-
+          const stagesContainer = document.getElementById(`${dlId}-stages`);
           const summaryText = document.getElementById(`${dlId}-summary-text`);
           const mainBar = document.getElementById(`${dlId}-main-bar`);
+          const cancelBtn = document.getElementById(`${dlId}-cancel`);
+          cancelController?.markBackendReady();
 
-          if (stage === 'done') {
-            if (summaryText) summaryText.textContent = '✅ 安装完成！';
-            if (mainBar) { mainBar.style.width = '100%'; mainBar.style.opacity = '0.5'; }
-            if (stagesContainer) stagesContainer.innerHTML = '<div class="dl-stage-row"><span class="dl-stage-label">✅ 安装完成！</span></div>';
-            const modalStages = document.getElementById('dlDetailStages');
-            if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
-            loadInstalledVersions();
-            const cancelBtn = document.getElementById(`${dlId}-cancel`);
-            if (cancelBtn) cancelBtn.style.display = 'none';
-            setTimeout(() => {
-              if (progressCard) progressCard.remove();
-              if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
-                dlActiveList.innerHTML = `
-                  <h2 class="dl-section-title">⏳ 活跃下载</h2>
-                  <div class="dl-active-empty">暂无下载任务</div>
-                `;
-              }
-              const modal = document.getElementById('dlDetailModal');
-              if (modal) modal.classList.add('hidden');
-            }, 2000);
-            unlisten();
-          } else if (stage === 'error' || stage === 'cancelled') {
-            const icon = stage === 'cancelled' ? '🚫' : '❌';
-            const msg = stage === 'cancelled' ? '已取消' : detail;
-            if (summaryText) summaryText.textContent = `${icon} ${msg}`;
-            if (mainBar) mainBar.style.width = '0%';
-            if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
-            const modalStages = document.getElementById('dlDetailStages');
-            if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
-            const cancelBtn = document.getElementById(`${dlId}-cancel`);
-            if (cancelBtn) cancelBtn.style.display = 'none';
-            setTimeout(() => {
-              if (progressCard) progressCard.remove();
-              if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
-                dlActiveList.innerHTML = `
-                  <h2 class="dl-section-title">⏳ 活跃下载</h2>
-                  <div class="dl-active-empty">暂无下载任务</div>
-                `;
-              }
-              const modal = document.getElementById('dlDetailModal');
-              if (modal) modal.classList.add('hidden');
-            }, 3000);
-            unlisten();
+          if (stage === 'done' || stage === 'error' || stage === 'cancelled') {
+            cancelController?.settle();
+            releaseEventName();
+            renderInstallTerminal({ taskId: dlId, stage, detail, statusElement: summaryText, mainBar, stagesContainer, cancelButton: cancelBtn });
+            if (stage === 'done') loadInstalledVersions();
+            setTimeout(() => removeInstallProgressCard(dlActiveList, dlId), stage === 'done' ? 2000 : 3000);
+            if (unlisten) unlisten();
           } else if (stagesContainer) {
-            const label = STAGE_LABELS[stage] || stage;
-            if (total > 0) {
-              const progressText = formatStageProgress(current, total, stage);
-              if (summaryText) summaryText.textContent = `${label} ${progressText}`;
-              if (mainBar) mainBar.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
-            } else {
-              if (summaryText) summaryText.textContent = label;
-            }
-
-            const stageId = `${dlId}-stage-${stage}`;
-            let row = document.getElementById(stageId);
-            if (!row) {
-              stagesContainer.insertAdjacentHTML('beforeend', `
-                <div class="dl-stage-row" id="${stageId}">
-                  <div class="dl-stage-head">
-                    <span class="dl-stage-label">${label}</span>
-                    <span class="dl-stage-count" id="${stageId}-count"></span>
-                  </div>
-                  <div class="dl-progress-bar-wrap" style="height:4px;">
-                    <div class="dl-progress-bar" id="${stageId}-bar" style="width:0%"></div>
-                  </div>
-                </div>
-              `);
-              row = document.getElementById(stageId);
-            }
-            const countEl = document.getElementById(`${stageId}-count`);
-            const barEl = document.getElementById(`${stageId}-bar`);
-            if (total > 0) {
-            const pct = Math.min(100, Math.round((current / total) * 100));
-            if (countEl) {
-                countEl.textContent = formatStageProgress(current, total, stage);
-              }
-              if (barEl) barEl.style.width = pct + '%';
-              if (pct >= 100 && barEl) barEl.style.opacity = '0.5';
-            } else {
-              if (countEl) countEl.textContent = detail;
-            }
-
-            // 如果弹窗打开着，实时同步内容
-            const modal = document.getElementById('dlDetailModal');
-            if (modal && !modal.classList.contains('hidden')) {
-              const modalStages = document.getElementById('dlDetailStages');
-              if (modalStages) modalStages.innerHTML = stagesContainer.innerHTML;
-            }
+            renderInstallProgress({ taskId: dlId, stage, current, total, detail, statusElement: summaryText, mainBar, stagesContainer });
           }
         });
 
-        const gameDir = localStorage.getItem('gameDir') || '';
         const javaPath = localStorage.getItem('selectedJavaPath') || '';
         await tauri.core.invoke('create_instance', {
           name: name,
@@ -603,18 +448,22 @@ function initDownloadPage() {
           useMirror: downloadSource === 'bmcl'
         });
       } catch (e) {
+        cancelController?.settle();
+        releaseEventName();
         console.error('创建失败:', e);
-        // 清理事件监听器
-        if (unlisten) unlisten();
-        // 清理进度卡片
-        const progressCard = document.getElementById(dlId);
-        if (progressCard) progressCard.remove();
-        if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
-          dlActiveList.innerHTML = `
-            <h2 class="dl-section-title">⏳ 活跃下载</h2>
-            <div class="dl-active-empty">暂无下载任务</div>
-          `;
+        try {
+          if (unlisten) unlisten();
+        } catch (cleanupError) {
+          console.warn('清理安装监听器失败:', cleanupError);
         }
+        const errorMessage = String(e || '未知错误');
+        const summaryText = document.getElementById(`${dlId}-summary-text`);
+        const stagesContainer = document.getElementById(`${dlId}-stages`);
+        const cancelBtn = document.getElementById(`${dlId}-cancel`);
+        const mainBar = document.getElementById(`${dlId}-main-bar`);
+        renderInstallTerminal({ taskId: dlId, stage: 'error', detail: errorMessage, statusElement: summaryText, mainBar, stagesContainer, cancelButton: cancelBtn });
+        showToast(`创建失败: ${errorMessage}`, 'error', 8000);
+        setTimeout(() => removeInstallProgressCard(dlActiveList, dlId), 8000);
         createBtn.textContent = '❌ 调用失败';
         setTimeout(() => { createBtn.textContent = '确认创建'; createBtn.disabled = false; }, 3000);
       }

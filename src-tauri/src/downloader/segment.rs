@@ -105,11 +105,12 @@ impl Segment {
     }
 
     pub fn fail(&self, error: String) {
-        self.failed.store(true, Ordering::Relaxed);
-        self.running.store(false, Ordering::Relaxed);
+        // 先保存具体错误，再发布失败状态，避免管理线程只读到笼统的“分片失败”。
         if let Ok(mut slot) = self.error.lock() {
             *slot = Some(error);
         }
+        self.running.store(false, Ordering::Relaxed);
+        self.failed.store(true, Ordering::Release);
     }
 
     pub fn record_write(&self, bytes: u64) {
@@ -237,7 +238,7 @@ pub fn first_segment_error(state: &Arc<FileRuntimeState>) -> Option<String> {
     let segments = state.segments.lock().ok()?;
     let mut cancelled = None;
     for segment in segments.iter() {
-        if !segment.failed.load(Ordering::Relaxed) {
+        if !segment.failed.load(Ordering::Acquire) {
             continue;
         }
         let error = segment

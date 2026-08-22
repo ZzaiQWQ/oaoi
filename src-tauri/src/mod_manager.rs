@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tauri::Emitter;
 use zip::ZipArchive;
@@ -17,6 +17,38 @@ const MOD_UPDATE_CACHE_DIR: &str = "launcher-data";
 const MOD_UPDATE_CACHE_SUBDIR: &str = "mod-update-cache";
 const MODRINTH_PROJECTS_API: &str = "https://mod.mcimirror.top/modrinth/v2/projects";
 const CURSEFORGE_MODS_API: &str = "https://mod.mcimirror.top/curseforge/v1/mods";
+
+fn mod_mutation_locks() -> &'static Mutex<HashMap<String, Weak<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 同一实例的 Mod 文件操作共用一把锁，避免更新、下载和删除互相破坏事务。
+pub(crate) fn mod_mutation_lock(game_dir: &str, name: &str) -> Result<Arc<Mutex<()>>, String> {
+    let game_root = resolve_game_dir(game_dir);
+    let safe_name = safe_path_name(name, "版本名")?;
+    let instance_dir = version_dir(&game_root, &safe_name);
+    let normalized = instance_dir
+        .canonicalize()
+        .unwrap_or(instance_dir)
+        .to_string_lossy()
+        .replace('/', "\\");
+    #[cfg(windows)]
+    let key = normalized.to_lowercase();
+    #[cfg(not(windows))]
+    let key = normalized;
+
+    let mut locks = mod_mutation_locks()
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 #[derive(Serialize, Clone)]
 pub struct ModInfo {
@@ -101,6 +133,10 @@ pub async fn stream_mods(
 }
 
 fn list_mods_blocking(game_dir: &str, name: &str) -> Result<Vec<ModInfo>, String> {
+    let mutation_lock = mod_mutation_lock(game_dir, name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let (_, mods) = collect_mod_infos(game_dir, name)?;
     Ok(mods)
 }
@@ -111,8 +147,27 @@ fn stream_mods_blocking(
     name: &str,
     request_id: &str,
 ) -> Result<(), String> {
+    let mutation_lock = mod_mutation_lock(game_dir, name)?;
+    let mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let (mods_dir, mods) = collect_mod_infos(game_dir, name)?;
-    let icon_sources = load_mod_icon_sources(game_dir, name).unwrap_or_default();
+    let icon_sources = match load_mod_icon_sources(game_dir, name) {
+        Ok(sources) => sources,
+        Err(error) => {
+            eprintln!("[mod] {}", error);
+            emit_mod_list_stream(
+                app_handle,
+                request_id,
+                name,
+                "warning",
+                Vec::new(),
+                Vec::new(),
+                &error,
+            );
+            HashMap::new()
+        }
+    };
     for chunk in mods.chunks(80) {
         emit_mod_list_stream(
             app_handle,
@@ -162,6 +217,8 @@ fn stream_mods_blocking(
             "",
         );
     }
+    // 在线图标查询不再访问本地 Mod 文件，提前释放锁，避免阻塞更新和删除。
+    drop(mutation_guard);
     for chunk in online_requests.chunks(80) {
         let icons = lookup_online_mod_icon_urls(chunk)
             .into_iter()
@@ -217,52 +274,86 @@ fn collect_mod_infos(game_dir: &str, name: &str) -> Result<(PathBuf, Vec<ModInfo
     let modcn_index = modcn_index();
 
     let mut mods = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
+    let mut diagnostics = Vec::new();
+    let entries = std::fs::read_dir(&mods_dir)
+        .map_err(|error| format!("读取 Mod 目录失败 {}: {}", mods_dir.display(), error))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                diagnostics.push(format!("读取 Mod 目录项失败: {}", error));
                 continue;
             }
-            let fname = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            let lower = fname.to_lowercase();
-            if lower.ends_with(".jar") || lower.ends_with(".jar.disabled") {
-                let enabled = !lower.ends_with(".disabled");
-                let size_kb = entry.metadata().map(|m| m.len() / 1024).unwrap_or(0);
-
-                // 从文件名提取模组名用于匹配中文
-                let base = lower.trim_end_matches(".disabled").trim_end_matches(".jar");
-                // 去掉版本号和mc版本部分
-                let mod_key = base
-                    .split(|c: char| c.is_ascii_digit())
-                    .next()
-                    .unwrap_or(base)
-                    .trim_end_matches('-')
-                    .trim_end_matches('_')
-                    .trim_end_matches('.');
-                // 也按 - 分割取第一段作为核心名
-                let first_seg = base
-                    .split('-')
-                    .next()
-                    .unwrap_or(base)
-                    .split('_')
-                    .next()
-                    .unwrap_or(base);
-
-                let cn_name = find_cn_name(&modcn_index, mod_key, first_seg, base);
-
-                mods.push(ModInfo {
-                    file_name: fname,
-                    cn_name,
-                    enabled,
-                    size_kb,
-                    icon_url: String::new(),
-                    icon_urls: Vec::new(),
-                });
+        };
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_file() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                diagnostics.push(format!(
+                    "读取 Mod 文件类型失败 {}: {}",
+                    path.display(),
+                    error
+                ));
+                continue;
             }
+        }
+        let fname = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let lower = fname.to_lowercase();
+        if lower.ends_with(".jar") || lower.ends_with(".jar.disabled") {
+            let enabled = !lower.ends_with(".disabled");
+            let size_kb = match entry.metadata() {
+                Ok(metadata) => metadata.len() / 1024,
+                Err(error) => {
+                    diagnostics.push(format!(
+                        "读取 Mod 文件信息失败 {}: {}",
+                        path.display(),
+                        error
+                    ));
+                    continue;
+                }
+            };
+
+            // 从文件名提取模组名用于匹配中文
+            let base = lower.trim_end_matches(".disabled").trim_end_matches(".jar");
+            // 去掉版本号和mc版本部分
+            let mod_key = base
+                .split(|c: char| c.is_ascii_digit())
+                .next()
+                .unwrap_or(base)
+                .trim_end_matches('-')
+                .trim_end_matches('_')
+                .trim_end_matches('.');
+            // 也按 - 分割取第一段作为核心名
+            let first_seg = base
+                .split('-')
+                .next()
+                .unwrap_or(base)
+                .split('_')
+                .next()
+                .unwrap_or(base);
+
+            let cn_name = find_cn_name(&modcn_index, mod_key, first_seg, base);
+
+            mods.push(ModInfo {
+                file_name: fname,
+                cn_name,
+                enabled,
+                size_kb,
+                icon_url: String::new(),
+                icon_urls: Vec::new(),
+            });
+        }
+    }
+    if !diagnostics.is_empty() {
+        let message = diagnostics.join("; ");
+        eprintln!("[mod] Mod 列表存在读取错误: {}", message);
+        if mods.is_empty() {
+            return Err(format!("未能读取任何有效 Mod: {}", message));
         }
     }
     mods.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
@@ -307,8 +398,13 @@ fn load_mod_icon_sources(
         .join(MOD_UPDATE_CACHE_DIR)
         .join(MOD_UPDATE_CACHE_SUBDIR)
         .join(format!("{}.json", safe_index_name(&safe_name)));
-    let data = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let cache: ModIconCache = serde_json::from_str(&data).map_err(|err| err.to_string())?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|error| format!("读取 Mod 图标缓存失败 {}: {}", path.display(), error))?;
+    let cache: ModIconCache = serde_json::from_str(&data)
+        .map_err(|error| format!("解析 Mod 图标缓存失败 {}: {}", path.display(), error))?;
     let mut out = HashMap::new();
     for file in cache.files.into_values() {
         let source = ModIconSource {
@@ -340,7 +436,7 @@ fn insert_icon_source_key(
     source: ModIconSource,
 ) {
     out.insert(key.clone(), source.clone());
-    if let Some(enabled) = key.strip_suffix(".disabled") {
+    if let Some(enabled) = strip_disabled_suffix(&key) {
         out.entry(enabled.to_string()).or_insert(source);
     } else {
         out.entry(format!("{}.disabled", key)).or_insert(source);
@@ -352,10 +448,10 @@ fn icon_source_for_file(
     file_name: &str,
 ) -> Option<ModIconSource> {
     let rel = format!("mods/{}", file_name);
-    sources.get(&rel).cloned().or_else(|| {
-        rel.strip_suffix(".disabled")
-            .and_then(|enabled| sources.get(enabled).cloned())
-    })
+    sources
+        .get(&rel)
+        .cloned()
+        .or_else(|| strip_disabled_suffix(&rel).and_then(|enabled| sources.get(enabled).cloned()))
 }
 
 fn lookup_online_mod_icon_urls(requests: &[OnlineIconRequest]) -> HashMap<String, Vec<String>> {
@@ -770,6 +866,10 @@ fn find_cn_name(index: &ModCnIndex, mod_key: &str, first_seg: &str, base: &str) 
 /// 切换 mod 启用/禁用（.jar ↔ .jar.disabled）
 #[tauri::command]
 pub fn toggle_mod(game_dir: String, name: String, file_name: String) -> Result<bool, String> {
+    let mutation_lock = mod_mutation_lock(&game_dir, &name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let dir = resolve_game_dir(&game_dir);
     let safe_name = safe_path_name(&name, "版本名")?;
     let safe_file_name = safe_path_name(&file_name, "文件名")?;
@@ -782,7 +882,9 @@ pub fn toggle_mod(game_dir: String, name: String, file_name: String) -> Result<b
     let (dst_name, new_enabled) = if lower.ends_with(".jar.disabled") {
         // 启用：去掉 .disabled
         (
-            safe_file_name.trim_end_matches(".disabled").to_string(),
+            strip_disabled_suffix(&safe_file_name)
+                .ok_or_else(|| "禁用 Mod 文件名无效".to_string())?
+                .to_string(),
             true,
         )
     } else if lower.ends_with(".jar") {
@@ -796,9 +898,24 @@ pub fn toggle_mod(game_dir: String, name: String, file_name: String) -> Result<b
     Ok(new_enabled)
 }
 
+fn strip_disabled_suffix(file_name: &str) -> Option<&str> {
+    const SUFFIX: &str = ".disabled";
+    let split_at = file_name.len().checked_sub(SUFFIX.len())?;
+    let (base, suffix) = file_name.split_at(split_at);
+    if suffix.eq_ignore_ascii_case(SUFFIX) && !base.is_empty() {
+        Some(base)
+    } else {
+        None
+    }
+}
+
 /// 删除指定 mod 文件
 #[tauri::command]
 pub fn delete_mod(game_dir: String, name: String, file_name: String) -> Result<bool, String> {
+    let mutation_lock = mod_mutation_lock(&game_dir, &name)?;
+    let _mutation_guard = mutation_lock
+        .lock()
+        .map_err(|_| "Mod 文件事务锁已损坏".to_string())?;
     let dir = resolve_game_dir(&game_dir);
     let safe_name = safe_path_name(&name, "版本名")?;
     let safe_file_name = safe_path_name(&file_name, "文件名")?;
@@ -809,4 +926,79 @@ pub fn delete_mod(game_dir: String, name: String, file_name: String) -> Result<b
     }
     std::fs::remove_file(&target).map_err(|e| format!("删除失败: {}", e))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_mod_infos, list_mods_blocking, mod_mutation_lock, strip_disabled_suffix};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    #[test]
+    fn 同一实例复用同一把_mod_事务锁() {
+        let game_dir = std::env::temp_dir().join("oaoi-mod-lock-test");
+        let game_dir = game_dir.to_string_lossy();
+        let first = mod_mutation_lock(&game_dir, "测试实例").unwrap();
+        let second = mod_mutation_lock(&game_dir, "测试实例").unwrap();
+        let other = mod_mutation_lock(&game_dir, "另一个实例").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn 禁用后缀按大小写正确去除() {
+        assert_eq!(
+            strip_disabled_suffix("example.jar.disabled").unwrap(),
+            "example.jar"
+        );
+        assert_eq!(
+            strip_disabled_suffix("example.jar.DISABLED").unwrap(),
+            "example.jar"
+        );
+    }
+
+    #[test]
+    fn 读取_mod_列表等待实例事务锁() {
+        let game_dir =
+            std::env::temp_dir().join(format!("oaoi-mod-read-lock-{}", std::process::id()));
+        let game_dir = game_dir.to_string_lossy().to_string();
+        let lock = mod_mutation_lock(&game_dir, "测试实例").unwrap();
+        let guard = lock.lock().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let read_game_dir = game_dir.clone();
+
+        std::thread::spawn(move || {
+            let result = list_mods_blocking(&read_game_dir, "测试实例");
+            sender.send(result).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(guard);
+        assert!(receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok());
+    }
+
+    #[test]
+    fn 无法读取_mod_目录时返回诊断错误() {
+        let root = std::env::temp_dir().join(format!("oaoi-mod-read-error-{}", std::process::id()));
+        let mods = root
+            .join(".minecraft")
+            .join("versions")
+            .join("测试实例")
+            .join("mods");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(mods.parent().unwrap()).unwrap();
+        std::fs::write(&mods, b"not a directory").unwrap();
+
+        let error = match collect_mod_infos(root.to_string_lossy().as_ref(), "测试实例") {
+            Err(error) => error,
+            Ok(_) => panic!("无法读取 Mod 目录时不应返回成功"),
+        };
+
+        assert!(error.contains("读取 Mod 目录失败"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

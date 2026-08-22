@@ -17,6 +17,8 @@ body,
   -webkit-touch-callout: none;
 }
 
+.launcher input,
+.launcher textarea,
 input,
 textarea {
   -webkit-user-select: text;

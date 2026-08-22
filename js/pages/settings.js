@@ -120,6 +120,19 @@ function initJvmArgsSettings() {
   document.getElementById('jvmSummaryCard')?.addEventListener('dblclick', openJvmArgsModal);
 }
 
+function syncGameDirSummary(value) {
+  const gameDirSummary = document.getElementById('gameDirSummary');
+  if (!gameDirSummary) return;
+  if (!value) {
+    gameDirSummary.textContent = '未选择';
+    gameDirSummary.removeAttribute('title');
+    return;
+  }
+  const parts = String(value).split(/[\\/]/).filter(Boolean);
+  gameDirSummary.textContent = parts.slice(-2).join('\\') || value;
+  gameDirSummary.title = value;
+}
+
 // ============ 设置页交互 ============
 function initSettings() {
   // 游戏目录选择
@@ -127,19 +140,7 @@ function initSettings() {
   const gameDirBtn = document.getElementById('gameDirBtn');
   const gameDirToggle = document.getElementById('gameDirToggle');
   const gameDirPanel = document.getElementById('gameDirPanel');
-  const gameDirSummary = document.getElementById('gameDirSummary');
   const cachedGameDir = localStorage.getItem('gameDir');
-
-  function updateGameDirSummary(value) {
-    if (!gameDirSummary) return;
-    if (!value) {
-      gameDirSummary.textContent = '未选择';
-      return;
-    }
-    const parts = value.split(/[\\/]/).filter(Boolean);
-    gameDirSummary.textContent = parts.slice(-2).join('\\') || value;
-    gameDirSummary.title = value;
-  }
 
   function normalizeMinecraftDir(path) {
     const value = String(path || '').replace(/[\\/]+$/, '');
@@ -151,7 +152,7 @@ function initSettings() {
     gameDirDisplay.textContent = cachedGameDir;
     gameDirDisplay.title = cachedGameDir;
   }
-  updateGameDirSummary(cachedGameDir);
+  syncGameDirSummary(cachedGameDir);
 
   if (gameDirToggle && gameDirPanel) {
     gameDirPanel.classList.remove('open');
@@ -174,8 +175,11 @@ function initSettings() {
           gameDirDisplay.textContent = gameDir;
           gameDirDisplay.title = gameDir;
           localStorage.setItem('gameDir', gameDir);
-          updateGameDirSummary(gameDir);
+          syncGameDirSummary(gameDir);
           console.log('📁 游戏目录:', gameDir);
+          if (typeof loadInstalledVersions === 'function') {
+            loadInstalledVersions().catch(err => console.warn('切换目录后刷新版本列表失败:', err));
+          }
         }
       } catch (e) {
         console.log('⚠️ 目录选择失败:', e);
@@ -238,10 +242,8 @@ function initSettings() {
   function avatarSources(id, size) {
     const safeId = encodeURIComponent(id || 'MHF_Steve');
     return [
-      `https://mc-heads.net/avatar/${safeId}/${size}`,
       `https://crafthead.net/helm/${safeId}/${size}`,
       `https://minotar.net/helm/${safeId}/${size}.png`,
-      `https://crafatar.com/avatars/${safeId}?size=${size}&overlay`,
     ];
   }
 
@@ -322,7 +324,12 @@ function initSettings() {
         if (idx <= ai && ai > 0) setActiveIdx(ai - 1);
         if (accs.length === 0) setActiveIdx(0);
         renderAccountList();
-        if (accs.length === 0 && typeof setLoginMode === 'function') setLoginMode('offline');
+        if (accs.length === 0 && typeof setLoginMode === 'function') {
+          setLoginMode('offline');
+        } else if (localStorage.getItem('loginMode') === 'online') {
+          const activeAccount = accs[getActiveIdx()] || accs[0];
+          if (activeAccount) updateSidebarPlayer(activeAccount.name, activeAccount.uuid);
+        }
       });
     });
   }
@@ -349,15 +356,22 @@ function initSettings() {
   (async () => {
     try {
       const tauri = await waitForTauri();
-      const accs = getAccounts();
+      const accs = getAccounts().map(account => ({ ...account }));
       let changed = false;
       for (let i = 0; i < accs.length; i++) {
         if (accs[i].refresh_token) {
           try {
-            const refreshed = await tauri.core.invoke('refresh_ms_login', { refreshToken: accs[i].refresh_token });
-            accs[i].access_token = refreshed.access_token;
-            if (refreshed.refresh_token) accs[i].refresh_token = refreshed.refresh_token;
-            accs[i].name = refreshed.name;
+            const source = accs[i];
+            const refreshed = await tauri.core.invoke('refresh_ms_login', { refreshToken: source.refresh_token });
+            const current = getAccounts();
+            const currentIdx = current.findIndex(account => account.uuid === source.uuid);
+            if (currentIdx < 0) continue;
+            const latest = current[currentIdx];
+            if (latest.refresh_token !== source.refresh_token || latest.access_token !== source.access_token) continue;
+            latest.access_token = refreshed.access_token;
+            if (refreshed.refresh_token) latest.refresh_token = refreshed.refresh_token;
+            latest.name = refreshed.name;
+            saveAccounts(current);
             changed = true;
             console.log(`🔄 账号 ${refreshed.name} token 已刷新`);
           } catch (e) {
@@ -366,25 +380,34 @@ function initSettings() {
         }
       }
       if (changed) {
-        saveAccounts(accs);
         renderAccountList();
       }
     } catch (e) { console.warn('[auth] 刷新Token失败:', e); }
   })();
 
   let msLoginPending = false;
+  let msLoginAttempt = 0;
   if (msLoginBtn) {
     msLoginBtn.addEventListener('click', async () => {
       // 已在等待中 → 用户点击取消
       if (msLoginPending) {
+        const cancelAttempt = ++msLoginAttempt;
+        msLoginBtn.textContent = '正在取消...';
+        msLoginBtn.disabled = true;
+        try {
+          const t = await waitForTauri();
+          await t.core.invoke('cancel_ms_login');
+        } catch (e) {
+          console.warn('[auth] 取消登录失败:', e);
+        }
+        if (cancelAttempt !== msLoginAttempt) return;
         msLoginPending = false;
         msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
         if (msLoginStatus) { msLoginStatus.textContent = '已取消登录'; setTimeout(() => { msLoginStatus.style.display = 'none'; }, 2000); }
-        // 通知后端停止等待
-        try { const t = await waitForTauri(); await t.core.invoke('cancel_ms_login'); } catch (e) { console.warn('[auth] 取消登录失败:', e); }
         return;
       }
+      const loginAttempt = ++msLoginAttempt;
       try {
         const tauri = await waitForTauri();
         msLoginPending = true;
@@ -393,6 +416,7 @@ function initSettings() {
         if (msLoginStatus) { msLoginStatus.style.display = ''; msLoginStatus.textContent = '请在浏览器中完成微软登录...'; }
 
         const profile = await tauri.core.invoke('start_ms_login');
+        if (loginAttempt !== msLoginAttempt || !msLoginPending) return;
         msLoginPending = false;
 
         const accs = getAccounts();
@@ -408,6 +432,7 @@ function initSettings() {
         updateSidebarPlayer(profile.name, profile.uuid);
         if (typeof setLoginMode === 'function') setLoginMode('online');
       } catch (e) {
+        if (loginAttempt !== msLoginAttempt) return;
         msLoginPending = false;
         msLoginBtn.textContent = '添加微软账号';
         msLoginBtn.disabled = false;
@@ -486,6 +511,7 @@ function initSettings() {
   const memoryModeManual = document.getElementById('memoryModeManual');
   const memoryModeAuto = document.getElementById('memoryModeAuto');
   const memoryModeHint = document.getElementById('memoryModeHint');
+  let memoryEditRevision = 0;
 
   function setMemoryMode(mode) {
     const nextMode = mode === 'auto' ? 'auto' : 'manual';
@@ -508,27 +534,50 @@ function initSettings() {
 
     // 滑块 → 数字输入
     memSlider.addEventListener('input', () => {
+      memoryEditRevision += 1;
       memValue.value = memSlider.value;
       localStorage.setItem('memAlloc', memSlider.value);
     });
     // 数字输入 → 滑块
     memValue.addEventListener('input', () => {
-      const v = parseInt(memValue.value) || 1024;
+      const parsed = parseInt(memValue.value, 10);
+      if (!Number.isFinite(parsed)) return;
+      const min = Number(memValue.min) || 512;
+      const max = Number(memValue.max) || Number(memSlider.max) || 16384;
+      const v = Math.min(max, Math.max(min, parsed));
+      memoryEditRevision += 1;
       memSlider.value = v;
       localStorage.setItem('memAlloc', v);
+    });
+    memValue.addEventListener('change', () => {
+      const min = Number(memValue.min) || 512;
+      const max = Number(memValue.max) || Number(memSlider.max) || 16384;
+      const parsed = parseInt(memValue.value, 10);
+      const value = Math.min(max, Math.max(min, Number.isFinite(parsed) ? parsed : 4096));
+      memoryEditRevision += 1;
+      memValue.value = String(value);
+      memSlider.value = String(value);
+      localStorage.setItem('memAlloc', String(value));
     });
 
     // 从 Tauri 获取真实系统内存
     (async () => {
+      const initialRevision = memoryEditRevision;
       try {
         const tauri = await waitForTauri();
         const totalMB = await tauri.core.invoke('get_system_memory');
         memSlider.max = totalMB;
         memValue.max = totalMB;
-        const defaultMem = cachedMem ? Math.min(parseInt(cachedMem), totalMB) : Math.max(1024, Math.floor(totalMB / 2));
-        memSlider.value = defaultMem;
-        memValue.value = defaultMem;
-        if (!cachedMem) localStorage.setItem('memAlloc', defaultMem);
+        // 请求返回前用户可能已经改过数值，异步初始化不能覆盖新输入。
+        if (memoryEditRevision === initialRevision) {
+          const latestCachedMem = parseInt(localStorage.getItem('memAlloc') ?? cachedMem, 10);
+          const defaultMem = Number.isFinite(latestCachedMem)
+            ? Math.min(latestCachedMem, totalMB)
+            : Math.max(1024, Math.floor(totalMB / 2));
+          memSlider.value = defaultMem;
+          memValue.value = defaultMem;
+          localStorage.setItem('memAlloc', String(defaultMem));
+        }
         if (sliderLabels) {
           const labels = sliderLabels.querySelectorAll('span');
           if (labels.length >= 3) {
@@ -604,15 +653,41 @@ function initSettings() {
   const javaResultsToggle = document.getElementById('javaResultsToggle');
   const javaCount = document.getElementById('javaCount');
 
-  // 根据当前选中版本推荐 Java 版本
-  let recommendedMajor = (() => {
-    const sel = document.getElementById('versionSelector');
-    const mcVer = sel?.value?.split('-')[0] || localStorage.getItem('selectedVersion')?.split('-')[0] || '1.20.1';
-    return typeof getRequiredJavaMajor === 'function' ? getRequiredJavaMajor(mcVer) : 21;
-  })();
+  function isInstanceCacheReady() {
+    const gameDir = localStorage.getItem('gameDir') || '';
+    return typeof instancesCacheGameDir !== 'undefined'
+      && instancesCacheGameDir === gameDir;
+  }
+
+  // 实例名可能是整合包名称，Java 推荐必须读取实例记录中的真实游戏版本。
+  function resolveRecommendedJavaMajor() {
+    if (!isInstanceCacheReady()) return null;
+    const selectedName = document.getElementById('versionSelector')?.value
+      || localStorage.getItem('selectedVersion')
+      || '';
+    const cache = typeof instancesCache !== 'undefined' && Array.isArray(instancesCache)
+      ? instancesCache
+      : [];
+    const mcVersion = cache.find(instance => instance.name === selectedName)?.mc_version || '';
+    if (!mcVersion) return null;
+    return typeof getRequiredJavaMajor === 'function' ? getRequiredJavaMajor(mcVersion) : 21;
+  }
+  let recommendedMajor = resolveRecommendedJavaMajor();
+
+  function cachedJavaSupportsRecommended() {
+    const major = resolveRecommendedJavaMajor();
+    if (major === null) return true;
+    try {
+      const cached = JSON.parse(localStorage.getItem('javaSearchResults') || '[]');
+      return Array.isArray(cached) && cached.some(java => Number(java.major) === major);
+    } catch (e) {
+      return false;
+    }
+  }
 
   // 渲染 Java 列表（复用）
   function renderJavaList(javas, selectedPath) {
+    recommendedMajor = resolveRecommendedJavaMajor();
     javaCount.textContent = javas.length;
     javaResults.classList.add('has-results');
     javaResultsList.innerHTML = '';
@@ -620,7 +695,7 @@ function initSettings() {
     javas.forEach(java => {
       const item = document.createElement('div');
       item.className = 'java-result-item' + (java.path === selectedPath ? ' selected' : '');
-      const isRecommended = java.major === recommendedMajor;
+      const isRecommended = recommendedMajor !== null && Number(java.major) === recommendedMajor;
       const shortPath = java.path.split('\\').slice(-3).join('\\');
       item.innerHTML = `
         <span class="java-result-path" title="${java.path}">${shortPath}</span>
@@ -641,6 +716,24 @@ function initSettings() {
     });
   }
 
+  function refreshJavaRecommendationDisplay() {
+    const selectedPath = localStorage.getItem('selectedJavaPath') || '';
+    javaPathDisplay.textContent = selectedPath || '未选择';
+    javaPathDisplay.title = selectedPath;
+    const cached = localStorage.getItem('javaSearchResults');
+    if (!cached) return;
+    try {
+      const javas = JSON.parse(cached);
+      if (!Array.isArray(javas) || javas.length === 0) return;
+      const activePath = selectedPath || javas[0].path;
+      javaPathDisplay.textContent = activePath;
+      javaPathDisplay.title = activePath;
+      renderJavaList(javas, activePath);
+    } catch (err) {
+      console.warn('[java] 刷新推荐显示失败:', err);
+    }
+  }
+
   // 启动时从缓存加载
   const cachedJavas = localStorage.getItem('javaSearchResults');
   const cachedSelected = localStorage.getItem('selectedJavaPath');
@@ -659,6 +752,11 @@ function initSettings() {
   // 自动查找按钮
   if (javaAutoBtn && javaPathDisplay) {
     javaAutoBtn.addEventListener('click', async () => {
+      if (!isInstanceCacheReady() && typeof loadInstalledVersions === 'function') {
+        await loadInstalledVersions();
+      }
+      recommendedMajor = resolveRecommendedJavaMajor();
+      const requestedGameDir = localStorage.getItem('gameDir') || '';
       javaAutoBtn.disabled = true;
       javaAutoBtn.textContent = '搜索中...';
       javaPathDisplay.textContent = '正在搜索...';
@@ -666,38 +764,64 @@ function initSettings() {
 
       try {
         const tauri = await waitForTauri();
-        const javas = await tauri.core.invoke('find_java', { gameDir: localStorage.getItem('gameDir') || '' });
+        const javas = await tauri.core.invoke('find_java', { gameDir: requestedGameDir });
+        if ((localStorage.getItem('gameDir') || '') !== requestedGameDir) {
+          refreshJavaRecommendationDisplay();
+          return;
+        }
+        // 扫描期间可能切换实例，返回后按当前实例重新计算推荐 Java。
+        recommendedMajor = resolveRecommendedJavaMajor();
 
         if (javas && javas.length > 0) {
           // 保存到缓存
           localStorage.setItem('javaSearchResults', JSON.stringify(javas));
 
-          let recommended = javas.find(j => j.major === recommendedMajor);
-          let selected = recommended || javas[0];
+          const recommended = recommendedMajor === null
+            ? null
+            : javas.find(j => Number(j.major) === recommendedMajor);
+          const selected = recommended || javas[0];
           javaPathDisplay.textContent = selected.path;
           javaPathDisplay.title = selected.path;
           localStorage.setItem('selectedJavaPath', selected.path);
 
           renderJavaList(javas, selected.path);
-          console.log(`☕ 找到 ${javas.length} 个 Java (推荐: Java ${recommendedMajor})`);
+          const recommendedText = recommendedMajor === null ? '实例缓存未就绪' : `Java ${recommendedMajor}`;
+          console.log(`☕ 找到 ${javas.length} 个 Java (推荐: ${recommendedText})`);
         } else {
           javaPathDisplay.textContent = '未找到 Java';
           javaResults.classList.remove('has-results');
         }
       } catch (e) {
-        javaPathDisplay.textContent = '搜索失败';
+        if ((localStorage.getItem('gameDir') || '') === requestedGameDir) {
+          javaPathDisplay.textContent = '搜索失败';
+        }
         console.log('⚠️ 自动搜索失败:', e);
+      } finally {
+        javaAutoBtn.disabled = false;
+        javaAutoBtn.textContent = '自动查找';
+        const activeGameDir = localStorage.getItem('gameDir') || '';
+        if (activeGameDir !== requestedGameDir && !cachedJavaSupportsRecommended()) {
+          // 目录在扫描期间发生变化，旧结果丢弃后立即为新目录补扫。
+          setTimeout(() => javaAutoBtn.click(), 0);
+        }
       }
-
-      javaAutoBtn.disabled = false;
-      javaAutoBtn.textContent = '自动查找';
     });
 
-    // 手动模式下，如果从未搜索过 Java，首次自动搜索一次
-    if (!localStorage.getItem('javaSearchResults')) {
+    // 实例版本缓存就绪后再自动搜索，避免先按错误的默认版本选择 Java。
+    if (!localStorage.getItem('javaSearchResults') && resolveRecommendedJavaMajor() !== null) {
       javaAutoBtn.click();
     }
   }
+
+  document.addEventListener('oaoi:instances-loaded', (event) => {
+    if ((event.detail?.gameDir || '') !== (localStorage.getItem('gameDir') || '')) return;
+    refreshJavaRecommendationDisplay();
+    if (!cachedJavaSupportsRecommended() && javaAutoBtn && !javaAutoBtn.disabled
+        && resolveRecommendedJavaMajor() !== null) {
+      javaAutoBtn.click();
+    }
+  });
+  document.getElementById('versionSelector')?.addEventListener('change', refreshJavaRecommendationDisplay);
 
   // 折叠/展开搜索结果
   if (javaResultsToggle && javaResults) {

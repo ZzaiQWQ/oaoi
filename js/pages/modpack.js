@@ -65,6 +65,7 @@ function initModpackTab() {
   let modpackOffset = 0;
   let modpackLoading = false;
   let modpackNoMore = false;
+  let modpackSearchSeq = 0;
   const MODPACK_PAGE_SIZE = 20;
 
   if (modpackSearchBtn) {
@@ -92,14 +93,17 @@ function initModpackTab() {
   async function doModpackSearch(query) {
     const listEl = document.getElementById('modpackList');
     if (!listEl) return;
+    const searchSeq = ++modpackSearchSeq;
     modpackCurrentQuery = query;
     modpackOffset = 0;
     modpackNoMore = false;
+    modpackLoading = true;
     listEl.innerHTML = '<div class="dl-loading">搜索中...</div>';
 
     try {
       const tauri = await waitForTauri();
       const results = await tauri.core.invoke('search_modpacks', { query, offset: 0 });
+      if (searchSeq !== modpackSearchSeq || query !== modpackCurrentQuery) return;
       if (results.length === 0) {
         listEl.innerHTML = '<div class="dl-loading">未找到整合包</div>';
         modpackNoMore = true;
@@ -110,22 +114,29 @@ function initModpackTab() {
       appendModpackCards(results);
       if (results.length < MODPACK_PAGE_SIZE) modpackNoMore = true;
     } catch (err) {
+      if (searchSeq !== modpackSearchSeq) return;
       listEl.innerHTML = `<div class="dl-loading">❌ 搜索失败: ${escapeHtml(err)}</div>`;
+    } finally {
+      if (searchSeq === modpackSearchSeq) modpackLoading = false;
     }
   }
 
   async function loadMoreModpacks() {
     if (modpackLoading || modpackNoMore) return;
-    modpackLoading = true;
     const listEl = document.getElementById('modpackList');
     if (!listEl) return;
+    const searchSeq = modpackSearchSeq;
+    const query = modpackCurrentQuery;
+    const offset = modpackOffset;
+    modpackLoading = true;
 
     // 加个 loading 提示
     listEl.insertAdjacentHTML('beforeend', '<div class="dl-loading modpack-load-more">加载更多...</div>');
 
     try {
       const tauri = await waitForTauri();
-      const results = await tauri.core.invoke('search_modpacks', { query: modpackCurrentQuery, offset: modpackOffset });
+      const results = await tauri.core.invoke('search_modpacks', { query, offset });
+      if (searchSeq !== modpackSearchSeq || query !== modpackCurrentQuery) return;
       // 删掉 loading 提示
       listEl.querySelector('.modpack-load-more')?.remove();
       if (results.length === 0) {
@@ -136,10 +147,11 @@ function initModpackTab() {
         if (results.length < MODPACK_PAGE_SIZE) modpackNoMore = true;
       }
     } catch (err) {
+      if (searchSeq !== modpackSearchSeq) return;
       listEl.querySelector('.modpack-load-more')?.remove();
       console.error('加载更多失败:', err);
     } finally {
-      modpackLoading = false;
+      if (searchSeq === modpackSearchSeq) modpackLoading = false;
     }
   }
 
@@ -352,6 +364,22 @@ function initModpackTab() {
         btn.textContent = '下载中...';
         btn.disabled = true;
 
+        let unlisten = null;
+        let dlId = '';
+        let dlActiveList = null;
+        let cancelController = null;
+        if (!acquireInstallEventName(fileName)) {
+          showToast(`同名安装任务正在进行: ${fileName}`, 'warn');
+          btn.textContent = '安装';
+          btn.disabled = false;
+          return;
+        }
+        let eventNameAcquired = true;
+        const releaseEventName = () => {
+          if (!eventNameAcquired) return;
+          eventNameAcquired = false;
+          releaseInstallEventName(fileName);
+        };
         try {
           const tauri = await waitForTauri();
           const gameDir = localStorage.getItem('gameDir') || '';
@@ -362,8 +390,16 @@ function initModpackTab() {
           document.getElementById('modpackVersionModal')?.classList.add('hidden');
 
           // 创建进度卡片
-          const dlActiveList = document.getElementById('dlActiveList');
-          const dlId = 'dl-' + Date.now();
+          dlActiveList = document.getElementById('dlActiveList');
+          dlId = createUiTaskId('dl');
+          cancelController = createInstallCancelController({
+            tauri,
+            fileName,
+            gameDir,
+            getCancelButton: () => document.getElementById(`${dlId}-cancel`),
+            getStatusElement: () => document.getElementById(`${dlId}-summary-text`),
+            logPrefix: 'modpack',
+          });
           if (dlActiveList) {
             const emptyMsg = dlActiveList.querySelector('.dl-active-empty');
             if (emptyMsg) emptyMsg.remove();
@@ -386,95 +422,40 @@ function initModpackTab() {
               </div>
             `);
 
-            // 创建详情弹窗（隐藏，点击卡片打开）
-            let detailModal = document.getElementById('dlDetailModal');
-            if (!detailModal) {
-              document.body.insertAdjacentHTML('beforeend', `
-                <div class="dl-detail-modal hidden" id="dlDetailModal">
-                  <div class="dl-detail-content">
-                    <div class="dl-detail-header">
-                      <span class="dl-detail-title">安装详情</span>
-                      <button class="dl-detail-close" id="dlDetailClose">✕</button>
-                    </div>
-                    <div class="dl-detail-stages" id="dlDetailStages"></div>
-                  </div>
-                </div>
-              `);
-              detailModal = document.getElementById('dlDetailModal');
-              document.getElementById('dlDetailClose').addEventListener('click', () => {
-                detailModal.classList.add('hidden');
-              });
-              detailModal.addEventListener('click', (e) => {
-                if (e.target === detailModal) detailModal.classList.add('hidden');
-              });
-            }
-
             // 点击卡片打开弹窗
             document.getElementById(`${dlId}-summary`)?.addEventListener('click', () => {
-              const modal = document.getElementById('dlDetailModal');
-              const title = modal.querySelector('.dl-detail-title');
-              if (title) title.textContent = `📦 ${fileName}`;
-              // 复制 stages 到弹窗中
               const stagesContainer = document.getElementById(`${dlId}-stages`);
-              const modalStages = document.getElementById('dlDetailStages');
-              if (stagesContainer && modalStages) {
-                modalStages.innerHTML = stagesContainer.innerHTML;
-              }
-              modal.classList.remove('hidden');
+              openDownloadDetail(dlId, fileName, stagesContainer);
             });
 
             // 绑定取消按钮
             document.getElementById(`${dlId}-cancel`)?.addEventListener('click', async (event) => {
               event.preventDefault();
               event.stopPropagation();
-              const cancelBtn = event.currentTarget;
-              const summaryText = document.getElementById(`${dlId}-summary-text`);
-              cancelBtn.disabled = true;
-              cancelBtn.textContent = '…';
-              if (summaryText) summaryText.textContent = '正在取消...';
-              try {
-                await tauri.core.invoke('cancel_modpack_install', { fileName });
-              } catch (e) {
-                cancelBtn.disabled = false;
-                cancelBtn.textContent = '✕';
-                if (summaryText) summaryText.textContent = `取消失败: ${e}`;
-                console.warn('取消失败:', e);
-              }
+              await cancelController?.requestCancel();
             });
           }
 
-          const STAGE_LABELS2 = STAGE_LABELS; // 使用全局 utils.js
-
           // 监听安装进度
-          const unlisten = await tauri.event.listen('install-progress', (event) => {
+          unlisten = await tauri.event.listen('install-progress', (event) => {
             const { name: evtName, stage, current, total, detail } = event.payload;
             // 只处理属于本任务的进度事件
             if (evtName !== fileName) return;
             // 找到隐藏的 stages 容器
-            let stagesContainer = document.getElementById(`${dlId}-stages`);
-            let progressCard = document.getElementById(dlId);
-            if (!stagesContainer) {
-              const cards = document.querySelectorAll('.dl-progress-card');
-              if (cards.length > 0) {
-                progressCard = cards[cards.length - 1];
-                stagesContainer = progressCard.querySelector('.dl-progress-stages');
-              }
-            }
+            const stagesContainer = document.getElementById(`${dlId}-stages`);
+            const progressCard = document.getElementById(dlId);
 
             // 更新卡片上的总进度摘要
             const summaryText = document.getElementById(`${dlId}-summary-text`);
             const mainBar = document.getElementById(`${dlId}-main-bar`);
+            const cancelBtn = document.getElementById(`${dlId}-cancel`);
+            cancelController?.markBackendReady();
 
             if (stage === 'done') {
-              if (summaryText) summaryText.textContent = '✅ 安装完成！';
-              if (mainBar) { mainBar.style.width = '100%'; mainBar.style.opacity = '0.5'; }
-              if (stagesContainer) stagesContainer.innerHTML = '<div class="dl-stage-row"><span class="dl-stage-label">✅ 安装完成！</span></div>';
-              // 更新弹窗
-              const modalStages = document.getElementById('dlDetailStages');
-              if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
+              cancelController?.settle();
+              releaseEventName();
+              renderInstallTerminal({ taskId: dlId, stage, detail, statusElement: summaryText, mainBar, stagesContainer, cancelButton: cancelBtn });
               if (typeof loadInstalledVersions === 'function') loadInstalledVersions();
-              const cancelBtn = document.getElementById(`${dlId}-cancel`);
-              if (cancelBtn) cancelBtn.style.display = 'none';
               setTimeout(() => {
                 if (progressCard) progressCard.remove();
                 if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
@@ -483,20 +464,13 @@ function initModpackTab() {
                     <div class="dl-active-empty">暂无下载任务</div>
                   `;
                 }
-                const modal = document.getElementById('dlDetailModal');
-                if (modal) modal.classList.add('hidden');
+                closeDownloadDetail(dlId);
               }, 2000);
               unlisten();
             } else if (stage === 'error' || stage === 'cancelled') {
-              const icon = stage === 'cancelled' ? '🚫' : '❌';
-              const msg = stage === 'cancelled' ? '已取消' : detail;
-              if (summaryText) summaryText.textContent = `${icon} ${msg}`;
-              if (mainBar) mainBar.style.width = '0%';
-              if (stagesContainer) stagesContainer.innerHTML = `<div class="dl-stage-row"><span class="dl-stage-label" style="color:#ef4444">${icon} ${escapeHtml(msg)}</span></div>`;
-              const modalStages = document.getElementById('dlDetailStages');
-              if (modalStages) modalStages.innerHTML = stagesContainer?.innerHTML || '';
-              const cancelBtn = document.getElementById(`${dlId}-cancel`);
-              if (cancelBtn) cancelBtn.style.display = 'none';
+              cancelController?.settle();
+              releaseEventName();
+              renderInstallTerminal({ taskId: dlId, stage, detail, statusElement: summaryText, mainBar, stagesContainer, cancelButton: cancelBtn });
               setTimeout(() => {
                 if (progressCard) progressCard.remove();
                 if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
@@ -505,65 +479,51 @@ function initModpackTab() {
                     <div class="dl-active-empty">暂无下载任务</div>
                   `;
                 }
-                const modal = document.getElementById('dlDetailModal');
-                if (modal) modal.classList.add('hidden');
+                closeDownloadDetail(dlId);
               }, 3000);
               unlisten();
             } else if (stagesContainer) {
-              // 更新总进度摘要文字
-              const label = STAGE_LABELS2[stage] || stage;
-              if (total > 0) {
-                const progressText = formatStageProgress(current, total, stage);
-                if (summaryText) summaryText.textContent = `${label} ${progressText}`;
-                if (mainBar) mainBar.style.width = Math.min(100, Math.round((current / total) * 100)) + '%';
-              } else {
-                if (summaryText) summaryText.textContent = label;
-              }
-
-              // 更新隐藏的 stages 容器
-              const stageId = `${dlId}-stage-${stage}`;
-              let row = document.getElementById(stageId);
-              if (!row) {
-                stagesContainer.insertAdjacentHTML('beforeend', `
-                  <div class="dl-stage-row" id="${stageId}">
-                    <div class="dl-stage-head">
-                      <span class="dl-stage-label">${label}</span>
-                      <span class="dl-stage-count" id="${stageId}-count"></span>
-                    </div>
-                    <div class="dl-progress-bar-wrap" style="height:4px;">
-                      <div class="dl-progress-bar" id="${stageId}-bar" style="width:0%"></div>
-                    </div>
-                  </div>
-                `);
-                row = document.getElementById(stageId);
-              }
-              const countEl = document.getElementById(`${stageId}-count`);
-              const barEl = document.getElementById(`${stageId}-bar`);
-              if (total > 0) {
-              const pct = Math.min(100, Math.round((current / total) * 100));
-              if (countEl) {
-                  countEl.textContent = formatStageProgress(current, total, stage);
-                }
-                if (barEl) barEl.style.width = pct + '%';
-                if (pct >= 100 && barEl) barEl.style.opacity = '0.5';
-              } else {
-                if (countEl) countEl.textContent = detail;
-              }
-
-              // 如果弹窗打开着，实时同步内容
-              const modal = document.getElementById('dlDetailModal');
-              if (modal && !modal.classList.contains('hidden')) {
-                const modalStages = document.getElementById('dlDetailStages');
-                if (modalStages) modalStages.innerHTML = stagesContainer.innerHTML;
-              }
+              renderInstallProgress({ taskId: dlId, stage, current, total, detail, statusElement: summaryText, mainBar, stagesContainer });
             }
           });
 
           // 发起下载安装
           await tauri.core.invoke('install_modpack_direct', {
-            downloadUrl: url, downloadUrls, fileName, gameDir, javaPath, useMirror
+            downloadUrl: url,
+            downloadUrls,
+            fileName,
+            gameDir,
+            javaPath,
+            useMirror,
+            expectedSize: Number(version.file_size) || null,
+            expectedSha1: version.sha1 || null,
           });
         } catch (err) {
+          cancelController?.settle();
+          releaseEventName();
+          try {
+            if (unlisten) unlisten();
+          } catch (cleanupError) {
+            console.warn('清理整合包监听器失败:', cleanupError);
+          }
+          const errorMessage = String(err || '未知错误');
+          const progressCard = dlId ? document.getElementById(dlId) : null;
+          const summaryText = dlId ? document.getElementById(`${dlId}-summary-text`) : null;
+          const stagesContainer = dlId ? document.getElementById(`${dlId}-stages`) : null;
+          const cancelBtn = dlId ? document.getElementById(`${dlId}-cancel`) : null;
+          const mainBar = dlId ? document.getElementById(`${dlId}-main-bar`) : null;
+          renderInstallTerminal({ taskId: dlId, stage: 'error', detail: errorMessage, statusElement: summaryText, mainBar, stagesContainer, cancelButton: cancelBtn });
+          showToast(`整合包安装失败: ${errorMessage}`, 'error', 8000);
+          setTimeout(() => {
+            progressCard?.remove();
+            if (dlId) closeDownloadDetail(dlId);
+            if (dlActiveList && !dlActiveList.querySelector('.dl-progress-card')) {
+              dlActiveList.innerHTML = `
+                <h2 class="dl-section-title">⏳ 活跃下载</h2>
+                <div class="dl-active-empty">暂无下载任务</div>
+              `;
+            }
+          }, 8000);
           btn.textContent = '❌ 失败';
           setTimeout(() => { btn.textContent = '安装'; btn.disabled = false; }, 2000);
         }

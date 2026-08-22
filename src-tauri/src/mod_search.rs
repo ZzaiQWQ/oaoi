@@ -1,6 +1,7 @@
 use crate::instance::cf_api_key;
 use crate::modcn::{contains_chinese, load_modcn, search_modcn_fuzzy};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Serialize, Clone)]
 pub struct OnlineModResult {
@@ -20,6 +21,7 @@ const MAX_CN_SEARCH_TERMS: usize = 12;
 const MAX_PARALLEL_SEARCH_TERMS: usize = 3;
 const MAX_ONLINE_RESULTS: usize = 120;
 const RELAX_RESULT_TARGET: usize = 24;
+static ONLINE_SEARCH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 搜索在线 Mod/材质包/光影包（Modrinth + CurseForge + MCIM 中文翻译）
 #[tauri::command]
@@ -30,11 +32,13 @@ pub async fn search_online_mods(
     project_type: Option<String>,
 ) -> Result<Vec<OnlineModResult>, String> {
     let ptype = project_type.unwrap_or_else(|| "mod".to_string());
+    let generation = ONLINE_SEARCH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let result: Result<Vec<OnlineModResult>, String> = tokio::task::spawn_blocking(move || {
-        search_online_mods_blocking(&query, &mc_version, &loader, &ptype)
+        search_online_mods_blocking(&query, &mc_version, &loader, &ptype, generation)
     })
     .await
     .map_err(|e| format!("任务失败: {}", e))?;
+    ensure_search_is_current(generation)?;
     result
 }
 
@@ -43,7 +47,9 @@ fn search_online_mods_blocking(
     mc_version: &str,
     loader: &str,
     project_type: &str,
+    generation: u64,
 ) -> Result<Vec<OnlineModResult>, String> {
+    ensure_search_is_current(generation)?;
     let http = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -69,10 +75,15 @@ fn search_online_mods_blocking(
     );
 
     let mut all: Vec<OnlineModResult> = Vec::new();
-    let mut batches: Vec<(usize, Vec<OnlineModResult>, Vec<OnlineModResult>)> = Vec::new();
+    let mut batches: Vec<(
+        usize,
+        Result<Vec<OnlineModResult>, String>,
+        Result<Vec<OnlineModResult>, String>,
+    )> = Vec::new();
 
     // 分批并发搜索，避免中文模糊词一次性把 Modrinth/CurseForge 打爆。
     for (chunk_idx, chunk) in search_terms.chunks(MAX_PARALLEL_SEARCH_TERMS).enumerate() {
+        ensure_search_is_current(generation)?;
         let base_idx = chunk_idx * MAX_PARALLEL_SEARCH_TERMS;
         std::thread::scope(|s| {
             let handles: Vec<_> = chunk
@@ -87,6 +98,7 @@ fn search_online_mods_blocking(
                             mc_version,
                             loader,
                             project_type,
+                            generation,
                         );
                         let cf = search_curseforge_with_fallbacks(
                             &http,
@@ -94,29 +106,57 @@ fn search_online_mods_blocking(
                             mc_version,
                             loader,
                             project_type,
+                            generation,
                         );
                         (base_idx + offset, mr, cf)
                     })
                 })
                 .collect();
 
-            for h in handles {
-                if let Ok(batch) = h.join() {
-                    batches.push(batch);
+            for (offset, handle) in handles.into_iter().enumerate() {
+                match handle.join() {
+                    Ok(batch) => batches.push(batch),
+                    Err(_) => batches.push((
+                        base_idx + offset,
+                        Err("搜索线程异常退出".to_string()),
+                        Err("搜索线程异常退出".to_string()),
+                    )),
                 }
             }
         });
+        ensure_search_is_current(generation)?;
     }
 
     // 搜索词按优先级合并：原始词优先，中文词库命中的英文名继续补全。
     batches.sort_by_key(|(idx, _, _)| *idx);
+    let mut successful_sources = 0usize;
+    let mut search_errors = Vec::new();
     for (_, mr_res, cf_res) in batches {
-        for r in mr_res {
-            merge_result(&mut all, r);
+        match mr_res {
+            Ok(results) => {
+                successful_sources += 1;
+                for result in results {
+                    merge_result(&mut all, result);
+                }
+            }
+            Err(error) => search_errors.push(format!("Modrinth: {}", error)),
         }
-        for r in cf_res {
-            merge_result(&mut all, r);
+        match cf_res {
+            Ok(results) => {
+                successful_sources += 1;
+                for result in results {
+                    merge_result(&mut all, result);
+                }
+            }
+            Err(error) => search_errors.push(format!("CurseForge: {}", error)),
         }
+    }
+    ensure_search_is_current(generation)?;
+    if successful_sources == 0 {
+        return Err(format!("在线搜索失败: {}", search_errors.join("; ")));
+    }
+    if !search_errors.is_empty() {
+        eprintln!("[search] 部分搜索源失败: {}", search_errors.join("; "));
     }
 
     // 用 modcn 数据填充中文名
@@ -176,7 +216,16 @@ fn search_online_mods_blocking(
         all.truncate(MAX_ONLINE_RESULTS);
     }
     eprintln!("[search] 返回 {} 个结果 (type={})", all.len(), project_type);
+    ensure_search_is_current(generation)?;
     Ok(all)
+}
+
+fn ensure_search_is_current(generation: u64) -> Result<(), String> {
+    if ONLINE_SEARCH_GENERATION.load(Ordering::SeqCst) == generation {
+        Ok(())
+    } else {
+        Err("搜索已被新请求替代".to_string())
+    }
 }
 
 fn build_search_terms(query: &str, fuzzy_matches: &[(String, String, i32)]) -> Vec<String> {
@@ -219,11 +268,6 @@ fn merge_result(all: &mut Vec<OnlineModResult>, incoming: OnlineModResult) {
 }
 
 fn is_same_result(a: &OnlineModResult, b: &OnlineModResult) -> bool {
-    let a_slug = a.slug.to_lowercase();
-    let b_slug = b.slug.to_lowercase();
-    if !a_slug.is_empty() && a_slug == b_slug {
-        return true;
-    }
     if !a.project_id.is_empty() && a.project_id == b.project_id {
         return true;
     }
@@ -233,7 +277,42 @@ fn is_same_result(a: &OnlineModResult, b: &OnlineModResult) -> bool {
     if !a.cf_url.is_empty() && a.cf_url == b.cf_url {
         return true;
     }
-    false
+
+    let a_slug = a.slug.trim().to_lowercase();
+    let b_slug = b.slug.trim().to_lowercase();
+    if a_slug.is_empty() || a_slug != b_slug {
+        return false;
+    }
+    let a_platform = result_platform(a);
+    let b_platform = result_platform(b);
+    if a_platform.is_some() && a_platform == b_platform {
+        return true;
+    }
+
+    // 跨平台 slug 可能撞名，必须同时核对标题和作者。
+    let a_title = normalize_identity_text(&a.title);
+    let b_title = normalize_identity_text(&b.title);
+    let a_author = normalize_identity_text(&a.author);
+    let b_author = normalize_identity_text(&b.author);
+    !a_title.is_empty() && a_title == b_title && !a_author.is_empty() && a_author == b_author
+}
+
+fn result_platform(result: &OnlineModResult) -> Option<&'static str> {
+    if result.project_id.starts_with("cf_") || !result.cf_url.is_empty() {
+        Some("curseforge")
+    } else if !result.project_id.is_empty() || !result.mr_url.is_empty() {
+        Some("modrinth")
+    } else {
+        None
+    }
+}
+
+fn normalize_identity_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn merge_result_fields(existing: &mut OnlineModResult, incoming: OnlineModResult) {
@@ -272,30 +351,45 @@ fn search_modrinth_with_fallbacks(
     mc_version: &str,
     loader: &str,
     project_type: &str,
-) -> Vec<OnlineModResult> {
+    generation: u64,
+) -> Result<Vec<OnlineModResult>, String> {
     let mut results = Vec::new();
-    append_results(
+    let mut succeeded = false;
+    let mut errors = Vec::new();
+    ensure_search_is_current(generation)?;
+    append_search_attempt(
         &mut results,
-        run_modrinth_search(http, query, mc_version, loader, project_type),
+        &mut succeeded,
+        &mut errors,
+        "精确条件",
+        do_modrinth_search(http, query, mc_version, loader, project_type),
     );
 
     let can_relax_loader = project_type == "mod" && !loader.is_empty() && loader != "vanilla";
     if can_relax_loader && should_relax_results(results.len(), query) {
-        append_results(
+        ensure_search_is_current(generation)?;
+        append_search_attempt(
             &mut results,
-            run_modrinth_search(http, query, mc_version, "", project_type),
+            &mut succeeded,
+            &mut errors,
+            "忽略 Loader",
+            do_modrinth_search(http, query, mc_version, "", project_type),
         );
     }
 
     if project_type == "mod" && !mc_version.is_empty() && should_relax_results(results.len(), query)
     {
-        append_results(
+        ensure_search_is_current(generation)?;
+        append_search_attempt(
             &mut results,
-            run_modrinth_search(http, query, "", "", project_type),
+            &mut succeeded,
+            &mut errors,
+            "忽略版本与 Loader",
+            do_modrinth_search(http, query, "", "", project_type),
         );
     }
 
-    results
+    finish_search_attempts("Modrinth", results, succeeded, errors)
 }
 
 fn search_curseforge_with_fallbacks(
@@ -304,30 +398,45 @@ fn search_curseforge_with_fallbacks(
     mc_version: &str,
     loader: &str,
     project_type: &str,
-) -> Vec<OnlineModResult> {
+    generation: u64,
+) -> Result<Vec<OnlineModResult>, String> {
     let mut results = Vec::new();
-    append_results(
+    let mut succeeded = false;
+    let mut errors = Vec::new();
+    ensure_search_is_current(generation)?;
+    append_search_attempt(
         &mut results,
-        run_curseforge_search(http, query, mc_version, loader, project_type),
+        &mut succeeded,
+        &mut errors,
+        "精确条件",
+        do_curseforge_search(http, query, mc_version, loader, project_type),
     );
 
     let can_relax_loader = project_type == "mod" && !loader.is_empty() && loader != "vanilla";
     if can_relax_loader && should_relax_results(results.len(), query) {
-        append_results(
+        ensure_search_is_current(generation)?;
+        append_search_attempt(
             &mut results,
-            run_curseforge_search(http, query, mc_version, "", project_type),
+            &mut succeeded,
+            &mut errors,
+            "忽略 Loader",
+            do_curseforge_search(http, query, mc_version, "", project_type),
         );
     }
 
     if project_type == "mod" && !mc_version.is_empty() && should_relax_results(results.len(), query)
     {
-        append_results(
+        ensure_search_is_current(generation)?;
+        append_search_attempt(
             &mut results,
-            run_curseforge_search(http, query, "", "", project_type),
+            &mut succeeded,
+            &mut errors,
+            "忽略版本与 Loader",
+            do_curseforge_search(http, query, "", "", project_type),
         );
     }
 
-    results
+    finish_search_attempts("CurseForge", results, succeeded, errors)
 }
 
 fn append_results(all: &mut Vec<OnlineModResult>, incoming: Vec<OnlineModResult>) {
@@ -336,35 +445,35 @@ fn append_results(all: &mut Vec<OnlineModResult>, incoming: Vec<OnlineModResult>
     }
 }
 
-fn run_modrinth_search(
-    http: &reqwest::blocking::Client,
-    query: &str,
-    mc_version: &str,
-    loader: &str,
-    project_type: &str,
-) -> Vec<OnlineModResult> {
-    match do_modrinth_search(http, query, mc_version, loader, project_type) {
-        Ok(results) => results,
-        Err(err) => {
-            eprintln!("[search] Modrinth 搜索失败: {}", err);
-            Vec::new()
+fn append_search_attempt(
+    results: &mut Vec<OnlineModResult>,
+    succeeded: &mut bool,
+    errors: &mut Vec<String>,
+    label: &str,
+    attempt: Result<Vec<OnlineModResult>, String>,
+) {
+    match attempt {
+        Ok(incoming) => {
+            *succeeded = true;
+            append_results(results, incoming);
         }
+        Err(error) => errors.push(format!("{}: {}", label, error)),
     }
 }
 
-fn run_curseforge_search(
-    http: &reqwest::blocking::Client,
-    query: &str,
-    mc_version: &str,
-    loader: &str,
-    project_type: &str,
-) -> Vec<OnlineModResult> {
-    match do_curseforge_search(http, query, mc_version, loader, project_type) {
-        Ok(results) => results,
-        Err(err) => {
-            eprintln!("[search] CurseForge 搜索失败: {}", err);
-            Vec::new()
+fn finish_search_attempts(
+    source: &str,
+    results: Vec<OnlineModResult>,
+    succeeded: bool,
+    errors: Vec<String>,
+) -> Result<Vec<OnlineModResult>, String> {
+    if succeeded {
+        if !errors.is_empty() {
+            eprintln!("[search] {} 部分查询失败: {}", source, errors.join("; "));
         }
+        Ok(results)
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -514,4 +623,61 @@ fn do_curseforge_search(
         }
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ensure_search_is_current, finish_search_attempts, is_same_result, OnlineModResult,
+        ONLINE_SEARCH_GENERATION,
+    };
+    use std::sync::atomic::Ordering;
+
+    fn result(project_id: &str, slug: &str, title: &str, author: &str) -> OnlineModResult {
+        let curseforge = project_id.starts_with("cf_");
+        OnlineModResult {
+            slug: slug.to_string(),
+            title: title.to_string(),
+            cn_title: String::new(),
+            description: String::new(),
+            author: author.to_string(),
+            downloads: 0,
+            icon_url: String::new(),
+            project_id: project_id.to_string(),
+            mr_url: (!curseforge)
+                .then(|| format!("https://modrinth.com/mod/{}", slug))
+                .unwrap_or_default(),
+            cf_url: curseforge
+                .then(|| format!("https://www.curseforge.com/minecraft/mc-mods/{}", slug))
+                .unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn 跨平台同_slug_必须同时匹配标题和作者() {
+        let mr = result("mr_project", "same-slug", "Same Mod", "Author A");
+        let same = result("cf_1", "same-slug", "Same Mod", "Author A");
+        let different = result("cf_2", "same-slug", "Another Mod", "Author B");
+        assert!(is_same_result(&mr, &same));
+        assert!(!is_same_result(&mr, &different));
+    }
+
+    #[test]
+    fn 网络失败不能伪装成空搜索结果() {
+        let failed =
+            finish_search_attempts("Modrinth", Vec::new(), false, vec!["连接超时".to_string()]);
+        assert!(failed.err().unwrap().contains("连接超时"));
+
+        let empty_success = finish_search_attempts("Modrinth", Vec::new(), true, Vec::new());
+        assert!(empty_success.unwrap().is_empty());
+    }
+
+    #[test]
+    fn 新搜索会使旧搜索序号失效() {
+        let old = ONLINE_SEARCH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        assert!(ensure_search_is_current(old).is_ok());
+        let current = ONLINE_SEARCH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        assert!(ensure_search_is_current(old).is_err());
+        assert!(ensure_search_is_current(current).is_ok());
+    }
 }
